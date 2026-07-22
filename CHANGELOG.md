@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented here.
 
+## Unreleased
+
+### Removed
+
+- Removed the obsolete `open-project.cmd` helper. The numbered Windows launcher now covers all supported workflows.
+
 ## 0.1.0 – 2026-07-22
 
 Initial public release.
