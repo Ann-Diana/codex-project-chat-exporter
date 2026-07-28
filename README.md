@@ -1,5 +1,7 @@
 # Codex Project Chat Exporter
 
+![Stacked Codex chat windows being exported to Markdown, HTML, and JSON formats](docs/assets/codex-project-chat-exporter-hero.png)
+
 Bulk-export local Codex session history into a portable, project-aware archive.
 
 The exporter scans Codex session files on disk, groups them by their stored project/work folder, and writes:
