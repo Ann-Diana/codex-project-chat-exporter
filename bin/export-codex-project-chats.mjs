@@ -739,7 +739,14 @@ function printDiagnostics(parsedEntries, metas, locations) {
 }
 
 function writeLine(stream, text) { stream.write(`${text}\n`); }
-function mdCell(value) { return String(value ?? "").replace(/\|/g, "\\|").replace(/\r?\n/g, " "); }
+function mdCell(value) {
+  return String(value ?? "")
+    .replaceAll("\\", "\\\\")
+    .replaceAll("|", "\\|")
+    .replaceAll("\r\n", " ")
+    .replaceAll("\r", " ")
+    .replaceAll("\n", " ");
+}
 function mdLink(relPath) { const link = toPosixPath(relPath); return `[${mdCell(path.posix.basename(link))}](${encodeURI(link)})`; }
 function toPosixPath(value) { return String(value || "").replace(/\\/g, "/"); }
 function htmlEscape(value) { return String(value ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"); }
