@@ -2,10 +2,13 @@
   "name": "codex-project-chat-exporter",
   "version": "0.1.0",
   "private": true,
-  "description": "Bulk, project-aware local archive exporter for Codex session history.",
+  "description": "IDE-agnostic, project-aware local bulk export for active and archived Codex sessions.",
   "type": "module",
   "scripts": {
-    "test": "node ./tests/exporter-helpers.test.mjs && node ./tests/exporter-integration.test.mjs"
+    "test": "node ./tests/exporter-helpers.test.mjs && node ./tests/event-classification.test.mjs && node ./tests/exporter-integration.test.mjs && node ./integrations/vscode/tests/extension-adapter.test.mjs",
+    "test:cli": "node ./tests/exporter-helpers.test.mjs && node ./tests/event-classification.test.mjs && node ./tests/exporter-integration.test.mjs",
+    "test:vscode": "node ./integrations/vscode/tests/extension-adapter.test.mjs",
+    "package:vscode": "node ./integrations/vscode/scripts/build-vsix.mjs"
   },
   "engines": {
     "node": ">=18"

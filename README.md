@@ -2,18 +2,35 @@
 
 ![Stacked Codex chat windows being exported to Markdown, HTML, and JSON formats](docs/assets/codex-project-chat-exporter-hero.png)
 
-Bulk-export local Codex session history into a portable, project-aware archive.
+Export local active and archived Codex sessions into a portable, project-aware export folder for review, preservation, migration preparation, or privacy-reviewed project handoff.
 
-The exporter scans Codex session files on disk, groups them by their stored project/work folder, and writes:
+Codex's currently observed experimental `/export` exports one conversation. Codex Project Chat Exporter instead creates a project-aware local bulk export of detected active and archived sessions with an index, manifest, and optional verified raw snapshots. The two functions are complementary, and the native experiment may evolve.
 
-- readable Markdown transcripts
-- a local HTML index with metadata filtering
-- a machine-readable `manifest.json`
-- optional copies of the original `rollout-*.jsonl` files
-
-It is designed primarily for **backup, computer moves, project handoff, and long-term local archiving** – not as a live Codex replacement or a full-text search platform.
+- Sessions are grouped by their stored project/work directory.
+- Three profiles cover complete exports, reading views without Raw, and verified source snapshots without transcripts.
+- Processing stays local. The application sends no telemetry and makes no network requests.
+- It does not import sessions back into Codex.
 
 > Unofficial project. Not affiliated with, endorsed by, or supported by OpenAI.
+
+## What it exports
+
+- Active sessions from `~/.codex/sessions`.
+- Archived sessions from `~/.codex/archived_sessions`.
+- All detected sessions or only one matching project/work folder.
+- Classified Markdown reading views for direct user turns, assistant responses, subagent inputs, runtime contexts, and uncertain user-role records.
+- A filterable local HTML index and a machine-readable manifest.
+- Optional verified raw JSONL snapshots that preserve the exported source bytes unchanged.
+- Optional tool-call input and output in Markdown.
+- Short Windows-friendly paths by default, with a readable-path option.
+
+Codex Project Chat Exporter reads the project association stored in each session's `cwd`; the original project folder does not need to remain present.
+
+## Why it is useful
+
+Codex's local JSONL event logs are complete source material but inconvenient to browse directly. This exporter creates a static local folder that is easier to inspect, retain, move to another computer, or hand over with a project after a privacy review.
+
+It is migration preparation, not a tested restore system. Raw snapshots and portable manifest metadata preserve material for possible future tooling, but no Codex import or roundtrip restore is implemented.
 
 ## What it looks like
 
@@ -21,146 +38,27 @@ It is designed primarily for **backup, computer moves, project handoff, and long
 
 <p>
   <img src="docs/screenshots/launcher-demo.png" alt="Interactive Windows launcher" width="49%">
-  <img src="docs/screenshots/folder-structure-demo.png" alt="Generated archive folder structure" width="49%">
+  <img src="docs/screenshots/folder-structure-demo.png" alt="Generated export folder structure" width="49%">
 </p>
 
 All screenshots contain synthetic demo data only.
 
-## Why this tool exists
+## Windows quick start
 
-Codex stores local session history in technical JSONL event logs. Those files are valuable, but they are awkward to review and easy to lose sight of when projects span many sessions or when a computer is replaced.
+1. Download and extract the project ZIP.
+2. Start `export-codex-project-chats.cmd`.
+3. Choose what to export and select a new empty destination folder.
 
-Codex Project Chat Exporter creates one self-contained archive across projects. It reads both active and archived local sessions by default and does not require the original project folders to still exist.
+If Windows blocks the launcher, see the [FAQ](FAQ.md#windows-blocks-the-cmd-launcher-does-it-need-administrator-rights).
 
-## Design focus
+The launcher and CLI do not require administrator rights. The CLI requires Node.js 18 or newer; the Windows launcher can also use one known bundled Codex Desktop Node runtime when available.
 
-This repository deliberately solves a narrower problem than the larger Codex session tools already available.
+## CLI quick start
 
-| Tool category | Strong at | This project differs by |
-| --- | --- | --- |
-| Single-session exporters | Precise export of one selected conversation | Bulk export across all detected projects and sessions |
-| Interactive viewers and TUIs | Rich browsing, replay, filtering, and detailed event inspection | Static output that remains usable without the tool |
-| Multi-agent search platforms | Search across Codex, Claude, Cursor, and other agents | Codex-specific migration archive with optional original JSONL copies |
-| Obsidian integrations | Writing session notes directly into a vault | Standalone folder archive with no knowledge-base dependency |
-
-The intended result is not the most feature-rich session browser. It is a **small, reviewable migration and archive utility** with a Windows-friendly launcher.
-
-## Features
-
-- Scans `~/.codex/sessions` and `~/.codex/archived_sessions` by default.
-- Groups sessions by the stored Codex working directory (`cwd`).
-- Lists either unique project/work folders with active/archived counts or every individual session.
-- Exports all sessions or only one matching project/work folder.
-- Produces readable Markdown containing user and assistant messages.
-- Optionally includes tool calls and tool outputs.
-- Copies complete raw JSONL files unless `--no-raw` is used.
-- Creates a local `index.html` filterable by project, title, date, model, and active/archived status.
-- Uses a thread title from `session_index.jsonl` when available and otherwise derives a short fallback from the first user message.
-- Recovers a session ID from standard `rollout-...-<id>.jsonl` filenames when an archived file has incomplete or malformed `session_meta`.
-- Provides a diagnostic view for files with missing `cwd`, missing titles, invalid JSON lines, or contradictory IDs.
-- Uses short output paths by default to reduce Windows path-length problems.
-- Refuses to write private exports into the tool/repository folder unless explicitly overridden.
-- Runs locally and makes no network requests.
-- Has no runtime dependencies beyond Node.js.
-
-## Boundaries
-
-This project does **not**:
-
-- export cloud-only Codex tasks that have no local session file
-- export ordinary ChatGPT web conversations
-- import sessions back into Codex
-- recreate Codex UI state, project registration, or sidebar history
-- provide transcript full-text search inside `index.html`
-- extract image attachments into separate files
-- guarantee complete removal of secrets or personal data
-
-The generated HTML index filters session metadata. To search transcript content, use your editor, operating-system search, or another dedicated session-search tool across the exported Markdown files.
-
-Codex's local file format is internal and may change. This exporter is a best-effort parser for the currently observed `rollout-*.jsonl` structure.
-
-## Requirements
-
-- Node.js 18 or newer
-- Windows, macOS, or Linux for the Node.js script
-- Windows users may use the included `.cmd` launcher
-
-No package installation is required.
-
-## Quick start on Windows
-
-The exporter itself does not require administrator rights.
-
-When the repository was downloaded as a ZIP, Windows may mark the archive and extracted script files as originating from the internet. On systems with Smart App Control or Attachment Manager enforcement, this can block the `.cmd` launcher before it starts.
-
-Preferred fix:
-
-1. Right-click the downloaded ZIP and select **Properties**.
-2. Select **Unblock** / **Zulassen**, then **Apply**.
-3. Extract the ZIP again.
-
-If the folder has already been extracted, open PowerShell in its parent folder and run:
-
-```powershell
-Get-ChildItem .\codex-project-chat-exporter -Recurse -File | Unblock-File
-```
-
-Do not use **Run as administrator** as the normal workaround. The launcher only needs access to your own Codex files and the selected output folder.
-
-Afterwards, double-click:
-
-```text
-export-codex-project-chats.cmd
-```
-
-The launcher opens a numbered menu. No command needs to be typed into or added to the `.cmd` file. Available actions include:
-
-1. export all detected sessions
-2. export one project/work folder
-3. list detected projects
-4. list every detected session
-5. diagnose active and archived session detection
-
-The export actions then ask whether raw JSONL files should be omitted and where the archive should be written.
-
-A short output path is recommended, for example:
-
-```text
-C:\cx\codex-export
-```
-
-## Command line
-
-List unique project/work folders and active/archived session counts:
-
-```powershell
-node .\bin\export-codex-project-chats.mjs --list
-```
-
-Sessions with the same stored working directory are grouped on one project line, even when one is active and another is archived. List every session separately, including title, storage status, ID, and source filename:
-
-```powershell
-node .\bin\export-codex-project-chats.mjs --list-sessions
-```
-
-Diagnose scan paths, file counts, incomplete metadata, and parser warnings:
-
-```powershell
-node .\bin\export-codex-project-chats.mjs --diagnose
-```
-
-Windows users can select the equivalent **List every detected session** or **Diagnose** entries directly from the launcher menu.
-
-Export all local sessions:
+Export all detected local sessions:
 
 ```powershell
 node .\bin\export-codex-project-chats.mjs --all --out C:\cx\codex-export
-```
-
-Export all sessions without raw JSONL copies:
-
-```powershell
-node .\bin\export-codex-project-chats.mjs --all --no-raw --out C:\cx\codex-export-md
 ```
 
 Export one project/work folder:
@@ -169,33 +67,25 @@ Export one project/work folder:
 node .\bin\export-codex-project-chats.mjs --project my-project --out C:\cx\my-project-export
 ```
 
-Use another local Codex profile:
+Choose one profile. The legacy `--no-raw` switch remains shorthand for `readable` when no explicit profile is supplied:
 
-```powershell
-node .\bin\export-codex-project-chats.mjs --codex-home "C:\Users\<you>\.codex-local" --all --out C:\cx\local-profile-export
-```
+- **Complete** (`--profile complete`, default): verified `raw/`, Markdown transcripts in `md/`, `index.html`, `index.md`, `manifest.json`, and `README.txt`.
+- **Readable** (`--profile readable`): Markdown transcripts and both indexes plus `manifest.json` and `README.txt`, without new Raw snapshots.
+- **Source snapshots** (`--profile source-snapshots`): verified `raw/`, a reduced `index.html`, `manifest.json`, and `README.txt`, without Markdown transcripts or `index.md`.
 
-Exclude archived sessions:
-
-```powershell
-node .\bin\export-codex-project-chats.mjs --all --no-archived --out C:\cx\active-only
-```
-
-Include tool calls and tool outputs in Markdown:
-
-```powershell
-node .\bin\export-codex-project-chats.mjs --all --include-tools --out C:\cx\codex-export-with-tools
-```
-
-Show all options:
+Show all list, diagnosis, profile, tool, path, and raw-output options:
 
 ```powershell
 node .\bin\export-codex-project-chats.mjs --help
 ```
 
+For local performance diagnosis without message text or full paths, add `--performance-profile C:\cx\export-profile.json`. This diagnostic performs additional analysis, can substantially slow the export, and is not intended for normal exports.
+
+The Node.js script runs on Windows, macOS, and Linux. The included `.cmd` launcher is Windows-only.
+
 ## Output structure
 
-Default short-path export:
+The default `complete` profile creates:
 
 ```text
 cx-YYYYMMDD-HHMMSS\
@@ -204,61 +94,70 @@ cx-YYYYMMDD-HHMMSS\
 ├─ manifest.json
 ├─ README.txt
 ├─ md\
-│  ├─ p001-project-a\
-│  │  ├─ s0001.md
-│  │  └─ s0002.md
-│  └─ p002-project-b\
-│     └─ s0003.md
+│  ├─ p001-project-a\s0001.md
+│  └─ p002-project-b\s0002.md
 └─ raw\
-   ├─ p001-project-a\
-   │  ├─ s0001.jsonl
-   │  └─ s0002.jsonl
-   └─ p002-project-b\
-      └─ s0003.jsonl
+   ├─ p001-project-a\s0001.jsonl
+   └─ p002-project-b\s0002.jsonl
 ```
 
-`raw/` is omitted when `--no-raw` is used on a clean output folder.
+`raw/` is omitted when raw export is disabled and the destination is new and empty. Reusing an output folder does not delete older files, so use a new empty destination for a clean result.
 
-Use `--readable-paths` for longer filenames based on timestamps and titles. Short paths are the safer default for copying and unzipping archives on Windows.
+Future Word, PDF, and extracted-attachment formats are not implemented or selectable.
 
-## Privacy and redaction
+Readable-path exports use `markdown/` and longer timestamp/title-based filenames. Short paths remain the safer default for copying and unzipping on Windows.
 
-All processing is local. The exporter does not call OpenAI APIs, request a ChatGPT data export, upload files, or send telemetry.
+When included, raw JSONL is the canonical byte-preserving representation. Markdown and HTML are classified, derived reading views. See the [archive format version 1 specification](docs/archive-format-v1.md) for manifest fields, snapshot integrity, event classification, and import limits.
 
-Markdown output applies a small set of best-effort redaction patterns for common token-shaped secrets and long base64-like values. This is only a safety aid. It does not make an export safe to publish.
+## Privacy
 
-Even redacted Markdown and index files may still contain:
+- All processing is local.
+- The application itself sends no telemetry and makes no network requests.
+- Markdown masking covers only some common token-shaped secrets and long base64-like values; it is best effort, not complete redaction.
+- Markdown, raw JSONL, HTML, and `manifest.json` can contain confidential chats, local paths, names, runtime contexts, tool output, source code, and attachment data or references.
+- Raw JSONL and the manifest are not share-safe by default.
+- Review every generated file manually before sharing it.
 
-- prompts and responses
-- project names and local paths
-- names, email addresses, IP addresses, or customer data
-- terminal and tool output
-- proprietary source code or internal instructions
+See [SECURITY.md](SECURITY.md) for the security boundary.
 
-Raw JSONL copies are unchanged and should be treated as sensitive. Review every generated file before sharing it. See [SECURITY.md](SECURITY.md).
+## Limits
 
-## Existing output folders
+The exporter does not:
 
-The exporter does not delete files from an existing output folder. Reusing a folder can therefore leave old files behind – including a previous `raw/` directory.
+- export cloud-only Codex tasks without a local session file;
+- export ordinary ChatGPT web conversations;
+- import sessions or rebuild Codex UI state, indexes, project registration, or sidebar history;
+- provide transcript full-text search inside `index.html`;
+- extract image attachments into separate files;
+- guarantee complete secret or personal-data removal;
+- guarantee compatibility with future changes to Codex's internal JSONL format.
 
-For a clean archive, choose a new output folder or delete the old one before running the exporter.
+The HTML index filters metadata such as project, title, date, model, and active/archived status. Search transcript content in the Markdown files with an editor or a dedicated search tool.
 
-## Testing
+## Experimental VS Code extension
 
-Run:
+The optional Visual Studio Code extension calls the same export core as the CLI. Its primary command first chooses **Current Workspace** or **All Sessions**, then **Complete export**, **Readable export**, or **Verified source snapshots**:
 
-```powershell
-npm test
-```
+- `Codex Export: Export…`
+- `Codex Export: Open Latest Export`
+- `Codex Export: Open Export Folder`
 
-The test suite covers helper functions and an end-to-end export with active and archived synthetic sessions.
+The candidate is tested on Windows in local VS Code Desktop `file:` workspaces. Export commands reject web, Remote SSH, WSL, Dev Container, and other non-local extension hosts or non-`file:` workspaces. Other local desktop platforms are not explicitly blocked but remain unverified.
 
-## Release status
+Installation, settings, limitations, and packaged-candidate checks are documented in the [VS Code extension README](integrations/vscode/README.md) and [packaged VSIX test plan](integrations/vscode/PACKAGED_TEST_PLAN.md).
+
+## More information
+
+- [FAQ](FAQ.md) — launcher troubleshooting, session discovery, privacy, and operational details.
+- [Archive format v1](docs/archive-format-v1.md) — canonical data, manifest, snapshots, classification, and import limits.
+- [Packaged VSIX test plan](integrations/vscode/PACKAGED_TEST_PLAN.md) — installation and manual Extension Host checks.
+- [Tests](tests) — synthetic helper, classification, integration, and adapter coverage.
+- [Changelog](CHANGELOG.md) — release history.
+
+Run the complete automated suite with `npm test`. Source-level adapter tests do not replace installing and exercising the built VSIX in a real Extension Host.
+
+## Version and license
 
 Current version: `0.1.0`
 
-See [CHANGELOG.md](CHANGELOG.md).
-
-## License
-
-MIT – see [LICENSE](LICENSE).
+MIT — see [LICENSE](LICENSE).

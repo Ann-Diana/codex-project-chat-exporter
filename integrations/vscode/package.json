@@ -1,0 +1,101 @@
+{
+  "name": "codex-project-chat-exporter-vscode",
+  "displayName": "Codex Project Chat Exporter",
+  "description": "Experimental local Visual Studio Code interface for project-aware export of active and archived Codex sessions.",
+  "version": "0.1.1",
+  "publisher": "ann-diana",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Ann-Diana/codex-project-chat-exporter.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Ann-Diana/codex-project-chat-exporter/issues"
+  },
+  "homepage": "https://github.com/Ann-Diana/codex-project-chat-exporter#readme",
+  "engines": {
+    "vscode": "^1.92.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "keywords": [
+    "Codex",
+    "Codex export",
+    "chat export",
+    "local",
+    "sessions",
+    "JSONL",
+    "Markdown",
+    "project-aware"
+  ],
+  "main": "./src/extension.cjs",
+  "extensionKind": [
+    "ui"
+  ],
+  "activationEvents": [
+    "onCommand:codexArchive.export",
+    "onCommand:codexArchive.exportCurrentWorkspace",
+    "onCommand:codexArchive.exportAllSessions",
+    "onCommand:codexArchive.openLatestArchive",
+    "onCommand:codexArchive.openExportFolder"
+  ],
+  "capabilities": {
+    "virtualWorkspaces": false,
+    "untrustedWorkspaces": {
+      "supported": false
+    }
+  },
+  "contributes": {
+    "commands": [
+      {
+        "command": "codexArchive.export",
+        "title": "Codex Export: Export…"
+      },
+      {
+        "command": "codexArchive.openLatestArchive",
+        "title": "Codex Export: Open Latest Export"
+      },
+      {
+        "command": "codexArchive.openExportFolder",
+        "title": "Codex Export: Open Export Folder"
+      }
+    ],
+    "configuration": {
+      "title": "Codex Project Chat Exporter",
+      "properties": {
+        "codexProjectChatExporter.outputDirectory": {
+          "type": "string",
+          "default": "",
+          "description": "Absolute local folder where Codex exports are written. If empty, the extension asks on first export and remembers the selected folder."
+        },
+        "codexProjectChatExporter.codexHome": {
+          "type": "string",
+          "default": "",
+          "description": "Optional absolute local Codex home folder. Leave empty to use CODEX_HOME or the default local .codex folder."
+        },
+        "codexProjectChatExporter.pathStyle": {
+          "type": "string",
+          "enum": ["short", "readable"],
+          "default": "short",
+          "description": "Use short Windows-friendly export paths or longer human-readable file names."
+        },
+        "codexProjectChatExporter.includeTools": {
+          "type": "boolean",
+          "default": false,
+          "description": "Include potentially sensitive tool call input and output in the derived Markdown reading views."
+        },
+        "codexProjectChatExporter.diagnosticOutput": {
+          "type": "boolean",
+          "default": false,
+          "description": "Write detailed content-free timing diagnostics to the output channel for a troubleshooting run. Leave disabled for normal exports."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "test": "node ./tests/extension-adapter.test.mjs",
+    "package:vsix": "node ./scripts/build-vsix.mjs"
+  },
+  "devDependencies": {}
+}
