@@ -16,6 +16,8 @@ const codexHome = path.join(temp, ".codex");
 const activeDir = path.join(codexHome, "sessions", "2026", "07", "20");
 const archivedDir = path.join(codexHome, "archived_sessions");
 const outputDir = path.join(temp, "output");
+const dangerousTitle = "Escaping plain | one|two \\ slash\\\\ before\\|pipe \\\\|combo C:\\Temp\\file already\\|escaped Unicode π";
+const dangerousProject = "/home/demo/projects/beta\rbare\nline\r\nend";
 
 await fs.mkdir(activeDir, { recursive: true });
 await fs.mkdir(archivedDir, { recursive: true });
@@ -49,8 +51,16 @@ await fs.writeFile(path.join(activeDir, "rollout-active.jsonl"), jsonl([
   { type: "response_item", timestamp: "2026-07-20T10:01:02.000Z", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "Continued." }] } },
 ]));
 
+await fs.writeFile(path.join(activeDir, "rollout-empty-project.jsonl"), jsonl([
+  { type: "session_meta", timestamp: "2026-07-19T10:00:00.000Z", payload: { id: "session-empty-project", timestamp: "2026-07-19T10:00:00.000Z", source: "vscode", thread_source: "user" } },
+  { type: "response_item", timestamp: "2026-07-19T10:00:00.500Z", payload: { type: "message", role: "user", content: [{ type: "input_text", text: dangerousTitle }], internal_chat_message_metadata_passthrough: { turn_id: "turn-empty-project" } } },
+  { type: "event_msg", timestamp: "2026-07-19T10:00:00.501Z", payload: { type: "user_message", message: dangerousTitle } },
+  { type: "event_msg", timestamp: "2026-07-19T10:00:01.000Z", payload: { type: "agent_message", message: "No project metadata." } },
+  { type: "response_item", timestamp: "2026-07-19T10:00:01.000Z", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "No project metadata." }] } },
+]));
+
 await fs.writeFile(path.join(archivedDir, "rollout-archived.jsonl"), jsonl([
-  { type: "session_meta", timestamp: "2026-06-01T08:00:00.000Z", payload: { id: "session-archived", cwd: "/home/demo/projects/beta", timestamp: "2026-06-01T08:00:00.000Z", source: "vscode", thread_source: "user" } },
+  { type: "session_meta", timestamp: "2026-06-01T08:00:00.000Z", payload: { id: "session-archived", cwd: dangerousProject, timestamp: "2026-06-01T08:00:00.000Z", source: "vscode", thread_source: "user" } },
   { type: "response_item", timestamp: "2026-06-01T08:00:02.000Z", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "Investigate the archived build failure.\nDetails follow." }], internal_chat_message_metadata_passthrough: { turn_id: "turn-archived" } } },
   { type: "event_msg", timestamp: "2026-06-01T08:00:02.000Z", payload: { type: "user_message", message: "Investigate the archived build failure.\nDetails follow." } },
   { type: "event_msg", timestamp: "2026-06-01T08:00:03.000Z", payload: { type: "agent_message", message: "Investigating." } },
@@ -88,6 +98,7 @@ await fs.writeFile(path.join(archivedDir, `rollout-2026-05-10T08-00-00-${malform
 
 await fs.writeFile(path.join(codexHome, "session_index.jsonl"), [
   JSON.stringify({ id: "session-active", thread_name: "# AGENTS.md instructions", updated_at: "2026-07-20T10:01:02.000Z" }),
+  JSON.stringify({ id: "session-empty-project", thread_name: dangerousTitle, updated_at: "2026-07-19T10:00:01.000Z" }),
   JSON.stringify({ id: "session-archived-same-project", thread_name: "Release archive", updated_at: "2026-05-15T08:00:03.000Z" }),
   JSON.stringify({ id: malformedArchivedId, thread_name: "Release archive", updated_at: "2026-05-10T08:00:03.000Z" }),
   JSON.stringify({ id: "session-subagent", thread_name: "# AGENTS.md instructions", updated_at: "2026-07-21T10:00:02.000Z" }),
@@ -112,8 +123,8 @@ const manifest = JSON.parse(await fs.readFile(path.join(outputDir, "manifest.jso
 assert.equal(manifest.archive_format_version, 1);
 assert.equal(manifest.canonical_representation, "raw_jsonl");
 assert.equal("event_order" in manifest, false, "raw JSONL line order is canonical and must not be duplicated in the manifest");
-assert.equal(manifest.sessions.length, 6);
-assert.deepEqual(manifest.sessions.map((session) => session.storage).sort(), ["active", "active", "active", "archived", "archived", "archived"]);
+assert.equal(manifest.sessions.length, 7);
+assert.deepEqual(manifest.sessions.map((session) => session.storage).sort(), ["active", "active", "active", "active", "archived", "archived", "archived"]);
 const activeSession = manifest.sessions.find((session) => session.session_id === "session-active");
 assert.equal(activeSession.title, "Create the release archive and preserve the literal terms AGENTS.md and <environment_context>.");
 assert.equal(activeSession.title_source, "direct_user_message");
@@ -121,8 +132,9 @@ assert.equal(activeSession.indexed_title_status, "REJECTED_TECHNICAL_CONTEXT_MAT
 assert.equal(activeSession.user_messages, 2);
 assert.equal(activeSession.assistant_messages, 2);
 assert.equal(activeSession.automatic_runtime_contexts, 3);
+assert.equal(manifest.sessions.find((session) => session.session_id === "session-empty-project").title, dangerousTitle);
 assert.equal(manifest.sessions.find((session) => session.session_id === "session-archived").title, "Investigate the archived build failure.");
-assert.equal(manifest.sessions.find((session) => session.session_id === "session-archived").project_name, "beta");
+assert.equal(manifest.sessions.find((session) => session.session_id === "session-archived").project_name, "beta\rbare\nline\r\nend");
 assert.equal(manifest.sessions.find((session) => session.session_id === malformedArchivedId).project_name, "alpha");
 const subagentSession = manifest.sessions.find((session) => session.session_id === "session-subagent");
 assert.match(subagentSession.title, /^Subagent session session-/);
@@ -201,7 +213,7 @@ const apiProfile = JSON.parse(apiProfileText);
 assert.equal(apiProfile.performance_profile_version, 1);
 assert.equal(apiProfile.status, "COMPLETED");
 assert.equal(apiProfile.raw_enabled, false);
-assert.equal(apiProfile.counts.scanned_sessions, 6);
+assert.equal(apiProfile.counts.scanned_sessions, 7);
 assert.equal(apiProfile.counts.exported_sessions, 5);
 assert.equal(apiProfile.attachments.embedded_count, 2);
 assert.equal(apiProfile.attachments.embedded_bytes, 17);
@@ -216,6 +228,7 @@ assert.equal(apiProfile.attachments.referenced_unknown_size_count, 2);
 assert.ok(apiProfile.phases.parse_and_classify.duration_ms > 0);
 const readableSourceFiles = [
   path.join(activeDir, "rollout-active.jsonl"),
+  path.join(activeDir, "rollout-empty-project.jsonl"),
   path.join(activeDir, "rollout-subagent.jsonl"),
   path.join(activeDir, "rollout-no-user.jsonl"),
   path.join(archivedDir, "rollout-archived.jsonl"),
@@ -239,7 +252,8 @@ const profiledRawManifest = JSON.parse(await fs.readFile(profiledRawResult.manif
 const profiledRaw = JSON.parse(await fs.readFile(profiledRawPath, "utf8"));
 const semanticSession = ({ markdown_file, raw_export_file, raw_export_name, ...session }) => session;
 assert.deepEqual(profiledRawManifest.sessions.map(semanticSession), manifest.sessions.filter((session) => session.project === "C:\\Projects\\alpha").map(semanticSession), "routing preflight must preserve selected-session manifest semantics");
-assert.equal(profiledRaw.phases.parse_and_classify.bytes_read, profiledRawManifest.sessions.reduce((sum, session) => sum + session.raw_size_bytes, 0), "raw exports should fully parse each accepted snapshot once, not parse every live source first");
+const uncertainRoutingFallbackBytes = (await fs.stat(path.join(activeDir, "rollout-empty-project.jsonl"))).size;
+assert.equal(profiledRaw.phases.parse_and_classify.bytes_read, profiledRawManifest.sessions.reduce((sum, session) => sum + session.raw_size_bytes, 0) + uncertainRoutingFallbackBytes, "raw exports should parse accepted snapshots once while retaining the conservative full-parser fallback for uncertain routing metadata");
 assert.ok(profiledRaw.phases.routing.bytes_read > profiledRaw.phases.parse_and_classify.bytes_read, "routing should scan all source bytes without fully classifying unselected sessions");
 assert.ok(profiledRaw.phases.snapshot_stability_checks.duration_ms >= 0, "performance profiles should report snapshot stability checks separately");
 assert.ok(profiledRaw.slowest_sessions.some((session) => session.snapshot_attempts >= 1), "profiled raw sessions should expose snapshot attempt counts without attributing attempts to routing-only sessions");
@@ -362,9 +376,36 @@ assert.equal(routerManifest.sessions[0].project, routedMeta.cwd, "structured rou
 assert.equal(routerManifest.sessions[0].invalid_jsonl_line_count, 1);
 assert.deepEqual(await fs.readFile(path.join(routerOutput, routerManifest.sessions[0].raw_export_file)), await fs.readFile(routerSource), "invalid JSONL lines must remain byte-identical in canonical Raw output");
 
+assert.ok(html.includes(dangerousTitle), "HTML output must preserve the title independently of Markdown escaping");
+assert.ok(html.includes("beta\rbare\nline\r\nend"), "HTML output must preserve project metadata independently of Markdown escaping");
+
+const indexMarkdown = await fs.readFile(path.join(outputDir, "index.md"), "utf8");
+const escapedTitle = String.raw`Escaping plain \| one\|two \\ slash\\\\ before\\\|pipe \\\\\|combo C:\\Temp\\file already\\\|escaped Unicode π`;
+assert.ok(indexMarkdown.includes(escapedTitle), "Markdown index must completely escape table-cell content");
+
+const titleRow = indexMarkdown.split("\n").find((line) => line.includes("Escaping plain"));
+assert.ok(titleRow, "expected the synthetic title row in index.md");
+assert.ok(
+  titleRow.includes(`|  | ${escapedTitle} | active |`),
+  "the complete escaped title must remain between the intended Markdown table delimiters",
+);
+
+const projectRow = indexMarkdown.split("\n").find((line) => line.includes("Investigate the archived build failure."));
+assert.ok(projectRow, "expected the synthetic project row in index.md");
+assert.ok(projectRow.includes("beta bare line end"), "CR, LF, and CRLF must remain inside one Markdown table row");
+
+const emptyProjectRow = indexMarkdown.split("\n").find((line) => line.includes(escapedTitle));
+assert.ok(emptyProjectRow, "expected the empty-project row in index.md");
+assert.ok(emptyProjectRow.startsWith(`|  | ${escapedTitle} |`), "an empty cell must remain an empty Markdown table cell");
+
 for (const session of manifest.sessions) {
   assert.ok((await fs.stat(path.join(outputDir, session.markdown_file))).size > 0);
   assert.ok((await fs.stat(path.join(outputDir, session.raw_export_file))).size > 0);
+  assert.deepEqual(
+    await fs.readFile(path.join(outputDir, session.raw_export_file)),
+    await fs.readFile(session.source_jsonl),
+    "raw JSONL copies must remain byte-for-byte equivalent",
+  );
 }
 
 await fs.rm(temp, { recursive: true, force: true });

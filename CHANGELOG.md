@@ -4,6 +4,10 @@ All notable changes to this project are documented here.
 
 ## Unreleased
 
+### Fixed
+
+- Completed escaping of backslashes, pipes, and line breaks in Markdown index table cells.
+
 ### Removed
 
 - Removed the obsolete `open-project.cmd` helper. The numbered Windows launcher now covers all supported workflows.
