@@ -66,29 +66,31 @@ Before finalizing a raw snapshot, the exporter:
 1. records source size and modification time;
 2. copies the source to a temporary file;
 3. records source size and modification time again;
-4. hashes the temporary exported bytes with SHA-256;
-5. hashes the source bytes;
-6. checks source size and modification time once more after hashing;
-7. publishes the temporary file only when metadata stayed stable and both hashes match.
+4. atomically publishes the temporary file at its final Raw path;
+5. hashes that published Raw path once with SHA-256, or calculates the same hash during the required snapshot parse;
+6. compares that hash with the stable source hash collected during routing or a conservative source-hash fallback;
+7. checks size and modification time before and after verification as additional change indicators.
 
-The exporter retries an unstable source up to three times. A persistent change produces `SOURCE_CHANGED_DURING_EXPORT`; a locked or inaccessible source produces `SOURCE_SNAPSHOT_LOCKED`; other copy failures produce `SOURCE_SNAPSHOT_FAILED`. The affected export run fails rather than publishing an unverified raw snapshot as stable.
+The exporter retries an unstable source up to three times. A persistent change produces `SOURCE_CHANGED_DURING_EXPORT`; a locked or inaccessible source produces `SOURCE_SNAPSHOT_LOCKED`; other copy failures produce `SOURCE_SNAPSHOT_FAILED`. The affected export run fails rather than recording an unverified Raw copy as verified at export.
 
 For an included and verified raw snapshot:
 
 - `snapshot_status` is `STABLE`;
-- `raw_integrity_verified` is `true`;
-- `raw_sha256` is the SHA-256 of the exported bytes;
+- `raw_copy_status` is `VERIFIED_AT_EXPORT`;
+- `raw_verified_at` is the ISO-8601 time of that successful export-time check;
+- `raw_sha256` is the expected SHA-256 of the bytes checked at that time;
 - `raw_size_bytes` is the exported size;
 - the before/after source size and modification-time fields are populated.
 
 For raw-disabled output:
 
 - `snapshot_status` is `NOT_INCLUDED`;
-- `raw_integrity_verified` is `false`;
+- `raw_copy_status` is `NOT_INCLUDED`;
+- `raw_verified_at` is `null`;
 - `raw_sha256` is empty;
 - raw size and source-copy fields are `null`.
 
-`STABLE` describes only the accepted snapshot at copy time. An active source can be appended to after export. A later hash mismatch against the live source does not invalidate the exported snapshot if the source metadata changed after the recorded copy.
+`STABLE` describes only the source observed during the snapshot operation. `raw_verified_at` records when the export-time hash check completed; `VERIFIED_AT_EXPORT` states that the bytes read from the published Raw path matched `raw_sha256` during that check, not that integrity continues afterward. Raw files remain mutable; size and modification time are change indicators, not cryptographic proof. `raw_sha256` allows a later consumer to hash the current Raw file again and detect a mismatch.
 
 ## JSONL counts and order
 
@@ -177,7 +179,7 @@ The `source-snapshots` profile intentionally omits Markdown transcripts and `ind
 
 Version 1 prepares portable preservation metadata but implements no import command and has no validated Codex roundtrip. It does not promise reconstruction of Codex UI state, indexes, project registration, sidebar history, attachment files, or future compatibility with Codex's internal format.
 
-A future importer must use canonical raw JSONL and validated manifest mapping. Markdown or HTML alone is insufficient.
+A future importer must use canonical raw JSONL and validated manifest mapping. It must hash every current Raw file again, compare that digest with `raw_sha256`, and reject any mismatch before consuming the file. Markdown or HTML alone is insufficient. Version 1 claims neither permanent tamper resistance nor sealing or import readiness.
 
 ## Privacy boundary
 

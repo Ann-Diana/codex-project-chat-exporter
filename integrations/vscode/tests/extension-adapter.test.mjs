@@ -414,7 +414,11 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
   const adapterResult = await adapter.exportAllSessions(context);
   const directManifest = JSON.parse(await fsp.readFile(directResult.manifestPath, "utf8"));
   const adapterManifest = JSON.parse(await fsp.readFile(adapterResult.manifestPath, "utf8"));
-  assert.deepEqual(adapterManifest.sessions, directManifest.sessions, "VS Code delegation and direct shared-core use must produce identical session metadata");
+  for (const manifest of [directManifest, adapterManifest]) {
+    for (const session of manifest.sessions) assert.equal(new Date(session.raw_verified_at).toISOString(), session.raw_verified_at);
+  }
+  const stableSessionMetadata = ({ raw_verified_at, ...session }) => session;
+  assert.deepEqual(adapterManifest.sessions.map(stableSessionMetadata), directManifest.sessions.map(stableSessionMetadata), "VS Code delegation and direct shared-core use must produce identical stable session metadata");
   for (const session of directManifest.sessions) {
     assert.equal(await fsp.readFile(path.join(adapterOutput, session.markdown_file), "utf8"), await fsp.readFile(path.join(directOutput, session.markdown_file), "utf8"));
     assert.deepEqual(await fsp.readFile(path.join(adapterOutput, session.raw_export_file)), await fsp.readFile(path.join(directOutput, session.raw_export_file)));

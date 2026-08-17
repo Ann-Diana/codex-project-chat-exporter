@@ -4,10 +4,10 @@
 
 Export local active and archived Codex sessions into a portable, project-aware export folder for review, preservation, migration preparation, or privacy-reviewed project handoff.
 
-Codex's currently observed experimental `/export` exports one conversation. Codex Project Chat Exporter instead creates a project-aware local bulk export of detected active and archived sessions with an index, manifest, and optional verified raw snapshots. The two functions are complementary, and the native experiment may evolve.
+Codex's currently observed experimental `/export` exports one conversation. Codex Project Chat Exporter instead creates a project-aware local bulk export of detected active and archived sessions with an index, manifest, and optional Raw snapshots verified at export time. The two functions are complementary, and the native experiment may evolve.
 
 - Sessions are grouped by their stored project/work directory.
-- Three profiles cover complete exports, reading views without Raw, and verified source snapshots without transcripts.
+- Three profiles cover complete exports, reading views without Raw, and source snapshots verified at export time without transcripts.
 - Processing stays local. The application sends no telemetry and makes no network requests.
 - It does not import sessions back into Codex.
 
@@ -20,7 +20,7 @@ Codex's currently observed experimental `/export` exports one conversation. Code
 - All detected sessions or only one matching project/work folder.
 - Classified Markdown reading views for direct user turns, assistant responses, subagent inputs, runtime contexts, and uncertain user-role records.
 - A filterable local HTML index and a machine-readable manifest.
-- Optional verified raw JSONL snapshots that preserve the exported source bytes unchanged.
+- Optional raw JSONL snapshots whose published paths are checked against stable source hashes during export.
 - Optional tool-call input and output in Markdown.
 - Short Windows-friendly paths by default, with a readable-path option.
 
@@ -69,9 +69,9 @@ node .\bin\export-codex-project-chats.mjs --project my-project --out C:\cx\my-pr
 
 Choose one profile. The legacy `--no-raw` switch remains shorthand for `readable` when no explicit profile is supplied:
 
-- **Complete** (`--profile complete`, default): verified `raw/`, Markdown transcripts in `md/`, `index.html`, `index.md`, `manifest.json`, and `README.txt`.
+- **Complete** (`--profile complete`, default): export-time-verified `raw/`, Markdown transcripts in `md/`, `index.html`, `index.md`, `manifest.json`, and `README.txt`.
 - **Readable** (`--profile readable`): Markdown transcripts and both indexes plus `manifest.json` and `README.txt`, without new Raw snapshots.
-- **Source snapshots** (`--profile source-snapshots`): verified `raw/`, a reduced `index.html`, `manifest.json`, and `README.txt`, without Markdown transcripts or `index.md`.
+- **Source snapshots** (`--profile source-snapshots`): export-time-verified `raw/`, a reduced `index.html`, `manifest.json`, and `README.txt`, without Markdown transcripts or `index.md`.
 
 Show all list, diagnosis, profile, tool, path, and raw-output options:
 
@@ -107,7 +107,7 @@ Future Word, PDF, and extracted-attachment formats are not implemented or select
 
 Readable-path exports use `markdown/` and longer timestamp/title-based filenames. Short paths remain the safer default for copying and unzipping on Windows.
 
-When included, raw JSONL is the canonical byte-preserving representation. Markdown and HTML are classified, derived reading views. See the [archive format version 1 specification](docs/archive-format-v1.md) for manifest fields, snapshot integrity, event classification, and import limits.
+When included, raw JSONL is the canonical byte-preserving representation. `raw_copy_status: VERIFIED_AT_EXPORT` and `raw_verified_at` record a completed export-time hash check, not continuing integrity; Raw files remain mutable, and `raw_sha256` supports later revalidation. Markdown and HTML are classified, derived reading views. See the [archive format version 1 specification](docs/archive-format-v1.md) for manifest fields, snapshot verification, event classification, and import limits.
 
 ## Privacy
 

@@ -36,9 +36,9 @@ The extension keeps the older direct-command IDs registered for compatibility, b
 - `codexProjectChatExporter.outputDirectory`: absolute local export folder. The folder picker supplies an absolute path; when editing the setting manually, use an absolute path. A rejected relative value is shown with this setting name and an absolute example. If empty, the extension asks on first export and remembers the selected folder.
 - `codexProjectChatExporter.codexHome`: optional absolute local Codex home folder. Empty uses `CODEX_HOME` or the default local `.codex` folder.
 - **Export…** asks for one of three profiles on every run:
-  - **Complete** creates verified `raw/`, Markdown transcripts, `index.html`, `index.md`, `manifest.json`, and `README.txt`.
+  - **Complete** creates export-time-verified `raw/`, Markdown transcripts, `index.html`, `index.md`, `manifest.json`, and `README.txt`.
   - **Readable** creates Markdown transcripts, both indexes, `manifest.json`, and `README.txt` without new Raw snapshots.
-  - **Source snapshots** creates verified `raw/`, a reduced `index.html`, `manifest.json`, and `README.txt` without Markdown transcripts or `index.md`.
+  - **Source snapshots** creates export-time-verified `raw/`, a reduced `index.html`, `manifest.json`, and `README.txt` without Markdown transcripts or `index.md`.
 - `codexProjectChatExporter.pathStyle`: defaults to `short` (`md/` and compact filenames); `readable` uses `markdown/` and longer timestamp/title-based filenames.
 - `codexProjectChatExporter.includeTools`: defaults to `false`; include tool call input/output in Markdown. Tool data can be sensitive.
 - `codexProjectChatExporter.diagnosticOutput`: defaults to `false`; enable only for a troubleshooting run that needs detailed content-free phase timing in the output channel. Normal exports show only a concise runtime summary.

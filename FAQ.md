@@ -66,7 +66,7 @@ No. It reads local files and writes a local output folder. It does not call Open
 
 ## How does this differ from Codex's experimental `/export`?
 
-The currently observed native `/export` exports one conversation. Codex Project Chat Exporter creates a project-aware local bulk export of detected active and archived sessions with an index, manifest, and optional verified raw snapshots. The two functions are complementary, and the native experiment may evolve.
+The currently observed native `/export` exports one conversation. Codex Project Chat Exporter creates a project-aware local bulk export of detected active and archived sessions with an index, manifest, and optional Raw snapshots verified at export time. The two functions are complementary, and the native experiment may evolve.
 
 ## Does it export both active and archived sessions?
 
@@ -97,7 +97,9 @@ Derived titles are only export labels. They do not modify Codex.
 
 `md/` in short-path exports, or `markdown/` in readable-path exports, contains classified reading views. Confirmed direct user turns, subagent inputs, assistant messages, runtime contexts, and uncertain user-role records are labelled separately. Tool details are omitted unless `--include-tools` is used.
 
-When enabled, `raw/` contains verified byte-identical JSONL snapshots and is the canonical lossless representation. Markdown and HTML are derived views, and classification never changes raw events. Raw filenames may be collision-safe export names; `manifest.json` preserves the portable source mapping and integrity metadata.
+When enabled, `raw/` contains byte-identical JSONL snapshots checked against stable source hashes during export and is the canonical lossless representation. Markdown and HTML are derived views, and classification never changes raw events. Raw filenames may be collision-safe export names; `manifest.json` preserves the portable source mapping and verification metadata.
+
+`raw_verified_at` records when the `VERIFIED_AT_EXPORT` hash check completed. It does not assert continuing integrity: Raw files remain mutable afterward, so compare their current hash with `raw_sha256` to detect changes. Any future importer must repeat that check and reject mismatches. This is not permanent tamper resistance, sealing, or import readiness.
 
 Both raw files and the manifest can contain sensitive local data. See the [archive format version 1 specification](docs/archive-format-v1.md) for snapshot fields, event pairing, attachment identity, fail-safe classification, and import limits.
 
@@ -113,9 +115,9 @@ The exporter does not clean an existing output folder. A `raw/` directory from a
 
 ## Which export profile should I use?
 
-- **Complete** (`complete`) is the default and creates verified `raw/`, Markdown transcripts, `index.html`, `index.md`, `manifest.json`, and `README.txt`.
+- **Complete** (`complete`) is the default and creates export-time-verified `raw/`, Markdown transcripts, `index.html`, `index.md`, `manifest.json`, and `README.txt`.
 - **Readable** (`readable`) creates Markdown transcripts, both indexes, `manifest.json`, and `README.txt` without new Raw snapshots.
-- **Source snapshots** (`source-snapshots`) creates verified `raw/`, a reduced `index.html`, `manifest.json`, and `README.txt` without Markdown transcripts or `index.md`. The reduced index uses project, storage, start time, session ID, and Raw links rather than unavailable title or model metadata.
+- **Source snapshots** (`source-snapshots`) creates export-time-verified `raw/`, a reduced `index.html`, `manifest.json`, and `README.txt` without Markdown transcripts or `index.md`. The reduced index uses project, storage, start time, session ID, and Raw links rather than unavailable title or model metadata.
 
 An explicit CLI `--profile` wins over the legacy CLI Raw switch. Without an explicit profile, CLI `--no-raw` maps to `readable` for compatibility. The VS Code extension asks for the profile on every export.
 
@@ -170,7 +172,7 @@ The reading views export textual direct-user, assistant, subagent, runtime-conte
 
 ## Can this restore sessions into Codex on another computer?
 
-No import is implemented. Stable raw snapshots and their portable manifest metadata prepare source material for possible future tooling, but no Codex roundtrip has been validated and Codex does not provide a documented public import interface for rebuilding its complete UI state, indexes, and project associations.
+No import is implemented. Raw snapshots verified at export time and their portable manifest metadata prepare source material for possible future tooling, but no Codex roundtrip has been validated and Codex does not provide a documented public import interface for rebuilding its complete UI state, indexes, and project associations. A future importer must first compare each current Raw hash with `raw_sha256`.
 
 Treat this as local preservation and migration preparation, not as a guaranteed one-click restore mechanism. See the [format specification](docs/archive-format-v1.md#import-boundary) for the exact boundary.
 

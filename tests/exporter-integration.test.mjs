@@ -6,7 +6,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
-import { exportArchive, readSessionRoutingMeta } from "../bin/export-codex-project-chats.mjs";
+import { exportArchive, readSessionRoutingMeta, sha256File } from "../bin/export-codex-project-chats.mjs";
 
 const execFileAsync = promisify(execFile);
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -150,7 +150,9 @@ assert.equal(noUserSession.unclassified_user_role_records, 1);
 
 for (const session of manifest.sessions) {
   assert.equal(session.snapshot_status, "STABLE");
-  assert.equal(session.raw_integrity_verified, true);
+  assert.equal(session.raw_copy_status, "VERIFIED_AT_EXPORT");
+  assert.equal(new Date(session.raw_verified_at).toISOString(), session.raw_verified_at);
+  assert.equal("raw_integrity_verified" in session, false, "the manifest must not claim a continuing integrity state");
   assert.equal("import_ready" in session, false, "snapshot integrity must not imply a tested Codex import path");
   assert.match(session.raw_sha256, /^[0-9a-f]{64}$/);
   assert.ok(session.raw_size_bytes > 0);
@@ -205,7 +207,9 @@ assert.doesNotMatch(apiMarkdownIndex, /\| Raw \|/, "raw-disabled Markdown indexe
 const apiManifest = JSON.parse(await fs.readFile(path.join(apiOutputDir, "manifest.json"), "utf8"));
 for (const session of apiManifest.sessions) {
   assert.equal(session.snapshot_status, "NOT_INCLUDED");
-  assert.equal(session.raw_integrity_verified, false);
+  assert.equal(session.raw_copy_status, "NOT_INCLUDED");
+  assert.equal(session.raw_verified_at, null);
+  assert.equal("raw_integrity_verified" in session, false);
   assert.equal("import_ready" in session, false);
 }
 const apiProfileText = await fs.readFile(apiProfilePath, "utf8");
@@ -250,7 +254,7 @@ const profiledRawPath = path.join(temp, "profiled-raw-performance.json");
 const profiledRawResult = await exportArchive({ codexHome, scope: "project", workspacePath: "C:\\Projects\\alpha", outputDirectory: profiledRawOutputDir, performanceProfilePath: profiledRawPath });
 const profiledRawManifest = JSON.parse(await fs.readFile(profiledRawResult.manifestPath, "utf8"));
 const profiledRaw = JSON.parse(await fs.readFile(profiledRawPath, "utf8"));
-const semanticSession = ({ markdown_file, raw_export_file, raw_export_name, ...session }) => session;
+const semanticSession = ({ markdown_file, raw_export_file, raw_export_name, raw_verified_at, ...session }) => session;
 assert.deepEqual(profiledRawManifest.sessions.map(semanticSession), manifest.sessions.filter((session) => session.project === "C:\\Projects\\alpha").map(semanticSession), "routing preflight must preserve selected-session manifest semantics");
 const uncertainRoutingFallbackBytes = (await fs.stat(path.join(activeDir, "rollout-empty-project.jsonl"))).size;
 assert.equal(profiledRaw.phases.parse_and_classify.bytes_read, profiledRawManifest.sessions.reduce((sum, session) => sum + session.raw_size_bytes, 0) + uncertainRoutingFallbackBytes, "raw exports should parse accepted snapshots once while retaining the conservative full-parser fallback for uncertain routing metadata");
@@ -308,7 +312,9 @@ for (const session of sourceSnapshotsManifest.sessions) {
   assert.match(session.title, /^Codex session /, "the manifest should retain its neutral deterministic snapshot title");
   assert.equal(session.user_messages, null, "unparsed source snapshots must not claim message classification counts");
   assert.equal(session.snapshot_status, "STABLE");
-  assert.equal(session.raw_integrity_verified, true);
+  assert.equal(session.raw_copy_status, "VERIFIED_AT_EXPORT");
+  assert.equal(new Date(session.raw_verified_at).toISOString(), session.raw_verified_at);
+  assert.equal("raw_integrity_verified" in session, false);
   assert.deepEqual(await fs.readFile(path.join(sourceSnapshotsOutput, session.raw_export_file)), await fs.readFile(session.source_jsonl));
 }
 assert.deepEqual(progressEvents.map((event) => event.phase).filter((phase, index, phases) => index === 0 || phase !== phases[index - 1]), ["discovery", "routing", "snapshot", "processing", "writing", "complete"]);
@@ -407,6 +413,17 @@ for (const session of manifest.sessions) {
     "raw JSONL copies must remain byte-for-byte equivalent",
   );
 }
+
+const mutableRawPath = path.join(outputDir, activeSession.raw_export_file);
+const recordedRawHash = activeSession.raw_sha256;
+await fs.appendFile(mutableRawPath, "later change", "utf8");
+assert.notEqual(await sha256File(mutableRawPath), recordedRawHash, "raw_sha256 must detect changes made after export-time verification");
+const persistedManifest = JSON.parse(await fs.readFile(path.join(outputDir, "manifest.json"), "utf8"));
+const persistedActiveSession = persistedManifest.sessions.find((session) => session.session_id === activeSession.session_id);
+assert.equal(persistedActiveSession.raw_copy_status, "VERIFIED_AT_EXPORT", "the status must remain an explicitly historical export-time statement");
+assert.equal(persistedActiveSession.raw_verified_at, activeSession.raw_verified_at);
+assert.equal(persistedActiveSession.raw_sha256, recordedRawHash);
+assert.equal("raw_integrity_verified" in persistedActiveSession, false);
 
 await fs.rm(temp, { recursive: true, force: true });
 console.log("exporter integration tests passed");

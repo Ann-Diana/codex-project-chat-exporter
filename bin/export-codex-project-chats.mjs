@@ -20,6 +20,10 @@ const EXPORT_PROFILES = Object.freeze({
   [EXPORT_PROFILE.READABLE]: Object.freeze({ raw: false, markdown: true, html: true }),
   [EXPORT_PROFILE.SOURCE_SNAPSHOTS]: Object.freeze({ raw: true, markdown: false, html: true }),
 });
+const RAW_COPY_STATUS = Object.freeze({
+  VERIFIED_AT_EXPORT: "VERIFIED_AT_EXPORT",
+  NOT_INCLUDED: "NOT_INCLUDED",
+});
 const FUTURE_EXPORT_FORMATS = Object.freeze({ docx: false, pdf: false, attachments: false });
 const MIRRORED_USER_EVENT_MAX_DELAY_MS = 100;
 const USER_RECORD_KIND = Object.freeze({
@@ -777,7 +781,8 @@ async function processExportTask(task, titleIndex, profiler) {
     raw_sha256: snapshot?.sha256 || "",
     raw_size_bytes: snapshot?.sizeBytes ?? null,
     snapshot_status: copyRaw ? "STABLE" : "NOT_INCLUDED",
-    raw_integrity_verified: Boolean(copyRaw && snapshot?.verified),
+    raw_copy_status: copyRaw ? snapshot?.copyStatus || "" : RAW_COPY_STATUS.NOT_INCLUDED,
+    raw_verified_at: copyRaw ? snapshot?.verifiedAt || null : null,
     source_snapshot_before_size_bytes: snapshot?.sourceBeforeSizeBytes ?? null,
     source_snapshot_before_mtime_ms: snapshot?.sourceBeforeMtimeMs ?? null,
     source_snapshot_after_size_bytes: snapshot?.sourceAfterSizeBytes ?? null,
@@ -1297,7 +1302,8 @@ async function copyStableRawSnapshot(sourcePath, destinationPath, options = {}) 
             attempts: attempt,
             sourceHashBasis,
             verificationValue: verification.value || null,
-            verified: true,
+            copyStatus: RAW_COPY_STATUS.VERIFIED_AT_EXPORT,
+            verifiedAt: new Date().toISOString(),
           };
         }
         lastReason = exportedStable ? "published bytes differ from the stable source hash" : "published snapshot changed while it was verified";
@@ -1351,6 +1357,12 @@ function routingSnapshotMatches(snapshot, stat) {
 
 function sameFileVersion(left, right) {
   return left.size === right.size && left.mtimeMs === right.mtimeMs;
+}
+
+function isCanonicalIsoTimestamp(value) {
+  if (typeof value !== "string") return false;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) && new Date(timestamp).toISOString() === value;
 }
 
 async function sha256File(file) {
@@ -1948,7 +1960,7 @@ async function writeSummary(dir, rows) {
   else lines.push("- This profile intentionally does not create human-readable session transcripts or classify session events.");
   if (copyRaw) lines.push("- raw/ contains canonical byte-preserving session JSONL snapshots.");
   else lines.push("- This profile does not include canonical raw JSONL snapshots.");
-  lines.push("- Raw export file names may be collision-safe archive names; manifest.json preserves the original name and portable restore path.", "- A STABLE snapshot with raw_integrity_verified=true passed copy-stability, size, and SHA-256 verification; this is not a tested Codex import claim.", "- Event order is the physical line order inside each canonical raw JSONL file; the manifest does not duplicate that sequence.");
+  lines.push("- Raw export file names may be collision-safe archive names; manifest.json preserves the original name and portable restore path.", "- raw_copy_status=VERIFIED_AT_EXPORT means the export-time hash check completed at raw_verified_at and the bytes read from the published Raw path matched raw_sha256 during that check; Raw files remain mutable afterward.", "- A future importer must hash the current Raw file again and reject any mismatch; no Codex import path is implemented or validated.", "- Event order is the physical line order inside each canonical raw JSONL file; the manifest does not duplicate that sequence.");
   if (exportFormats.html && exportProfile === EXPORT_PROFILE.SOURCE_SNAPSHOTS) lines.push("- index.html uses only project, storage, start time, session ID, and Raw links because this profile intentionally skips complete readable metadata.");
   else if (exportFormats.html) lines.push("- index.html can be filtered by project, title, date, model, or storage location.");
   lines.push("- Absolute source paths are local metadata and must be omitted from any share-safe derivative.");
@@ -1971,7 +1983,7 @@ async function verifyExport(dir, rows, profiler = null) {
       if (!stat?.isFile() || stat.size === 0) throw new ExportError("EXPORT_VERIFICATION_FAILED", `Missing or empty session export: ${file}`);
     }
     if (row.raw_export_file) {
-      if (!row.raw_integrity_verified || row.snapshot_status !== "STABLE" || !row.raw_sha256) throw new ExportError("EXPORT_VERIFICATION_FAILED", `Raw snapshot integrity metadata is incomplete: ${row.raw_export_file}`);
+      if (row.raw_copy_status !== RAW_COPY_STATUS.VERIFIED_AT_EXPORT || !isCanonicalIsoTimestamp(row.raw_verified_at) || row.snapshot_status !== "STABLE" || !row.raw_sha256) throw new ExportError("EXPORT_VERIFICATION_FAILED", `Raw snapshot verification metadata is incomplete: ${row.raw_export_file}`);
       const rawPath = path.join(dir, row.raw_export_file);
       const rawStat = await fsp.stat(rawPath);
       if (rawStat.size !== row.raw_size_bytes) throw new ExportError("EXPORT_VERIFICATION_FAILED", `Raw snapshot size mismatch: ${row.raw_export_file}`);
