@@ -321,6 +321,19 @@ try {
   }), (error) => error?.code === "SOURCE_CHANGED_DURING_EXPORT");
   await assert.rejects(() => fs.stat(manipulatedDestination), /ENOENT/, "a manipulated snapshot candidate must never be published");
 
+  const replacedAfterRenameDestination = path.join(temp, "raw", "replaced-after-rename.jsonl");
+  await assert.rejects(() => copyStableRawSnapshot(changedAfterRoutingSource, replacedAfterRenameDestination, {
+    maxAttempts: 1,
+    routingSnapshot: manipulatedRouting.routingSnapshot,
+    io: {
+      rename: async (temporaryPath, destinationPath) => {
+        await fs.rename(temporaryPath, destinationPath);
+        await fs.writeFile(destinationPath, "CCCC", "utf8");
+      },
+    },
+  }), (error) => error?.code === "SOURCE_CHANGED_DURING_EXPORT");
+  await assert.rejects(() => fs.stat(replacedAfterRenameDestination), /ENOENT/, "an equal-size replacement after rename must never retain verified output");
+
   const incompleteDestination = path.join(temp, "raw", "incomplete.jsonl");
   const incompleteRouting = await readSessionRoutingMeta(changedAfterRoutingSource);
   await assert.rejects(() => copyStableRawSnapshot(changedAfterRoutingSource, incompleteDestination, {
@@ -346,7 +359,7 @@ try {
   });
   assert.equal(counted.sourceHashBasis, "ROUTING");
   assert.equal(hashCalls.length, 1, "stable source snapshots must hash the export exactly once");
-  assert.match(hashCalls[0], /\.partial-/, "the candidate must be verified before atomic publication");
+  assert.equal(hashCalls[0], path.resolve(countedDestination), "the published snapshot must be the file hashed for integrity verification");
   assert.notEqual(hashCalls[0], path.resolve(changedAfterRoutingSource), "stable routing evidence must avoid a separate source hash pass");
   assert.equal(countedDiagnostics.filter((event) => event.event === "source_hash_reused").length, 1);
   assert.equal(countedDiagnostics.filter((event) => event.event === "source_hash_start").length, 0);

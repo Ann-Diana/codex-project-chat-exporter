@@ -1267,31 +1267,29 @@ async function copyStableRawSnapshot(sourcePath, destinationPath, options = {}) 
       const stableMetadata = sameFileVersion(before, afterCopy) && copiedStat.size === before.size;
       if (stableMetadata) {
         if (options.beforeExportVerification) await options.beforeExportVerification({ attempt, sourcePath, temporaryPath });
-        const exportedBeforeVerification = await timedSnapshotStat(temporaryPath, "temporary_before_verification", attempt);
+        await io.rm(destinationPath, { force: true }).catch(() => {});
+        await io.rename(temporaryPath, destinationPath);
+        published = true;
+        const exportedBeforeVerification = await timedSnapshotStat(destinationPath, "published_before_verification", attempt);
         const exportHashStart = performance.now();
         const exportHashStage = options.verifyPublishedSnapshot ? "snapshot_parse" : "snapshot";
         diagnostic("export_hash_start", { ...diagnosticContext, attempt, stage: exportHashStage });
         const verification = options.verifyPublishedSnapshot
-          ? await options.verifyPublishedSnapshot(temporaryPath)
-          : { sha256: await io.hashFile(temporaryPath), sizeBytes: exportedBeforeVerification.size, stable: true, value: null };
+          ? await options.verifyPublishedSnapshot(destinationPath)
+          : { sha256: await io.hashFile(destinationPath), sizeBytes: exportedBeforeVerification.size, stable: true, value: null };
         const exportHashMs = performance.now() - exportHashStart;
         diagnostic("export_hash_end", { ...diagnosticContext, attempt, stage: exportHashStage, duration_ms: roundMs(exportHashMs), bytes: verification.sizeBytes ?? exportedBeforeVerification.size });
         if (!options.verifyPublishedSnapshot) {
           options.profiler?.addPhase("export_hashing", exportHashMs, exportedBeforeVerification.size, 0);
           options.profiler?.recordSession(options.profileSession, "snapshot_hash_ms", exportHashMs, exportedBeforeVerification.size, 0);
         }
-        const exportedAfterVerification = await timedSnapshotStat(temporaryPath, "temporary_after_verification", attempt);
+        const exportedAfterVerification = await timedSnapshotStat(destinationPath, "published_after_verification", attempt);
         const exportedStable = verification.stable !== false && sameFileVersion(exportedBeforeVerification, exportedAfterVerification);
         if (exportedStable && verification.sizeBytes === before.size && verification.sha256 === sourceSha256) {
-          await io.rm(destinationPath, { force: true }).catch(() => {});
-          await io.rename(temporaryPath, destinationPath);
-          published = true;
-          const publishedStat = await timedSnapshotStat(destinationPath, "published_snapshot", attempt);
-          if (publishedStat.size !== exportedAfterVerification.size) throw new ExportError("SOURCE_SNAPSHOT_FAILED", `Published raw snapshot size changed unexpectedly: ${path.basename(destinationPath)}`);
           diagnostic("snapshot_attempt_end", { ...diagnosticContext, attempt, status: "STABLE", duration_ms: roundMs(performance.now() - attemptStartedAt) });
           return {
             sha256: verification.sha256,
-            sizeBytes: publishedStat.size,
+            sizeBytes: exportedAfterVerification.size,
             sourceAfterMtimeMs: afterCopy.mtimeMs,
             sourceAfterSizeBytes: afterCopy.size,
             sourceBeforeMtimeMs: before.mtimeMs,
@@ -1305,6 +1303,8 @@ async function copyStableRawSnapshot(sourcePath, destinationPath, options = {}) 
         lastReason = exportedStable ? "published bytes differ from the stable source hash" : "published snapshot changed while it was verified";
         routingSnapshotReusable = false;
         diagnostic("snapshot_attempt_end", { ...diagnosticContext, attempt, status: "RETRY", reason: exportedStable ? "HASH_MISMATCH" : "EXPORT_CHANGED", duration_ms: roundMs(performance.now() - attemptStartedAt) });
+        await io.rm(destinationPath, { force: true }).catch(() => {});
+        published = false;
       } else {
         lastReason = copiedStat.size === before.size ? "source size or modification time changed" : "copied snapshot size differs from the source";
         routingSnapshotReusable = false;
