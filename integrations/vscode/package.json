@@ -90,7 +90,7 @@
         "codexProjectChatExporter.diagnosticOutput": {
           "type": "boolean",
           "default": false,
-          "description": "Write detailed content-free timing diagnostics to the output channel for a troubleshooting run. Leave disabled for normal exports."
+          "description": "Write message-free, path-redacted timing diagnostics with operational metadata to the output channel for a troubleshooting run. Leave disabled for normal exports."
         }
       }
     }

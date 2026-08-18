@@ -15,10 +15,10 @@ The exporter remains IDE-agnostic. The extension only provides native VS Code co
 
 ## Installation
 
-Build or obtain the `.vsix` file, then install it locally in VS Code Desktop:
+Build or obtain the current `.vsix` candidate, then install it locally in VS Code Desktop:
 
 ```powershell
-code --install-extension .\codex-project-chat-exporter-vscode-0.1.2.vsix --force
+code --install-extension <absolute-vsix-path> --force
 ```
 
 If `code` is not on PATH, use VS Code's Extensions view and choose `Install from VSIX...`.
@@ -41,11 +41,17 @@ The extension keeps the older direct-command IDs registered for compatibility, b
   - **Source snapshots** creates `raw/` checked at export time, a reduced `index.html`, `manifest.json`, and `README.txt` without Markdown transcripts or `index.md`.
 - `codexProjectChatExporter.pathStyle`: defaults to `short` (`md/` and compact filenames); `readable` uses `markdown/` and longer timestamp/title-based filenames.
 - `codexProjectChatExporter.includeTools`: defaults to `false`; include tool call input/output in Markdown. Tool data can be sensitive.
-- `codexProjectChatExporter.diagnosticOutput`: defaults to `false`; enable only for a troubleshooting run that needs detailed content-free phase timing in the output channel. Normal exports show only a concise runtime summary.
+- `codexProjectChatExporter.diagnosticOutput`: defaults to `false`; enable only for a troubleshooting run that needs message-free, path-redacted phase timing in the output channel. Short IDs, sizes, phases, status, and timing values remain visible. Normal exports show only a concise runtime summary.
+
+The normal output channel records complete output-directory, HTML-index, and manifest paths. Treat it as local operational output, not as a share-safe report.
 
 ## Privacy
 
-The extension works in trusted local desktop workspaces and makes no application-level network requests. It adds no telemetry and does not modify, move, or delete Codex session files. It stores only the chosen output folder and latest HTML index path in VS Code global state. Avoid selecting a mapped network drive because the extension cannot identify every mapped-drive configuration without platform-specific dependencies.
+The extension works only in a trusted local desktop window. **Current Workspace** needs at least one local `file:` workspace folder; **All Sessions** can run without an open folder. Export and open commands are blocked while the current window is untrusted. The extension adds no telemetry or built-in upload and makes no application-level HTTP, web, or API calls. It stores the chosen output folder and latest HTML index path in VS Code global state only after a successful export.
+
+The application-scoped `outputDirectory` and `codexHome` settings reject Workspace and Workspace Folder values at runtime. UNC and Windows device paths are rejected. Avoid mapped network drives because they cannot be identified reliably in every configuration without platform-specific dependencies.
+
+The adapter rejects a second simultaneous export command, and the shared core rejects concurrent exports to the same destination.
 
 Generated exports can contain sensitive chats, absolute local paths, runtime contexts, tool output, and attachment data or references. Raw JSONL and `manifest.json` are not share-safe by default.
 
@@ -55,14 +61,14 @@ For included Raw files, `raw_copy_status`, `raw_verified_at`, and `raw_sha256` r
 
 ## Tested configuration
 
-The current experimental candidate has been tested with:
+The experimental extension has been tested with:
 
 - Visual Studio Code Desktop
 - Windows
 - local `file:` workspaces
 - local Codex session data on disk
 
-Export commands reject vscode.dev, github.dev, Remote SSH, WSL workspaces, Dev Containers, and virtual or other non-`file:` workspaces. The adapter does not contain a separate operating-system gate, so other local VS Code Desktop platforms are unverified rather than explicitly rejected. JetBrains, Cursor, and Windsurf are outside this extension's host scope.
+Export and open commands reject vscode.dev, github.dev, Remote SSH, WSL workspaces, Dev Containers, and other remote or web Extension Hosts. Current Workspace also rejects virtual or non-`file:` workspaces. The adapter does not contain a separate operating-system gate, so other local VS Code Desktop platforms are unverified rather than explicitly rejected. JetBrains, Cursor, and Windsurf are outside this extension's host scope.
 
 ## Uninstallation
 

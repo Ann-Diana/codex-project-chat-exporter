@@ -8,7 +8,7 @@ Codex's currently observed experimental `/export` exports one conversation. Code
 
 - Sessions are grouped by their stored project/work directory.
 - Three profiles cover complete exports, reading views without Raw, and source snapshots verified at export time without transcripts.
-- Processing stays local. The application sends no telemetry and makes no network requests.
+- Processing stays local: no telemetry, built-in upload, or application-level HTTP, web, or API calls.
 - It does not import sessions back into Codex.
 
 > Unofficial project. Not affiliated with, endorsed by, or supported by OpenAI.
@@ -28,13 +28,11 @@ Codex Project Chat Exporter reads the project association stored in each session
 
 ## Why it is useful
 
-Codex's local JSONL event logs are complete source material but inconvenient to browse directly. This exporter creates a static local folder that is easier to inspect, retain, move to another computer, or hand over with a project after a privacy review.
+Codex's locally stored JSONL event stream is detailed but inconvenient to browse directly. This exporter creates a static local folder that is easier to inspect, retain, move to another computer, or hand over with a project after a privacy review.
 
 It is migration preparation, not a tested restore system. Raw snapshots and portable manifest metadata preserve material for possible future tooling, but no Codex import or roundtrip restore is implemented.
 
 ## What it looks like
-
-![Filterable HTML export index](docs/screenshots/index-html-demo.png)
 
 <p>
   <img src="docs/screenshots/launcher-demo.png" alt="Interactive Windows launcher" width="49%">
@@ -67,11 +65,13 @@ Export one project/work folder:
 node .\bin\export-codex-project-chats.mjs --project my-project --out C:\cx\my-project-export
 ```
 
-Choose one profile. The legacy `--no-raw` switch remains shorthand for `readable` when no explicit profile is supplied:
+Choose one profile:
 
 - **Complete** (`--profile complete`, default): `raw/` checked at export time, Markdown transcripts in `md/`, `index.html`, `index.md`, `manifest.json`, and `README.txt`.
 - **Readable** (`--profile readable`): Markdown transcripts and both indexes plus `manifest.json` and `README.txt`, without new Raw snapshots.
 - **Source snapshots** (`--profile source-snapshots`): `raw/` checked at export time, a reduced `index.html`, `manifest.json`, and `README.txt`, without Markdown transcripts or `index.md`.
+
+Use **Readable** for browsing and searching exported transcripts. **Complete** and **Source snapshots** can be substantially larger and slower because they copy Raw JSONL and verify it with SHA-256.
 
 Show all list, diagnosis, profile, tool, path, and raw-output options:
 
@@ -112,7 +112,8 @@ When included, raw JSONL is the canonical byte-preserving representation. `raw_c
 ## Privacy
 
 - All processing is local.
-- The application itself sends no telemetry and makes no network requests.
+- The application sends no telemetry, performs no built-in upload, and makes no application-level HTTP, web, or API calls.
+- Configured filesystem paths can still point to network-backed storage. Mapped network drives cannot be identified reliably in every configuration.
 - Markdown masking covers only some common token-shaped secrets and long base64-like values; it is best effort, not complete redaction.
 - Markdown, raw JSONL, HTML, and `manifest.json` can contain confidential chats, local paths, names, runtime contexts, tool output, source code, and attachment data or references.
 - Raw JSONL and the manifest are not share-safe by default.
@@ -132,7 +133,7 @@ The exporter does not:
 - guarantee complete secret or personal-data removal;
 - guarantee compatibility with future changes to Codex's internal JSONL format.
 
-The HTML index filters metadata such as project, title, date, model, and active/archived status. Search transcript content in the Markdown files with an editor or a dedicated search tool.
+Complete and Readable HTML indexes filter metadata such as project, title, date, model, and active/archived status. Source snapshots instead uses a reduced index with project, storage, start time, session ID, and Raw links; it has no title, model, or Markdown columns. Search transcript content from Complete or Readable in the Markdown files with an editor or a dedicated search tool.
 
 ## Experimental VS Code extension
 
@@ -142,7 +143,7 @@ The optional Visual Studio Code extension calls the same export core as the CLI.
 - `Codex Export: Open Latest Export`
 - `Codex Export: Open Export Folder`
 
-The candidate is tested on Windows in local VS Code Desktop `file:` workspaces. Export commands reject web, Remote SSH, WSL, Dev Container, and other non-local extension hosts or non-`file:` workspaces. Other local desktop platforms are not explicitly blocked but remain unverified.
+The experimental extension is tested on Windows in local VS Code Desktop `file:` workspaces. Export and open commands reject untrusted windows, web, Remote SSH, WSL, Dev Container, and other non-local extension hosts. Other local desktop platforms are not explicitly blocked but remain unverified.
 
 Installation, settings, limitations, and packaged-candidate checks are documented in the [VS Code extension README](integrations/vscode/README.md) and [packaged VSIX test plan](integrations/vscode/PACKAGED_TEST_PLAN.md).
 
@@ -156,8 +157,6 @@ Installation, settings, limitations, and packaged-candidate checks are documente
 
 Run the complete automated suite with `npm test`. Source-level adapter tests do not replace installing and exercising the built VSIX in a real Extension Host.
 
-## Version and license
-
-Current version: `0.1.0`
+## License
 
 MIT — see [LICENSE](LICENSE).

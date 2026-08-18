@@ -62,7 +62,9 @@ Duplicate active and archived copies with the same session ID are shown once. Th
 
 ## Does the exporter upload anything?
 
-No. It reads local files and writes a local output folder. It does not call OpenAI APIs or send telemetry.
+No built-in uploader, telemetry, or application-level HTTP, web, or API client is used. The exporter reads source files and writes to the configured filesystem destination.
+
+A configured path can still reside on network-backed storage. The VS Code extension rejects UNC and Windows device paths, but mapped network drives cannot be identified reliably in every configuration. Choose a known local destination when locality matters.
 
 ## How does this differ from Codex's experimental `/export`?
 
@@ -111,7 +113,7 @@ They do not reliably remove paths, names, email addresses, IP addresses, custome
 
 ## Why is `raw/` still present after using `--no-raw`?
 
-The exporter does not clean an existing output folder. A `raw/` directory from an earlier run remains untouched. Use a new empty destination folder for a clean export.
+The exporter does not clean an existing output folder. A `raw/` directory or other file from an earlier run remains untouched. Use a new empty destination folder for a clean export.
 
 ## Which export profile should I use?
 
@@ -119,11 +121,15 @@ The exporter does not clean an existing output folder. A `raw/` directory from a
 - **Readable** (`readable`) creates Markdown transcripts, both indexes, `manifest.json`, and `README.txt` without new Raw snapshots.
 - **Source snapshots** (`source-snapshots`) creates `raw/` checked at export time, a reduced `index.html`, `manifest.json`, and `README.txt` without Markdown transcripts or `index.md`. The reduced index uses project, storage, start time, session ID, and Raw links rather than unavailable title or model metadata.
 
-An explicit CLI `--profile` wins over the legacy CLI Raw switch. Without an explicit profile, CLI `--no-raw` maps to `readable` for compatibility. The VS Code extension asks for the profile on every export.
+Use **Readable** when the goal is reading or searching transcripts without creating new Raw snapshots. **Complete** and **Source snapshots** can be substantially larger and slower because they copy Raw JSONL and verify it with SHA-256.
+
+An explicit CLI `--profile` wins over the legacy switch. Without an explicit profile, CLI `--no-raw` is only a compatibility shorthand for `readable`. The VS Code extension asks for the profile on every export.
 
 ## How can I diagnose a slow export without logging chat content?
 
-Add `--performance-profile <absolute-json-file>` to a CLI export only when diagnosing performance. It performs additional analysis, can substantially slow the export, and is not intended for normal exports. The local JSON profile records phase times, byte counts, shortened session IDs, sampled RSS, attachment counts/volumes, and snapshot retries, but no message text, full source/output paths, URLs, or attachment payloads. It distinguishes data URLs, signature-confirmed unprefixed PNG/JPEG Base64, local references, remote references, and unknown forms. Shortened IDs and operational metadata can still be sensitive, so review the file before sharing it.
+Add `--performance-profile <absolute-json-file>` to a CLI export only when diagnosing performance. It performs additional analysis, can substantially slow the export, and is not intended for normal exports. The privacy-reduced JSON profile records phase times, byte counts, shortened session IDs, sampled RSS, attachment counts/volumes, and snapshot retries, but no message text, full source/output/attachment paths, URLs, or attachment payloads. It distinguishes data URLs, signature-confirmed unprefixed PNG/JPEG Base64, local references, remote references, and unknown forms. Shortened IDs and operational metadata can still be sensitive, so review the file before sharing it.
+
+The optional VS Code diagnostic output follows the same message-free, path-redacted model and is disabled by default. The normal VS Code output channel is different: it records complete output, HTML-index, and manifest paths for usability and can therefore contain sensitive local paths.
 
 Processing is scoped one session at a time, but JSONL parsing still materializes one complete line. A single unusually large line, especially one containing an embedded image, can therefore determine peak memory. The current optimization deliberately avoids forced global garbage collection and a riskier full streaming-parser rewrite.
 
@@ -138,6 +144,10 @@ node .\bin\export-codex-project-chats.mjs --all --out C:\cx\codex-export
 ```
 
 For deliberate local testing only, use `--allow-output-in-tool-dir`.
+
+The exporter also rejects a destination that overlaps a source directly or through a supported alias/link check. A per-folder `.codex-export.lock` prevents two exports from writing to the same destination concurrently.
+
+If a lock remains after a crash, do not delete the output folder or perform recursive cleanup. First ensure no export process is running, inspect the PID and start time stored in `.codex-export.lock`, and remove only that confirmed stale lock file.
 
 ## PowerShell says `node` was not found. What now?
 
@@ -162,7 +172,7 @@ Use `--readable-paths` when longer names are preferable.
 
 ## Is `index.html` a full-text search engine?
 
-No. It filters the exported session list by metadata such as project, title, date, model, and active/archived status.
+No. Complete and Readable filter the exported session list by metadata such as project, title, date, model, and active/archived status. Source snapshots intentionally omits title, model, and Markdown columns and filters only its reduced metadata.
 
 Search transcript content in the exported Markdown files with your editor, operating-system search, `rg`, or another dedicated session-search tool.
 

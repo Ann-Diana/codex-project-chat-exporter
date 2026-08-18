@@ -1,6 +1,6 @@
 # Codex Project Chat Exporter archive format version 1
 
-This document specifies the current local export representation produced by Codex Project Chat Exporter 0.1.0. It describes preservation and reading-view semantics; it does not define a working Codex import format.
+This document specifies archive format version 1 independently of the exporter or extension product version. It describes preservation and reading-view semantics; it does not define a working Codex import format.
 
 ## Representation model
 
@@ -90,6 +90,8 @@ For raw-disabled output:
 - `raw_sha256` is empty;
 - raw size and source-copy fields are `null`.
 
+In concrete manifest form, omitted Raw data uses `snapshot_status: "NOT_INCLUDED"`, `raw_copy_status: "NOT_INCLUDED"`, `raw_verified_at: null`, and `raw_sha256: ""`.
+
 `STABLE` describes only the source observed during the snapshot operation. `raw_verified_at` records when the export-time hash check completed; `VERIFIED_AT_EXPORT` states that the bytes read from the published Raw path matched `raw_sha256` during that check, not that integrity continues afterward. Raw files remain mutable; size and modification time are change indicators, not cryptographic proof. `raw_sha256` allows a later consumer to hash the current Raw file again and detect a mismatch.
 
 ## JSONL counts and order
@@ -171,7 +173,7 @@ Markdown includes:
 
 Reasoning, internal events, invalid JSON lines, and other event types remain available only in raw JSONL unless separately rendered. Markdown masking is best effort and does not make the view safe to share.
 
-`index.html` and `index.md` provide metadata navigation. The HTML index filters project, title, date, model, and storage status; it is not a transcript full-text search engine.
+`index.html` and, where present, `index.md` provide metadata navigation. Complete and Readable HTML indexes filter project, title, date, model, and storage status; they are not transcript full-text search engines.
 
 The `source-snapshots` profile intentionally omits Markdown transcripts and `index.md`. Its HTML metadata index links only to Raw snapshots checked at export time and does not imply that event classification was performed; classification-derived counters are `null` in that profile.
 
@@ -179,7 +181,7 @@ The `source-snapshots` profile intentionally omits Markdown transcripts and `ind
 
 Version 1 prepares portable preservation metadata but implements no import command and has no validated Codex roundtrip. It does not promise reconstruction of Codex UI state, indexes, project registration, sidebar history, attachment files, or future compatibility with Codex's internal format.
 
-A future importer must use canonical raw JSONL and validated manifest mapping. It must hash every current Raw file again, compare that digest with `raw_sha256`, and reject any mismatch before consuming the file. Markdown or HTML alone is insufficient. Version 1 claims neither permanent tamper resistance nor sealing or import readiness.
+A future importer must use canonical raw JSONL and validated manifest mapping. It must hash every current Raw file again, compare that digest with `raw_sha256`, and reject any mismatch before consuming the file. It must also avoid overwriting an existing local session unless a separately designed, explicit conflict policy proves that action safe. Markdown or HTML alone is insufficient. Neither the format version, a stored hash, nor portable source mapping establishes import capability, permanent tamper resistance, sealing, or restore readiness.
 
 ## Privacy boundary
 
