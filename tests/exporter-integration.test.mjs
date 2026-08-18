@@ -218,6 +218,14 @@ const apiProfileText = await fs.readFile(apiProfilePath, "utf8");
 const apiProfile = JSON.parse(apiProfileText);
 assert.equal(apiProfile.performance_profile_version, 1);
 assert.equal(apiProfile.status, "COMPLETED");
+
+await assert.rejects(() => exportArchive({
+  codexHome,
+  scope: "all",
+  outputDirectory: path.join(codexHome, "sessions", "unsafe-export"),
+  exportProfile: "source-snapshots",
+}), (error) => error?.code === "OUTPUT_OVERLAPS_SOURCE");
+assert.equal(await pathExists(path.join(codexHome, "sessions", "unsafe-export")), false, "overlapping output roots must be rejected before mkdir or any export write");
 assert.equal(apiProfile.raw_enabled, false);
 assert.equal(apiProfile.counts.scanned_sessions, 7);
 assert.equal(apiProfile.counts.exported_sessions, 5);

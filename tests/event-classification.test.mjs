@@ -236,6 +236,49 @@ try {
   assert.equal(snapshot.sourceBeforeSizeBytes, snapshot.sourceAfterSizeBytes);
   assert.equal(snapshot.sourceBeforeMtimeMs, snapshot.sourceAfterMtimeMs);
 
+  await assert.rejects(() => copyStableRawSnapshot(source, source, { maxAttempts: 1 }), (error) => error?.code === "OUTPUT_OVERLAPS_SOURCE");
+  assert.equal(await fs.readFile(source, "utf8"), `${JSON.stringify(sessionMeta())}\n`, "the validated same-path reproduction must leave the source unchanged");
+
+  const existingDestination = path.join(temp, "raw", "existing.jsonl");
+  await fs.mkdir(path.dirname(existingDestination), { recursive: true });
+  await fs.writeFile(existingDestination, "PREVIOUS", "utf8");
+  await assert.rejects(() => copyStableRawSnapshot(source, existingDestination, {
+    maxAttempts: 1,
+    io: {
+      hashFile: async (file) => {
+        if (path.resolve(file) === path.resolve(existingDestination)) {
+          const error = new Error("synthetic published hash failure");
+          error.code = "EIO";
+          throw error;
+        }
+        return sha256File(file);
+      },
+    },
+  }), (error) => error?.code === "SOURCE_SNAPSHOT_FAILED");
+  assert.equal(await fs.readFile(existingDestination, "utf8"), "PREVIOUS", "a failed export must restore rather than delete a pre-existing destination");
+
+  const hardlinkDestination = path.join(temp, "raw", "hardlink-source.jsonl");
+  await fs.link(source, hardlinkDestination);
+  await assert.rejects(() => copyStableRawSnapshot(source, hardlinkDestination, { maxAttempts: 1 }), (error) => error?.code === "OUTPUT_OVERLAPS_SOURCE");
+  assert.equal(await fs.readFile(source, "utf8"), `${JSON.stringify(sessionMeta())}\n`, "hardlink alias rejection must preserve the source");
+
+  const symlinkDestination = path.join(temp, "raw", "symlink-source.jsonl");
+  try {
+    await fs.symlink(source, symlinkDestination, "file");
+    await assert.rejects(() => copyStableRawSnapshot(source, symlinkDestination, { maxAttempts: 1 }), (error) => error?.code === "UNSAFE_EXPORT_PATH");
+    assert.equal(await fs.readFile(source, "utf8"), `${JSON.stringify(sessionMeta())}\n`, "symlink alias rejection must preserve the source");
+  } catch (error) {
+    if (!["EPERM", "EACCES", "ENOSYS"].includes(error?.code)) throw error;
+  }
+
+  const occupiedTemporary = path.join(temp, "raw", "occupied.partial");
+  await fs.link(source, occupiedTemporary);
+  await assert.rejects(() => copyStableRawSnapshot(source, path.join(temp, "raw", "occupied-target.jsonl"), {
+    maxAttempts: 1,
+    makeTemporaryPath: () => occupiedTemporary,
+  }), (error) => error?.code === "UNSAFE_EXPORT_PATH");
+  assert.equal(await fs.readFile(source, "utf8"), `${JSON.stringify(sessionMeta())}\n`, "an occupied temporary alias must never be removed or overwritten");
+
   const changedDestination = path.join(temp, "raw", "changed.jsonl");
   await assert.rejects(() => copyStableRawSnapshot(source, changedDestination, {
     maxAttempts: 1,

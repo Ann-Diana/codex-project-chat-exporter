@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import fs from "node:fs";
 import fsp from "node:fs/promises";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
@@ -398,6 +398,7 @@ async function runCommandInternal({ print, profiler }) {
   }
   profiler?.setCounts({ exportedSessions: selected.length });
 
+  await assertSeparatedExportRoot(outputDir, locations.map((location) => location.root));
   await fsp.mkdir(outputDir, { recursive: true });
   if (exportFormats.markdown) await fsp.mkdir(path.join(outputDir, markdownDirName), { recursive: true });
   if (copyRaw) await fsp.mkdir(path.join(outputDir, "raw"), { recursive: true });
@@ -1217,10 +1218,12 @@ async function readLatestTimestamp(file, fallback = "") {
 }
 
 async function copyStableRawSnapshot(sourcePath, destinationPath, options = {}) {
-  const io = { copyFile: fsp.copyFile, hashFile: sha256File, rename: fsp.rename, rm: fsp.rm, stat: fsp.stat, ...options.io };
+  const io = { copyFile: fsp.copyFile, hashFile: sha256File, lstat: fsp.lstat, realpath: fsp.realpath, rename: fsp.rename, rm: fsp.rm, stat: fsp.stat, ...options.io };
   const maxAttempts = Math.max(1, options.maxAttempts || 3);
   const diagnostic = typeof options.diagnostic === "function" ? options.diagnostic : () => {};
   const diagnosticContext = options.diagnosticContext || {};
+  const sourceIdentity = await inspectSeparatedPath(sourcePath, { io, requireRegularFile: true });
+  await assertSnapshotDestinationSeparated(sourceIdentity, destinationPath, io);
   await fsp.mkdir(path.dirname(destinationPath), { recursive: true });
   let lastReason = "source changed during export";
   let routingSnapshotReusable = isStableRoutingSnapshot(options.routingSnapshot);
@@ -1229,9 +1232,14 @@ async function copyStableRawSnapshot(sourcePath, destinationPath, options = {}) 
     options.profiler?.recordSnapshotAttempt(options.profileSession);
     const attemptStartedAt = performance.now();
     diagnostic("snapshot_attempt_start", { ...diagnosticContext, attempt });
-    const temporaryPath = `${destinationPath}.partial-${process.pid}-${attempt}`;
+    const temporaryPath = options.makeTemporaryPath
+      ? options.makeTemporaryPath({ destinationPath, attempt })
+      : `${destinationPath}.partial-${process.pid}-${attempt}-${randomUUID()}`;
     let published = false;
-    await io.rm(temporaryPath, { force: true }).catch(() => {});
+    let temporaryOwned = false;
+    let previousDestination = null;
+    let publishedIdentity = null;
+    await assertSnapshotTemporarySeparated(sourceIdentity, destinationPath, temporaryPath, io);
     try {
       const before = await timedSnapshotStat(sourcePath, "source_before_copy", attempt);
       let sourceSha256 = "";
@@ -1261,7 +1269,8 @@ async function copyStableRawSnapshot(sourcePath, destinationPath, options = {}) 
       if (options.beforeCopy) await options.beforeCopy({ attempt, sourcePath, temporaryPath, sourceHashBasis });
       const copyStart = performance.now();
       diagnostic("snapshot_copy_start", { ...diagnosticContext, attempt });
-      await io.copyFile(sourcePath, temporaryPath);
+      await io.copyFile(sourcePath, temporaryPath, fs.constants.COPYFILE_EXCL);
+      temporaryOwned = true;
       const copiedStat = await timedSnapshotStat(temporaryPath, "temporary_after_copy", attempt);
       const copyMs = performance.now() - copyStart;
       diagnostic("snapshot_copy_end", { ...diagnosticContext, attempt, duration_ms: roundMs(copyMs), bytes: copiedStat.size });
@@ -1272,9 +1281,11 @@ async function copyStableRawSnapshot(sourcePath, destinationPath, options = {}) 
       const stableMetadata = sameFileVersion(before, afterCopy) && copiedStat.size === before.size;
       if (stableMetadata) {
         if (options.beforeExportVerification) await options.beforeExportVerification({ attempt, sourcePath, temporaryPath });
-        await io.rm(destinationPath, { force: true }).catch(() => {});
+        previousDestination = await moveExistingDestinationAside(sourceIdentity, destinationPath, io);
         await io.rename(temporaryPath, destinationPath);
+        temporaryOwned = false;
         published = true;
+        publishedIdentity = await inspectSeparatedPath(destinationPath, { io, requireRegularFile: true, requireReliableIdentity: true });
         const exportedBeforeVerification = await timedSnapshotStat(destinationPath, "published_before_verification", attempt);
         const exportHashStart = performance.now();
         const exportHashStage = options.verifyPublishedSnapshot ? "snapshot_parse" : "snapshot";
@@ -1291,6 +1302,8 @@ async function copyStableRawSnapshot(sourcePath, destinationPath, options = {}) 
         const exportedAfterVerification = await timedSnapshotStat(destinationPath, "published_after_verification", attempt);
         const exportedStable = verification.stable !== false && sameFileVersion(exportedBeforeVerification, exportedAfterVerification);
         if (exportedStable && verification.sizeBytes === before.size && verification.sha256 === sourceSha256) {
+          await removeOwnedTemporary(previousDestination, io);
+          previousDestination = null;
           diagnostic("snapshot_attempt_end", { ...diagnosticContext, attempt, status: "STABLE", duration_ms: roundMs(performance.now() - attemptStartedAt) });
           return {
             sha256: verification.sha256,
@@ -1309,7 +1322,8 @@ async function copyStableRawSnapshot(sourcePath, destinationPath, options = {}) 
         lastReason = exportedStable ? "published bytes differ from the stable source hash" : "published snapshot changed while it was verified";
         routingSnapshotReusable = false;
         diagnostic("snapshot_attempt_end", { ...diagnosticContext, attempt, status: "RETRY", reason: exportedStable ? "HASH_MISMATCH" : "EXPORT_CHANGED", duration_ms: roundMs(performance.now() - attemptStartedAt) });
-        await io.rm(destinationPath, { force: true }).catch(() => {});
+        await rollbackPublishedDestination(destinationPath, publishedIdentity, previousDestination, io);
+        previousDestination = null;
         published = false;
       } else {
         lastReason = copiedStat.size === before.size ? "source size or modification time changed" : "copied snapshot size differs from the source";
@@ -1318,12 +1332,20 @@ async function copyStableRawSnapshot(sourcePath, destinationPath, options = {}) 
       }
     } catch (error) {
       diagnostic("snapshot_attempt_end", { ...diagnosticContext, attempt, status: "ERROR", error_code: error?.code || "UNKNOWN", duration_ms: roundMs(performance.now() - attemptStartedAt) });
-      await io.rm(temporaryPath, { force: true }).catch(() => {});
-      if (published) await io.rm(destinationPath, { force: true }).catch(() => {});
+      if (published) {
+        try {
+          await rollbackPublishedDestination(destinationPath, publishedIdentity, previousDestination, io);
+          previousDestination = null;
+        } catch (rollbackError) {
+          throw new ExportError("UNSAFE_EXPORT_PATH", `Could not safely roll back the published raw snapshot: ${rollbackError?.message || rollbackError}`);
+        }
+      }
+      if (temporaryOwned) await removeOwnedTemporary({ path: temporaryPath, identity: await inspectSeparatedPath(temporaryPath, { io, requireRegularFile: true, requireReliableIdentity: true }) }, io);
+      if (previousDestination) await restorePreviousDestination(destinationPath, previousDestination, io);
       if (["EACCES", "EBUSY", "EPERM"].includes(error?.code)) throw new ExportError("SOURCE_SNAPSHOT_LOCKED", `Could not create a stable raw snapshot because the source file is locked or inaccessible: ${path.basename(sourcePath)}`);
       throw new ExportError("SOURCE_SNAPSHOT_FAILED", `Could not create a stable raw snapshot for ${path.basename(sourcePath)}: ${error?.message || error}`);
     }
-    await io.rm(temporaryPath, { force: true }).catch(() => {});
+    if (temporaryOwned) await removeOwnedTemporary({ path: temporaryPath, identity: await inspectSeparatedPath(temporaryPath, { io, requireRegularFile: true, requireReliableIdentity: true }) }, io);
     if (attempt < maxAttempts) options.profiler?.recordSnapshotRetryCount(1);
   }
 
@@ -1357,6 +1379,151 @@ function routingSnapshotMatches(snapshot, stat) {
 
 function sameFileVersion(left, right) {
   return left.size === right.size && left.mtimeMs === right.mtimeMs;
+}
+
+async function assertSeparatedExportRoot(candidateOutputRoot, sourceRoots) {
+  const output = await inspectSeparatedPath(candidateOutputRoot, { allowMissing: true });
+  for (const sourceRoot of sourceRoots) {
+    const source = await inspectSeparatedPath(sourceRoot, { requireDirectory: true });
+    if (pathsOverlap(output.canonicalPath, source.canonicalPath)) {
+      throw new ExportError("OUTPUT_OVERLAPS_SOURCE", `Refusing to export into or above a Codex session source folder: ${path.basename(candidateOutputRoot)}`);
+    }
+  }
+}
+
+async function assertSnapshotDestinationSeparated(sourceIdentity, destinationPath, io) {
+  const destination = await inspectSeparatedPath(destinationPath, { allowMissing: true, io });
+  assertDistinctPathIdentity(sourceIdentity, destination, "Raw destination aliases its source session file");
+}
+
+async function assertSnapshotTemporarySeparated(sourceIdentity, destinationPath, temporaryPath, io) {
+  const destination = await inspectSeparatedPath(destinationPath, { allowMissing: true, io });
+  const temporary = await inspectSeparatedPath(temporaryPath, { allowMissing: true, io });
+  if (temporary.exists) throw new ExportError("UNSAFE_EXPORT_PATH", `Refusing to reuse an existing raw snapshot temporary file: ${path.basename(temporaryPath)}`);
+  assertDistinctPathIdentity(sourceIdentity, destination, "Raw destination aliases its source session file");
+  assertDistinctPathIdentity(sourceIdentity, temporary, "Raw temporary path aliases its source session file");
+  if (sameCanonicalPath(destination.canonicalPath, temporary.canonicalPath)) throw new ExportError("UNSAFE_EXPORT_PATH", "Raw destination and temporary path resolve to the same path");
+}
+
+async function moveExistingDestinationAside(sourceIdentity, destinationPath, io) {
+  const destination = await inspectSeparatedPath(destinationPath, { allowMissing: true, io, requireRegularFile: true, requireReliableIdentity: true });
+  if (!destination.exists) return null;
+  assertDistinctPathIdentity(sourceIdentity, destination, "Existing Raw destination aliases its source session file");
+  const backupPath = `${destinationPath}.previous-${process.pid}-${randomUUID()}`;
+  const backup = await inspectSeparatedPath(backupPath, { allowMissing: true, io });
+  if (backup.exists) throw new ExportError("UNSAFE_EXPORT_PATH", `Refusing to reuse an existing raw snapshot backup file: ${path.basename(backupPath)}`);
+  await io.rename(destinationPath, backupPath);
+  const moved = await inspectSeparatedPath(backupPath, { io, requireRegularFile: true, requireReliableIdentity: true });
+  if (!sameReliableFileIdentity(destination, moved)) {
+    await restoreUnexpectedMove(destinationPath, backupPath, moved, io);
+    throw new ExportError("UNSAFE_EXPORT_PATH", "Existing Raw destination identity changed while it was moved aside");
+  }
+  return { path: backupPath, identity: moved };
+}
+
+async function rollbackPublishedDestination(destinationPath, publishedIdentity, previousDestination, io) {
+  if (!publishedIdentity) throw new ExportError("UNSAFE_EXPORT_PATH", "Published Raw destination identity was not established");
+  const current = await inspectSeparatedPath(destinationPath, { io, requireRegularFile: true, requireReliableIdentity: true });
+  if (!sameReliableFileIdentity(publishedIdentity, current)) throw new ExportError("UNSAFE_EXPORT_PATH", "Published Raw destination was replaced before rollback");
+  const failedPath = `${destinationPath}.failed-${process.pid}-${randomUUID()}`;
+  const failedCandidate = await inspectSeparatedPath(failedPath, { allowMissing: true, io });
+  if (failedCandidate.exists) throw new ExportError("UNSAFE_EXPORT_PATH", `Refusing to reuse an existing failed snapshot path: ${path.basename(failedPath)}`);
+  await io.rename(destinationPath, failedPath);
+  const failedIdentity = await inspectSeparatedPath(failedPath, { io, requireRegularFile: true, requireReliableIdentity: true });
+  if (!sameReliableFileIdentity(publishedIdentity, failedIdentity)) {
+    await restoreUnexpectedMove(destinationPath, failedPath, failedIdentity, io);
+    throw new ExportError("UNSAFE_EXPORT_PATH", "Published Raw destination identity changed during rollback");
+  }
+  if (previousDestination) await restorePreviousDestination(destinationPath, previousDestination, io);
+  await removeOwnedTemporary({ path: failedPath, identity: failedIdentity }, io);
+}
+
+async function restorePreviousDestination(destinationPath, previousDestination, io) {
+  const destination = await inspectSeparatedPath(destinationPath, { allowMissing: true, io });
+  if (destination.exists) throw new ExportError("UNSAFE_EXPORT_PATH", "Refusing to overwrite a destination while restoring the previous Raw snapshot");
+  const previous = await inspectSeparatedPath(previousDestination.path, { io, requireRegularFile: true, requireReliableIdentity: true });
+  if (!sameReliableFileIdentity(previousDestination.identity, previous)) throw new ExportError("UNSAFE_EXPORT_PATH", "Previous Raw destination identity changed before restoration");
+  await io.rename(previousDestination.path, destinationPath);
+}
+
+async function restoreUnexpectedMove(destinationPath, movedPath, movedIdentity, io) {
+  const destination = await inspectSeparatedPath(destinationPath, { allowMissing: true, io });
+  if (destination.exists) throw new ExportError("UNSAFE_EXPORT_PATH", "Could not restore a moved file because the destination was replaced");
+  const moved = await inspectSeparatedPath(movedPath, { io, requireRegularFile: true, requireReliableIdentity: true });
+  if (!sameReliableFileIdentity(movedIdentity, moved)) throw new ExportError("UNSAFE_EXPORT_PATH", "Could not restore a moved file because its identity changed");
+  await io.rename(movedPath, destinationPath);
+}
+
+async function removeOwnedTemporary(owned, io) {
+  if (!owned) return;
+  const current = await inspectSeparatedPath(owned.path, { io, requireRegularFile: true, requireReliableIdentity: true });
+  if (!sameReliableFileIdentity(owned.identity, current)) throw new ExportError("UNSAFE_EXPORT_PATH", `Refusing to remove a temporary file whose identity changed: ${path.basename(owned.path)}`);
+  await io.rm(owned.path);
+}
+
+async function inspectSeparatedPath(candidatePath, options = {}) {
+  const io = { lstat: fsp.lstat, realpath: fsp.realpath, stat: fsp.stat, ...options.io };
+  const absolutePath = path.resolve(candidatePath);
+  let lstat;
+  try {
+    lstat = await io.lstat(absolutePath);
+  } catch (error) {
+    if (error?.code !== "ENOENT" || !options.allowMissing) throw new ExportError("UNSAFE_EXPORT_PATH", `Could not inspect path separation for ${path.basename(candidatePath)}: ${error?.message || error}`);
+  }
+  if (lstat) {
+    if (lstat.isSymbolicLink()) throw new ExportError("UNSAFE_EXPORT_PATH", `Symbolic-link or junction path is not accepted for snapshot publication: ${path.basename(candidatePath)}`);
+    const canonicalPath = await io.realpath(absolutePath);
+    const stat = await io.stat(canonicalPath);
+    if (options.requireRegularFile && !stat.isFile()) throw new ExportError("UNSAFE_EXPORT_PATH", `Expected a regular file while checking path separation: ${path.basename(candidatePath)}`);
+    if (options.requireDirectory && !stat.isDirectory()) throw new ExportError("UNSAFE_EXPORT_PATH", `Expected a directory while checking path separation: ${path.basename(candidatePath)}`);
+    const identity = reliableFileIdentity(stat);
+    if (options.requireReliableIdentity && !identity) throw new ExportError("UNSAFE_EXPORT_PATH", `Reliable file identity is unavailable for ${path.basename(candidatePath)}`);
+    return { absolutePath, canonicalPath, exists: true, identity, stat };
+  }
+  const canonicalPath = await canonicalizeMissingPath(absolutePath, io);
+  return { absolutePath, canonicalPath, exists: false, identity: null, stat: null };
+}
+
+async function canonicalizeMissingPath(absolutePath, io) {
+  let ancestor = absolutePath;
+  const suffix = [];
+  while (true) {
+    try {
+      const lstat = await io.lstat(ancestor);
+      if (lstat.isSymbolicLink()) throw new ExportError("UNSAFE_EXPORT_PATH", `Symbolic-link or junction ancestor is not accepted: ${path.basename(ancestor)}`);
+      const realAncestor = await io.realpath(ancestor);
+      return path.join(realAncestor, ...suffix);
+    } catch (error) {
+      if (error instanceof ExportError) throw error;
+      if (error?.code !== "ENOENT") throw new ExportError("UNSAFE_EXPORT_PATH", `Could not resolve path separation for ${path.basename(absolutePath)}: ${error?.message || error}`);
+      const parent = path.dirname(ancestor);
+      if (parent === ancestor) throw new ExportError("UNSAFE_EXPORT_PATH", `No existing ancestor could be resolved for ${path.basename(absolutePath)}`);
+      suffix.unshift(path.basename(ancestor));
+      ancestor = parent;
+    }
+  }
+}
+
+function reliableFileIdentity(stat) {
+  if (!Number.isInteger(stat?.dev) || !Number.isInteger(stat?.ino) || stat.dev < 0 || stat.ino <= 0) return null;
+  return `${stat.dev}:${stat.ino}`;
+}
+
+function sameReliableFileIdentity(left, right) {
+  return Boolean(left?.identity && right?.identity && left.identity === right.identity);
+}
+
+function assertDistinctPathIdentity(left, right, message) {
+  if (sameCanonicalPath(left.canonicalPath, right.canonicalPath) || sameReliableFileIdentity(left, right)) throw new ExportError("OUTPUT_OVERLAPS_SOURCE", message);
+  if (left.exists && right.exists && (!left.identity || !right.identity)) throw new ExportError("UNSAFE_EXPORT_PATH", "Reliable file identity is required to prove source and destination separation");
+}
+
+function sameCanonicalPath(left, right) {
+  return normalizePathForCompare(left) === normalizePathForCompare(right);
+}
+
+function pathsOverlap(left, right) {
+  return isPathInside(left, right) || isPathInside(right, left);
 }
 
 function isCanonicalIsoTimestamp(value) {
