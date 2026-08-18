@@ -10,7 +10,7 @@ All notable changes to this project are documented here.
 - Added Complete, Readable, and Source snapshots profiles with progress reporting and targeted snapshot performance improvements.
 - Replaced continuing Raw-integrity claims with export-time verification metadata and documented mandatory rehashing for later use.
 - Added source/output and link-alias separation, run-owned cleanup, isolated export contexts, and same-destination locking.
-- Prepared the experimental VS Code integration with three visible commands, scope/profile Quick Picks, user-scoped sensitive paths, and local-host trust checks.
+- Prepared the experimental VS Code integration with three visible commands, scope/profile Quick Picks, application-scoped sensitive paths, and local-host trust checks.
 - Aligned export, privacy, archive-format, and security documentation with the current unreleased branch.
 
 ### Fixed

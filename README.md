@@ -8,7 +8,7 @@ Codex's currently observed experimental `/export` exports one conversation. Code
 
 - Sessions are grouped by their stored project/work directory.
 - Three profiles cover complete exports, reading views without Raw, and source snapshots verified at export time without transcripts.
-- Processing stays local: no telemetry, built-in upload, or application-level HTTP, web, or API calls.
+- Session content is processed on the machine running the exporter. The exporter includes no telemetry or built-in upload.
 - It does not import sessions back into Codex.
 
 > Unofficial project. Not affiliated with, endorsed by, or supported by OpenAI.
@@ -20,7 +20,7 @@ Codex's currently observed experimental `/export` exports one conversation. Code
 - All detected sessions or only one matching project/work folder.
 - Classified Markdown reading views for direct user turns, assistant responses, subagent inputs, runtime contexts, and uncertain user-role records.
 - A filterable local HTML index and a machine-readable manifest.
-- Optional raw JSONL snapshots whose published paths are checked against stable source hashes during export.
+- Optional byte-preserving raw JSONL snapshots with an export-time SHA-256 verification.
 - Optional tool-call input and output in Markdown.
 - Short Windows-friendly paths by default, with a readable-path option.
 
@@ -73,7 +73,7 @@ Choose one profile:
 
 Use **Readable** for browsing and searching exported transcripts. **Complete** and **Source snapshots** can be substantially larger and slower because they copy Raw JSONL and verify it with SHA-256.
 
-Show all list, diagnosis, profile, tool, path, and raw-output options:
+Show all CLI options:
 
 ```powershell
 node .\bin\export-codex-project-chats.mjs --help
@@ -111,7 +111,6 @@ When included, raw JSONL is the canonical byte-preserving representation. `raw_c
 
 ## Privacy
 
-- All processing is local.
 - The application sends no telemetry, performs no built-in upload, and makes no application-level HTTP, web, or API calls.
 - Configured filesystem paths can still point to network-backed storage. Mapped network drives cannot be identified reliably in every configuration.
 - Markdown masking covers only some common token-shaped secrets and long base64-like values; it is best effort, not complete redaction.

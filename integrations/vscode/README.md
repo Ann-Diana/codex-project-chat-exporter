@@ -33,8 +33,8 @@ The extension keeps the older direct-command IDs registered for compatibility, b
 
 ## Settings
 
-- `codexProjectChatExporter.outputDirectory`: absolute local export folder in VS Code User settings. Workspace and Workspace Folder values are rejected. UNC and Windows device paths are rejected; mapped network drives cannot be identified portably and are not claimed to be detected. If empty, the extension asks on first export and remembers the selected folder.
-- `codexProjectChatExporter.codexHome`: optional absolute local Codex home folder in VS Code User settings. Workspace and Workspace Folder values are rejected. Empty uses `CODEX_HOME` or the default local `.codex` folder.
+- `codexProjectChatExporter.outputDirectory`: absolute export folder in VS Code User settings. Workspace and Workspace Folder values are rejected. UNC and Windows device paths are rejected; mapped network drives cannot be identified portably and are not claimed to be detected. If empty, the extension asks on first export and remembers the selected folder.
+- `codexProjectChatExporter.codexHome`: optional absolute Codex home folder in VS Code User settings. Workspace and Workspace Folder values are rejected. Empty uses `CODEX_HOME` or the default local `.codex` folder.
 - **Export…** asks for one of three profiles on every run:
   - **Complete** creates `raw/` checked at export time, Markdown transcripts, `index.html`, `index.md`, `manifest.json`, and `README.txt`.
   - **Readable** creates Markdown transcripts, both indexes, `manifest.json`, and `README.txt` without new Raw snapshots.
