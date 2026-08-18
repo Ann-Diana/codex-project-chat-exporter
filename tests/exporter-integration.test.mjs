@@ -219,6 +219,42 @@ const apiProfile = JSON.parse(apiProfileText);
 assert.equal(apiProfile.performance_profile_version, 1);
 assert.equal(apiProfile.status, "COMPLETED");
 
+const protectedSource = path.join(activeDir, "rollout-active.jsonl");
+const protectedSourceHash = await sha256File(protectedSource);
+const manifestAliasOutput = path.join(temp, "manifest-alias-output");
+await fs.mkdir(manifestAliasOutput, { recursive: true });
+await fs.link(protectedSource, path.join(manifestAliasOutput, "manifest.json"));
+await assert.rejects(() => exportArchive({ codexHome, scope: "all", outputDirectory: manifestAliasOutput, exportProfile: "readable" }), (error) => error?.code === "OUTPUT_OVERLAPS_SOURCE");
+assert.equal(await sha256File(protectedSource), protectedSourceHash, "a hard-linked manifest destination must never modify its source session");
+
+const manifestSymlinkOutput = path.join(temp, "manifest-symlink-output");
+await fs.mkdir(manifestSymlinkOutput, { recursive: true });
+try {
+  await fs.symlink(protectedSource, path.join(manifestSymlinkOutput, "manifest.json"), "file");
+  await assert.rejects(() => exportArchive({ codexHome, scope: "all", outputDirectory: manifestSymlinkOutput, exportProfile: "readable" }), (error) => error?.code === "UNSAFE_EXPORT_PATH");
+  assert.equal(await sha256File(protectedSource), protectedSourceHash, "a symlinked manifest destination must never modify its source session");
+} catch (error) {
+  if (!["EPERM", "EACCES", "ENOSYS"].includes(error?.code)) throw error;
+}
+
+const markdownAliasOutput = path.join(temp, "markdown-alias-output");
+const markdownAliasPath = path.join(markdownAliasOutput, activeSession.markdown_file);
+await fs.mkdir(path.dirname(markdownAliasPath), { recursive: true });
+await fs.link(protectedSource, markdownAliasPath);
+await assert.rejects(() => exportArchive({ codexHome, scope: "all", outputDirectory: markdownAliasOutput, exportProfile: "readable" }), (error) => error?.code === "OUTPUT_OVERLAPS_SOURCE");
+assert.equal(await sha256File(protectedSource), protectedSourceHash, "a hard-linked Markdown destination must never modify its source session");
+
+const profileAliasOutput = path.join(temp, "profile-alias-output");
+const profileAliasPath = path.join(temp, "profile-alias.json");
+await fs.link(protectedSource, profileAliasPath);
+await assert.rejects(() => exportArchive({ codexHome, scope: "all", outputDirectory: profileAliasOutput, exportProfile: "readable", performanceProfilePath: profileAliasPath }), (error) => error?.code === "OUTPUT_OVERLAPS_SOURCE");
+assert.equal(await sha256File(protectedSource), protectedSourceHash, "a hard-linked performance profile must never modify its source session");
+assert.equal(await pathExists(path.join(profileAliasOutput, ".codex-export.lock")), false, "a rejected performance profile must not leave the output lock behind");
+
+const profileInsideSource = path.join(activeDir, "unsafe-performance-profile.json");
+await assert.rejects(() => exportArchive({ codexHome, scope: "all", outputDirectory: path.join(temp, "profile-inside-source-output"), exportProfile: "readable", performanceProfilePath: profileInsideSource }), (error) => error?.code === "OUTPUT_OVERLAPS_SOURCE");
+assert.equal(await pathExists(profileInsideSource), false, "a performance profile must never be created inside a source-session directory");
+
 await assert.rejects(() => exportArchive({
   codexHome,
   scope: "all",

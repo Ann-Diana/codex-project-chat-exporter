@@ -222,17 +222,19 @@ function createDiagnosticReporter(callback) {
 async function runCommand(context, { print }) {
   const { performanceProfilePath, copyRaw, exportAll, exportProfile } = context;
   const profiler = performanceProfilePath ? createPerformanceProfiler({ rawEnabled: copyRaw, scope: exportAll ? "all" : "workspace", profile: exportProfile }) : null;
+  const runState = { sourceProtection: null };
   let result;
   let failure;
   try {
-    result = await runCommandInternal(context, { print, profiler });
+    result = await runCommandInternal(context, { print, profiler, runState });
   } catch (error) {
     failure = error;
   }
-  if (profiler) {
+  if (profiler && runState.sourceProtection) {
     const profile = profiler.finish({ status: failure ? "FAILED" : "COMPLETED", errorCode: failure?.code || "" });
-    await fsp.mkdir(path.dirname(performanceProfilePath), { recursive: true });
-    await fsp.writeFile(performanceProfilePath, `${JSON.stringify(profile, null, 2)}\n`, "utf8");
+    await assertPerformanceProfileSeparated(performanceProfilePath, context.outputDir, runState.sourceProtection);
+    await ensureSeparatedOutputDirectory(path.dirname(performanceProfilePath), runState.sourceProtection, { rejectSourceDescendants: false });
+    await writeSeparatedOutputFile(performanceProfilePath, runState.sourceProtection, (handle) => handle.writeFile(`${JSON.stringify(profile, null, 2)}\n`, "utf8"));
     if (result) {
       result.performanceProfilePath = performanceProfilePath;
       result.performanceProfile = profile;
@@ -242,7 +244,7 @@ async function runCommand(context, { print }) {
   return result;
 }
 
-async function runCommandInternal(context, { print, profiler }) {
+async function runCommandInternal(context, { print, profiler, runState }) {
   const {
     args,
     codexHome,
@@ -311,6 +313,8 @@ async function runCommandInternal(context, { print, profiler }) {
     throw new ExportError("NO_SESSIONS", `No rollout JSONL files found under: ${locations.map((location) => location.root).join(", ")}`);
   }
   files.sort((a, b) => a.file.localeCompare(b.file));
+  const sourceProtection = await createSourceProtection(files, locations);
+  runState.sourceProtection = sourceProtection;
   const titleIndex = await readSessionIndex(sessionIndexPath, profiler);
   profiler?.addPhase("session_discovery_and_metadata", performance.now() - discoveryStart);
   runtimeTimings.discovery_ms = roundMs(performance.now() - discoveryStart);
@@ -393,11 +397,11 @@ async function runCommandInternal(context, { print, profiler }) {
   profiler?.setCounts({ exportedSessions: selected.length });
 
   await assertSeparatedExportRoot(outputDir, locations.map((location) => location.root));
-  await fsp.mkdir(outputDir, { recursive: true });
-  const exportLock = await acquireExportLock(outputDir);
+  await ensureSeparatedOutputDirectory(outputDir, sourceProtection);
+  const exportLock = await acquireExportLock(outputDir, sourceProtection);
   try {
-  if (exportFormats.markdown) await fsp.mkdir(path.join(outputDir, markdownDirName), { recursive: true });
-  if (copyRaw) await fsp.mkdir(path.join(outputDir, "raw"), { recursive: true });
+  if (exportFormats.markdown) await ensureSeparatedOutputDirectory(path.join(outputDir, markdownDirName), sourceProtection);
+  if (copyRaw) await ensureSeparatedOutputDirectory(path.join(outputDir, "raw"), sourceProtection);
 
   const projectDirs = new Map();
   const tasks = [];
@@ -428,7 +432,7 @@ async function runCommandInternal(context, { print, profiler }) {
     const rawRel = path.join("raw", projectDir, rawExportName);
     let snapshot = null;
     if (copyRaw) {
-      await fsp.mkdir(path.join(outputDir, "raw", projectDir), { recursive: true });
+      await ensureSeparatedOutputDirectory(path.join(outputDir, "raw", projectDir), sourceProtection);
       const rawPath = path.join(outputDir, rawRel);
       const verifyPublishedSnapshot = exportFormats.markdown && !needsCompleteInventory
         ? async (publishedPath) => {
@@ -476,17 +480,17 @@ async function runCommandInternal(context, { print, profiler }) {
   if (exportFormats.markdown) progressReporter({ phase: "rendering", message: "Rendering reading views" });
   const processingStartedAt = performance.now();
   const rows = [];
-  for (const task of tasks) rows.push(await processExportTask(task, titleIndex, profiler, context));
+  for (const task of tasks) rows.push(await processExportTask(task, titleIndex, profiler, context, sourceProtection));
   runtimeTimings.processing_ms = roundMs(performance.now() - processingStartedAt);
 
   progressReporter({ phase: "writing", message: "Writing indexes and manifest" });
   const indexesManifestStartedAt = performance.now();
   diagnosticReporter("indexes_and_manifest_start");
-  await writeIndexFiles(outputDir, rows, profiler, context);
+  await writeIndexFiles(outputDir, rows, profiler, context, sourceProtection);
   diagnosticReporter("indexes_and_manifest_end");
   const summaryStart = performance.now();
   diagnosticReporter("summary_start");
-  await writeSummary(outputDir, rows, context);
+  await writeSummary(outputDir, rows, context, sourceProtection);
   profiler?.addPhase("other", performance.now() - summaryStart, 0, (await fsp.stat(path.join(outputDir, "README.txt"))).size);
   diagnosticReporter("summary_end", { duration_ms: roundMs(performance.now() - summaryStart) });
   runtimeTimings.indexes_manifest_ms = roundMs(performance.now() - indexesManifestStartedAt);
@@ -707,7 +711,7 @@ async function readSessionMeta(file, { fallbackSessionId = "", collectAttachment
   return meta;
 }
 
-async function processExportTask(task, titleIndex, profiler, context) {
+async function processExportTask(task, titleIndex, profiler, context, sourceProtection) {
   const { exportFormats, copyRaw, outputDir, redactMarkdown, pathStyle, markdownDirName } = context;
   const { meta, projectDir, sessionCode, sourceOriginalFilename, rawExportName, rawRel, snapshot, parsedSnapshotMeta, metadataAlreadyParsed } = task;
   let renderMeta = meta;
@@ -744,9 +748,9 @@ async function processExportTask(task, titleIndex, profiler, context) {
     const start = renderMeta.timestamp ? stampForName(new Date(renderMeta.timestamp)) : stampForName(new Date());
     const baseName = pathStyle === "readable" ? `${start}-${sessionSlug || "codex-session"}-${sessionCode}` : sessionCode;
     markdownRel = path.join(markdownDirName, projectDir, `${baseName}.md`);
-    await fsp.mkdir(path.join(outputDir, markdownDirName, projectDir), { recursive: true });
+    await ensureSeparatedOutputDirectory(path.join(outputDir, markdownDirName, projectDir), sourceProtection);
     profiler?.recordAttachments(renderMeta.attachmentMetrics);
-    stats = await writeMarkdownTranscript(renderMeta, path.join(outputDir, markdownRel), copyRaw ? rawRel : "", profiler, meta, context);
+    stats = await writeMarkdownTranscript(renderMeta, path.join(outputDir, markdownRel), copyRaw ? rawRel : "", profiler, meta, context, sourceProtection);
   } else {
     const title = neutralSessionTitle(meta);
     renderMeta = { ...meta, title, displayTitle: title, titleSource: "neutral_unclassified_snapshot", indexedTitleStatus: "NOT_EVALUATED", sessionKind: SESSION_KIND.UNKNOWN };
@@ -1391,8 +1395,9 @@ function parseCliInvocation(argv) {
   }
 }
 
-async function acquireExportLock(outputRoot) {
+async function acquireExportLock(outputRoot, sourceProtection) {
   const lockPath = path.join(outputRoot, ".codex-export.lock");
+  await assertSeparatedOutputPath(lockPath, sourceProtection, { allowMissing: true });
   let handle;
   try {
     handle = await fsp.open(lockPath, "wx");
@@ -1409,6 +1414,120 @@ async function acquireExportLock(outputRoot) {
 
 async function releaseExportLock(lock) {
   await removeOwnedTemporary(lock, { lstat: fsp.lstat, realpath: fsp.realpath, rm: fsp.rm, stat: fsp.stat });
+}
+
+async function createSourceProtection(files, locations) {
+  const rootCanonicalPaths = new Set();
+  const fileCanonicalPaths = new Set();
+  const fileIdentities = new Set();
+  for (const location of locations) {
+    const root = await inspectSeparatedPath(location.root, { requireDirectory: true });
+    rootCanonicalPaths.add(normalizePathForCompare(root.canonicalPath));
+  }
+  for (const entry of files) {
+    const source = await inspectSeparatedPath(entry.file, { requireRegularFile: true, requireReliableIdentity: true });
+    fileCanonicalPaths.add(normalizePathForCompare(source.canonicalPath));
+    fileIdentities.add(source.identity);
+  }
+  return Object.freeze({ rootCanonicalPaths, fileCanonicalPaths, fileIdentities });
+}
+
+async function ensureSeparatedOutputDirectory(directoryPath, sourceProtection, options = {}) {
+  const candidate = await inspectSeparatedPath(directoryPath, { allowMissing: true });
+  assertSeparatedFromSources(candidate, sourceProtection, options);
+  await fsp.mkdir(directoryPath, { recursive: true });
+  const created = await inspectSeparatedPath(directoryPath, { requireDirectory: true });
+  assertSeparatedFromSources(created, sourceProtection, options);
+  return created;
+}
+
+async function assertSeparatedOutputPath(candidatePath, sourceProtection, options = {}) {
+  const parent = await inspectSeparatedPath(path.dirname(candidatePath), { requireDirectory: true });
+  assertSeparatedFromSources(parent, sourceProtection, { rejectSourceDescendants: false });
+  const candidate = await inspectSeparatedPath(candidatePath, { allowMissing: options.allowMissing === true, requireRegularFile: options.requireRegularFile === true, requireReliableIdentity: options.requireReliableIdentity === true });
+  assertSeparatedFromSources(candidate, sourceProtection);
+  return candidate;
+}
+
+function assertSeparatedFromSources(candidate, sourceProtection, options = {}) {
+  const canonicalKey = normalizePathForCompare(candidate.canonicalPath);
+  if (sourceProtection.fileCanonicalPaths.has(canonicalKey) || (candidate.identity && sourceProtection.fileIdentities.has(candidate.identity))) {
+    throw new ExportError("OUTPUT_OVERLAPS_SOURCE", `Refusing to write an export file that aliases a Codex session source: ${path.basename(candidate.absolutePath)}`);
+  }
+  for (const sourceRoot of sourceProtection.rootCanonicalPaths) {
+    const insideSource = isPathInside(candidate.canonicalPath, sourceRoot);
+    const containsSource = options.rejectSourceDescendants !== false && isPathInside(sourceRoot, candidate.canonicalPath);
+    if (insideSource || containsSource) throw new ExportError("OUTPUT_OVERLAPS_SOURCE", `Refusing to write inside or above a Codex session source folder: ${path.basename(candidate.absolutePath)}`);
+  }
+}
+
+async function writeSeparatedOutputFile(destinationPath, sourceProtection, writer) {
+  const destinationBefore = await assertSeparatedOutputPath(destinationPath, sourceProtection, { allowMissing: true, requireRegularFile: true, requireReliableIdentity: true });
+  const temporaryPath = `${destinationPath}.partial-${process.pid}-${randomUUID()}`;
+  await assertSeparatedOutputPath(temporaryPath, sourceProtection, { allowMissing: true });
+  let handle;
+  let temporaryOwned = null;
+  let previousDestination = null;
+  let publishedIdentity = null;
+  try {
+    handle = await fsp.open(temporaryPath, "wx");
+    const openedStat = await handle.stat();
+    if (!openedStat.isFile()) throw new ExportError("UNSAFE_EXPORT_PATH", `Expected a regular export file: ${path.basename(destinationPath)}`);
+    const openedIdentity = reliableFileIdentity(openedStat);
+    if (!openedIdentity) throw new ExportError("UNSAFE_EXPORT_PATH", `Reliable file identity is unavailable for ${path.basename(temporaryPath)}`);
+    temporaryOwned = { path: temporaryPath, identity: { identity: openedIdentity } };
+    await writer(handle);
+    const writtenStat = await handle.stat();
+    if (reliableFileIdentity(writtenStat) !== openedIdentity) throw new ExportError("UNSAFE_EXPORT_PATH", `Export destination identity changed while writing: ${path.basename(destinationPath)}`);
+    await handle.close();
+    handle = null;
+    const temporary = await assertSeparatedOutputPath(temporaryPath, sourceProtection, { requireRegularFile: true, requireReliableIdentity: true });
+    if (temporary.identity !== openedIdentity) throw new ExportError("UNSAFE_EXPORT_PATH", `Temporary export file was replaced before publication: ${path.basename(destinationPath)}`);
+    temporaryOwned = { path: temporaryPath, identity: temporary };
+    const currentDestination = await assertSeparatedOutputPath(destinationPath, sourceProtection, { allowMissing: true, requireRegularFile: true, requireReliableIdentity: true });
+    if (destinationBefore.exists !== currentDestination.exists || (destinationBefore.exists && !sameReliableFileIdentity(destinationBefore, currentDestination))) {
+      throw new ExportError("UNSAFE_EXPORT_PATH", `Export destination changed before publication: ${path.basename(destinationPath)}`);
+    }
+    previousDestination = await moveExistingOutputAside(destinationPath, currentDestination, sourceProtection);
+    await fsp.link(temporaryPath, destinationPath);
+    publishedIdentity = await assertSeparatedOutputPath(destinationPath, sourceProtection, { requireRegularFile: true, requireReliableIdentity: true });
+    if (publishedIdentity.identity !== openedIdentity) throw new ExportError("UNSAFE_EXPORT_PATH", `Published export file does not match its temporary file: ${path.basename(destinationPath)}`);
+    await removeOwnedTemporary(temporaryOwned, { lstat: fsp.lstat, realpath: fsp.realpath, rm: fsp.rm, stat: fsp.stat });
+    temporaryOwned = null;
+    await removeOwnedTemporary(previousDestination, { lstat: fsp.lstat, realpath: fsp.realpath, rm: fsp.rm, stat: fsp.stat });
+    previousDestination = null;
+  } catch (error) {
+    await handle?.close().catch(() => {});
+    if (publishedIdentity) {
+      await rollbackPublishedDestination(destinationPath, publishedIdentity, previousDestination, { lstat: fsp.lstat, realpath: fsp.realpath, rename: fsp.rename, rm: fsp.rm, stat: fsp.stat });
+      previousDestination = null;
+    }
+    if (temporaryOwned) await removeOwnedTemporary(temporaryOwned, { lstat: fsp.lstat, realpath: fsp.realpath, rm: fsp.rm, stat: fsp.stat });
+    if (previousDestination) await restorePreviousDestination(destinationPath, previousDestination, { lstat: fsp.lstat, realpath: fsp.realpath, rename: fsp.rename, stat: fsp.stat });
+    throw error;
+  }
+}
+
+async function moveExistingOutputAside(destinationPath, destination, sourceProtection) {
+  if (!destination.exists) return null;
+  assertSeparatedFromSources(destination, sourceProtection);
+  const backupPath = `${destinationPath}.previous-${process.pid}-${randomUUID()}`;
+  const backup = await assertSeparatedOutputPath(backupPath, sourceProtection, { allowMissing: true });
+  if (backup.exists) throw new ExportError("UNSAFE_EXPORT_PATH", `Refusing to reuse an existing export backup file: ${path.basename(backupPath)}`);
+  await fsp.rename(destinationPath, backupPath);
+  const moved = await assertSeparatedOutputPath(backupPath, sourceProtection, { requireRegularFile: true, requireReliableIdentity: true });
+  if (!sameReliableFileIdentity(destination, moved)) {
+    await restoreUnexpectedMove(destinationPath, backupPath, moved, { lstat: fsp.lstat, realpath: fsp.realpath, rename: fsp.rename, stat: fsp.stat });
+    throw new ExportError("UNSAFE_EXPORT_PATH", "Existing export destination identity changed while it was moved aside");
+  }
+  return { path: backupPath, identity: moved };
+}
+
+async function assertPerformanceProfileSeparated(profilePath, outputRoot, sourceProtection) {
+  const profile = await inspectSeparatedPath(profilePath, { allowMissing: true });
+  assertSeparatedFromSources(profile, sourceProtection);
+  const output = await inspectSeparatedPath(outputRoot, { allowMissing: true });
+  if (pathsOverlap(profile.canonicalPath, output.canonicalPath)) throw new ExportError("UNSAFE_EXPORT_PATH", "The performance profile must be stored outside the export output folder");
 }
 
 async function assertSeparatedExportRoot(candidateOutputRoot, sourceRoots) {
@@ -1671,11 +1790,13 @@ function readableProjectDir(projectDirs, cwd) {
   return projectDirs.get(key);
 }
 
-async function writeMarkdownTranscript(meta, outputPath, rawRel, profiler = null, profileSession = meta, context) {
+async function writeMarkdownTranscript(meta, outputPath, rawRel, profiler = null, profileSession = meta, context, sourceProtection) {
   const { redactMarkdown, includeTools } = context;
   const renderStart = performance.now();
-  const out = fs.createWriteStream(outputPath, { encoding: "utf8" });
+  let writeStart = renderStart;
   const stats = { userMessages: 0, assistantMessages: 0, subagentInputs: 0, runtimeContexts: 0, unclassifiedUserRoleRecords: 0, toolEvents: 0, model: meta.model || "", updatedAt: meta.latestTimestamp || meta.updatedAt || meta.timestamp || "" };
+  await writeSeparatedOutputFile(outputPath, sourceProtection, async (handle) => {
+  const out = fs.createWriteStream(outputPath, { fd: handle.fd, encoding: "utf8", autoClose: false });
   writeLine(out, `# ${meta.displayTitle || meta.title || "Codex Project Chat Export"}`);
   writeLine(out, "");
   writeLine(out, `- Project: ${meta.cwd || ""}`);
@@ -1752,8 +1873,9 @@ async function writeMarkdownTranscript(meta, outputPath, rawRel, profiler = null
   const renderMs = performance.now() - renderStart;
   profiler?.addPhase("markdown_rendering", renderMs, meta.fileSize || 0, 0);
   profiler?.recordSession(profileSession, "markdown_render_ms", renderMs, meta.fileSize || 0, 0);
-  const writeStart = performance.now();
+  writeStart = performance.now();
   await new Promise((resolve, reject) => { out.end(resolve); out.on("error", reject); });
+  });
   const writeMs = performance.now() - writeStart;
   const outputSize = (await fsp.stat(outputPath)).size;
   profiler?.addPhase("markdown_writing", writeMs, 0, outputSize);
@@ -1809,7 +1931,7 @@ function redactSecrets(text) {
   return result;
 }
 
-async function writeIndexFiles(dir, rows, profiler = null, context) {
+async function writeIndexFiles(dir, rows, profiler = null, context, sourceProtection) {
   const { diagnosticReporter, exportFormats, exportProfile, copyRaw, codexHome, sessionsDir, includeArchived, archivedSessionsDir, sessionIndexPath, pathStyle } = context;
   const generatedAt = new Date().toISOString();
   const indexRows = [...rows].sort((a, b) => (b.updated_at || b.started_at || "").localeCompare(a.updated_at || a.started_at || ""));
@@ -1822,12 +1944,12 @@ async function writeIndexFiles(dir, rows, profiler = null, context) {
     for (const row of indexRows) md.push(includeRawColumn ? `| ${mdCell(row.project_name || row.project)} | ${mdCell(row.title || row.session_id)} | ${mdCell(row.storage)} | ${mdCell(row.started_at)} | ${mdLink(row.markdown_file)} | ${row.raw_export_file ? mdLink(row.raw_export_file) : ""} |` : `| ${mdCell(row.project_name || row.project)} | ${mdCell(row.title || row.session_id)} | ${mdCell(row.storage)} | ${mdCell(row.started_at)} | ${mdLink(row.markdown_file)} |`);
     md.push("");
     const markdownIndex = `${md.join("\n")}\n`;
-    await fsp.writeFile(path.join(dir, "index.md"), markdownIndex, "utf8");
+    await writeSeparatedOutputFile(path.join(dir, "index.md"), sourceProtection, (handle) => handle.writeFile(markdownIndex, "utf8"));
     indexBytes += Buffer.byteLength(markdownIndex);
   }
   if (exportFormats.html) {
     const htmlIndex = renderHtmlIndex(indexRows, generatedAt, { reducedMetadata: exportProfile === EXPORT_PROFILE.SOURCE_SNAPSHOTS });
-    await fsp.writeFile(path.join(dir, "index.html"), htmlIndex, "utf8");
+    await writeSeparatedOutputFile(path.join(dir, "index.html"), sourceProtection, (handle) => handle.writeFile(htmlIndex, "utf8"));
     indexBytes += Buffer.byteLength(htmlIndex);
   }
   profiler?.addPhase("indexes", performance.now() - indexStart, 0, indexBytes);
@@ -1835,7 +1957,7 @@ async function writeIndexFiles(dir, rows, profiler = null, context) {
   const manifest = `${JSON.stringify({ archive_format_version: ARCHIVE_FORMAT_VERSION, canonical_representation: "raw_jsonl", canonical_representation_included: copyRaw, export_profile: exportProfile, formats: exportFormats, generated_at: generatedAt, codex_home: codexHome, sessions_dir: sessionsDir, archived_sessions_dir: includeArchived ? archivedSessionsDir : "", session_index: sessionIndexPath, path_style: pathStyle, sessions: rows }, null, 2)}\n`;
   const manifestStart = performance.now();
   diagnosticReporter("manifest_start", { sessions: rows.length });
-  await fsp.writeFile(path.join(dir, "manifest.json"), manifest, "utf8");
+  await writeSeparatedOutputFile(path.join(dir, "manifest.json"), sourceProtection, (handle) => handle.writeFile(manifest, "utf8"));
   profiler?.addPhase("manifest", performance.now() - manifestStart, 0, Buffer.byteLength(manifest));
   diagnosticReporter("manifest_end", { duration_ms: roundMs(performance.now() - manifestStart), bytes_written: Buffer.byteLength(manifest) });
 }
@@ -2149,7 +2271,7 @@ function roundMs(value) {
   return Math.round(Number(value || 0) * 1000) / 1000;
 }
 
-async function writeSummary(dir, rows, context) {
+async function writeSummary(dir, rows, context, sourceProtection) {
   const { codexHome, sessionsDir, includeArchived, archivedSessionsDir, exportProfile, pathStyle, exportFormats, markdownDirName, copyRaw } = context;
   const projects = new Map();
   for (const row of rows) projects.set(row.project || "unknown", (projects.get(row.project || "unknown") || 0) + 1);
@@ -2164,7 +2286,7 @@ async function writeSummary(dir, rows, context) {
   if (exportFormats.html && exportProfile === EXPORT_PROFILE.SOURCE_SNAPSHOTS) lines.push("- index.html uses only project, storage, start time, session ID, and Raw links because this profile intentionally skips complete readable metadata.");
   else if (exportFormats.html) lines.push("- index.html can be filtered by project, title, date, model, or storage location.");
   lines.push("- Absolute source paths are local metadata and must be omitted from any share-safe derivative.");
-  await fsp.writeFile(path.join(dir, "README.txt"), `${lines.join("\n")}\n`, "utf8");
+  await writeSeparatedOutputFile(path.join(dir, "README.txt"), sourceProtection, (handle) => handle.writeFile(`${lines.join("\n")}\n`, "utf8"));
 }
 
 async function verifyExport(dir, rows, profiler = null, context) {
