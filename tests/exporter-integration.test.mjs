@@ -360,6 +360,71 @@ assert.equal(completeDiagnostics.filter((event) => event.event === "source_hash_
 assert.equal(completeDiagnostics.filter((event) => event.event === "export_hash_start" && event.stage === "snapshot_parse").length, explicitCompleteResult.exportedSessionCount, "complete exports must hash each Raw snapshot during its existing parse pass");
 assert.equal(completeDiagnostics.filter((event) => event.event === "verification_hash_start").length, 0, "complete exports must not add a final duplicate Raw hash pass");
 
+const nestedOuterOutput = path.join(temp, "nested-outer-output");
+const nestedInnerOutput = path.join(temp, "nested-inner-output");
+let nestedInnerPromise;
+let nestedInnerStarted = false;
+const nestedOuterPromise = exportArchive({
+  codexHome,
+  scope: "all",
+  outputDirectory: nestedOuterOutput,
+  exportProfile: "source-snapshots",
+  onDiagnostic: (event) => {
+    if (event.event === "core_start" && !nestedInnerStarted) {
+      nestedInnerStarted = true;
+      nestedInnerPromise = exportArchive({
+        codexHome,
+        scope: "project",
+        workspacePath: "C:\\Projects\\alpha",
+        outputDirectory: nestedInnerOutput,
+        exportProfile: "readable",
+        pathStyle: "readable",
+      });
+    }
+  },
+});
+const [nestedOuterResult, nestedInnerResult] = await Promise.all([nestedOuterPromise, nestedInnerPromise]);
+const nestedOuterManifest = JSON.parse(await fs.readFile(nestedOuterResult.manifestPath, "utf8"));
+const nestedInnerManifest = JSON.parse(await fs.readFile(nestedInnerResult.manifestPath, "utf8"));
+assert.equal(nestedOuterManifest.export_profile, "source-snapshots", "the outer export must retain its own profile");
+assert.equal(nestedInnerManifest.export_profile, "readable", "the nested export must retain its own profile");
+assert.equal(await pathExists(path.join(nestedOuterOutput, "raw")), true);
+assert.equal(await pathExists(path.join(nestedOuterOutput, "index.md")), false);
+assert.equal(await pathExists(path.join(nestedInnerOutput, "raw")), false);
+assert.equal(await pathExists(path.join(nestedInnerOutput, "index.md")), true);
+assert.ok(nestedInnerManifest.sessions.every((session) => session.project === "C:\\Projects\\alpha"), "the nested workspace filter must not leak into the outer export");
+assert.equal(nestedOuterManifest.sessions.length, manifest.sessions.length, "the outer all-session selection must remain isolated from the nested workspace export");
+
+const lockedOutput = path.join(temp, "concurrent-locked-output");
+let competingExport;
+const lockedPrimaryResult = await exportArchive({
+  codexHome,
+  scope: "project",
+  workspacePath: "C:\\Projects\\alpha",
+  outputDirectory: lockedOutput,
+  exportProfile: "source-snapshots",
+  progressThrottleMs: 0,
+  onProgress: (event) => {
+    if (event.phase === "snapshot" && !competingExport) {
+      competingExport = exportArchive({
+        codexHome,
+        scope: "project",
+        workspacePath: "C:\\Projects\\alpha",
+        outputDirectory: lockedOutput,
+        exportProfile: "readable",
+      }).then(
+        (result) => ({ result }),
+        (error) => ({ error }),
+      );
+    }
+  },
+});
+const competingResult = await competingExport;
+assert.equal(competingResult.error?.code, "EXPORT_ALREADY_RUNNING", "the same output directory must reject a concurrent export");
+assert.equal(lockedPrimaryResult.exportProfile, "source-snapshots");
+assert.equal(await pathExists(path.join(lockedOutput, ".codex-export.lock")), false, "the successful owner must remove its own export lock");
+assert.equal(JSON.parse(await fs.readFile(lockedPrimaryResult.manifestPath, "utf8")).export_profile, "source-snapshots", "the rejected export must not overwrite the owner manifest");
+
 const legacyCliOutput = path.join(temp, "legacy-cli-no-raw-output");
 await execFileAsync(process.execPath, [script, "--codex-home", codexHome, "--project", "C:\\Projects\\alpha", "--out", legacyCliOutput, "--no-raw"], { cwd: temp });
 assert.equal(await pathExists(path.join(legacyCliOutput, "raw")), false, "the existing CLI --no-raw switch must remain compatible");

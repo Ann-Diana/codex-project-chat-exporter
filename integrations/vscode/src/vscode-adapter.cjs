@@ -32,6 +32,7 @@ function createExtensionAdapter(vscode, injected = {}) {
   const diagnosticEvents = [];
   const diagnosticRunContext = new AsyncLocalStorage();
   let diagnosticRunSequence = 0;
+  let exportRunning = false;
 
   async function activate(context) {
     outputChannel = vscode.window.createOutputChannel("Codex Project Chat Exporter");
@@ -93,76 +94,85 @@ function createExtensionAdapter(vscode, injected = {}) {
 
   async function runExport(context, scopeOptions, explicitProfile) {
     ensureDesktopLocalExtensionHost();
-    const adapterExportStartedAt = performance.now();
-    writeDiagnostic("adapter_export_start", { selected_scope: scopeOptions.scope, profile: explicitProfile || "complete" });
-    const outputDirectory = await resolveOutputDirectory(context);
-    if (outputDirectory === null) return undefined;
-    if (!outputDirectory) {
-      vscode.window.showWarningMessage("No export folder selected.");
+    if (exportRunning) {
+      vscode.window.showWarningMessage("A Codex export is already running. Wait for it to finish before starting another export.");
       return undefined;
     }
-
-    const config = getConfig();
-    const exporter = await deps.loadExporter(context);
-    const configuredProfile = resolveConfiguredProfile(explicitProfile);
-    const options = {
-      scope: scopeOptions.scope,
-      workspacePath: scopeOptions.workspacePath,
-      outputDirectory,
-      exportProfile: configuredProfile,
-      pathStyle: config.get("pathStyle", "short"),
-      includeTools: config.get("includeTools", false),
-    };
-    const codexHome = getUserOnlyConfigValue("codexHome", "");
-    if (codexHome) {
-      const validatedCodexHome = validateLocalAbsolutePath(codexHome, "codexProjectChatExporter.codexHome");
-      if (!validatedCodexHome) return undefined;
-      options.codexHome = validatedCodexHome;
-    }
-
-    outputChannel.appendLine(`Starting ${scopeOptions.scope === "all" ? "all-session" : "workspace"} export.`);
-    outputChannel.appendLine(`Export profile: ${configuredProfile}`);
-    outputChannel.appendLine(`Output directory: ${outputDirectory}`);
-    if (scopeOptions.workspacePath) outputChannel.appendLine(`Workspace: ${scopeOptions.workspacePath}`);
-
+    exportRunning = true;
     try {
-      const withProgressStartedAt = performance.now();
-      writeDiagnostic("with_progress_start");
-      const result = await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: "Exporting Codex sessions", cancellable: false }, async (progress) => {
-        const coreCallStartedAt = performance.now();
-        writeDiagnostic("with_progress_enter");
-        options.onProgress = (event) => progress.report({ message: event.message });
-        if (diagnosticsEnabled()) options.onDiagnostic = (event) => recordDiagnostic(event);
-        writeDiagnostic("core_call_start");
-        try {
-          const coreResult = await exporter.exportArchive(options);
-          writeDiagnostic("core_call_end", { status: "COMPLETED", duration_ms: roundDiagnosticMs(performance.now() - coreCallStartedAt) });
-          return coreResult;
-        } catch (error) {
-          writeDiagnostic("core_call_end", { status: "FAILED", error_code: error?.code || "UNKNOWN", duration_ms: roundDiagnosticMs(performance.now() - coreCallStartedAt) });
-          throw error;
-        }
-      });
-      writeDiagnostic("with_progress_end", { duration_ms: roundDiagnosticMs(performance.now() - withProgressStartedAt) });
-      await context.globalState.update(STATE_OUTPUT_DIR, result.outputDirectory);
-      await context.globalState.update(STATE_LATEST_HTML, result.htmlIndexPath);
-      const summary = formatExportSummary(result.exportedSessionCount, result.exportedProjectCount);
-      outputChannel.appendLine(`Exported ${summary}.`);
-      outputChannel.appendLine(`Output directory: ${result.outputDirectory}`);
-      outputChannel.appendLine(`HTML index: ${result.htmlIndexPath}`);
-      outputChannel.appendLine(`Manifest: ${result.manifestPath}`);
-      if (result.runtimeTimings) outputChannel.appendLine(formatRuntimeSummary(result.runtimeTimings));
-      writeDiagnostic("success_message_show", { duration_ms: roundDiagnosticMs(performance.now() - adapterExportStartedAt) });
-      const action = await vscode.window.showInformationMessage(`Exported ${summary} to ${result.outputDirectory}.`, "Open HTML Index", "Open Export Folder");
-      writeDiagnostic("success_message_resolved", { action: action === "Open HTML Index" ? "OPEN_INDEX" : action === "Open Export Folder" ? "OPEN_FOLDER" : "DISMISSED", duration_ms: roundDiagnosticMs(performance.now() - adapterExportStartedAt) });
-      if (action === "Open HTML Index") await openFile(result.htmlIndexPath);
-      if (action === "Open Export Folder") await openFile(result.outputDirectory);
-      return result;
-    } catch (error) {
-      const message = safeErrorMessage(error);
-      outputChannel.appendLine(`Export failed: ${message}`);
-      vscode.window.showErrorMessage(`Codex export failed: ${message}`);
-      throw error;
+      const adapterExportStartedAt = performance.now();
+      writeDiagnostic("adapter_export_start", { selected_scope: scopeOptions.scope, profile: explicitProfile || "complete" });
+      const outputDirectory = await resolveOutputDirectory(context);
+      if (outputDirectory === null) return undefined;
+      if (!outputDirectory) {
+        vscode.window.showWarningMessage("No export folder selected.");
+        return undefined;
+      }
+
+      const config = getConfig();
+      const exporter = await deps.loadExporter(context);
+      const configuredProfile = resolveConfiguredProfile(explicitProfile);
+      const options = {
+        scope: scopeOptions.scope,
+        workspacePath: scopeOptions.workspacePath,
+        outputDirectory,
+        exportProfile: configuredProfile,
+        pathStyle: config.get("pathStyle", "short"),
+        includeTools: config.get("includeTools", false),
+      };
+      const codexHome = getUserOnlyConfigValue("codexHome", "");
+      if (codexHome) {
+        const validatedCodexHome = validateLocalAbsolutePath(codexHome, "codexProjectChatExporter.codexHome");
+        if (!validatedCodexHome) return undefined;
+        options.codexHome = validatedCodexHome;
+      }
+
+      outputChannel.appendLine(`Starting ${scopeOptions.scope === "all" ? "all-session" : "workspace"} export.`);
+      outputChannel.appendLine(`Export profile: ${configuredProfile}`);
+      outputChannel.appendLine(`Output directory: ${outputDirectory}`);
+      if (scopeOptions.workspacePath) outputChannel.appendLine(`Workspace: ${scopeOptions.workspacePath}`);
+
+      try {
+        const withProgressStartedAt = performance.now();
+        writeDiagnostic("with_progress_start");
+        const result = await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: "Exporting Codex sessions", cancellable: false }, async (progress) => {
+          const coreCallStartedAt = performance.now();
+          writeDiagnostic("with_progress_enter");
+          options.onProgress = (event) => progress.report({ message: event.message });
+          if (diagnosticsEnabled()) options.onDiagnostic = (event) => recordDiagnostic(event);
+          writeDiagnostic("core_call_start");
+          try {
+            const coreResult = await exporter.exportArchive(options);
+            writeDiagnostic("core_call_end", { status: "COMPLETED", duration_ms: roundDiagnosticMs(performance.now() - coreCallStartedAt) });
+            return coreResult;
+          } catch (error) {
+            writeDiagnostic("core_call_end", { status: "FAILED", error_code: error?.code || "UNKNOWN", duration_ms: roundDiagnosticMs(performance.now() - coreCallStartedAt) });
+            throw error;
+          }
+        });
+        writeDiagnostic("with_progress_end", { duration_ms: roundDiagnosticMs(performance.now() - withProgressStartedAt) });
+        await context.globalState.update(STATE_OUTPUT_DIR, result.outputDirectory);
+        await context.globalState.update(STATE_LATEST_HTML, result.htmlIndexPath);
+        const summary = formatExportSummary(result.exportedSessionCount, result.exportedProjectCount);
+        outputChannel.appendLine(`Exported ${summary}.`);
+        outputChannel.appendLine(`Output directory: ${result.outputDirectory}`);
+        outputChannel.appendLine(`HTML index: ${result.htmlIndexPath}`);
+        outputChannel.appendLine(`Manifest: ${result.manifestPath}`);
+        if (result.runtimeTimings) outputChannel.appendLine(formatRuntimeSummary(result.runtimeTimings));
+        writeDiagnostic("success_message_show", { duration_ms: roundDiagnosticMs(performance.now() - adapterExportStartedAt) });
+        const action = await vscode.window.showInformationMessage(`Exported ${summary} to ${result.outputDirectory}.`, "Open HTML Index", "Open Export Folder");
+        writeDiagnostic("success_message_resolved", { action: action === "Open HTML Index" ? "OPEN_INDEX" : action === "Open Export Folder" ? "OPEN_FOLDER" : "DISMISSED", duration_ms: roundDiagnosticMs(performance.now() - adapterExportStartedAt) });
+        if (action === "Open HTML Index") await openFile(result.htmlIndexPath);
+        if (action === "Open Export Folder") await openFile(result.outputDirectory);
+        return result;
+      } catch (error) {
+        const message = safeErrorMessage(error);
+        outputChannel.appendLine(`Export failed: ${message}`);
+        vscode.window.showErrorMessage(`Codex export failed: ${message}`);
+        throw error;
+      }
+    } finally {
+      exportRunning = false;
     }
   }
 
@@ -196,9 +206,7 @@ function createExtensionAdapter(vscode, injected = {}) {
     if (remembered) return validateAbsoluteOutputDirectory(remembered);
     const selected = await vscode.window.showOpenDialog({ canSelectFiles: false, canSelectFolders: true, canSelectMany: false, openLabel: "Use Export Folder", title: "Choose Codex export output folder" });
     const folder = selected?.[0]?.fsPath || "";
-    const validated = folder ? validateAbsoluteOutputDirectory(folder) : "";
-    if (validated) await context.globalState.update(STATE_OUTPUT_DIR, validated);
-    return validated;
+    return folder ? validateAbsoluteOutputDirectory(folder) : "";
   }
 
   async function openLatestArchive(context) {

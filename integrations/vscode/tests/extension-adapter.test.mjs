@@ -185,29 +185,43 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
 {
   const fake = createFakeVscode({ config: { outputDirectory, diagnosticOutput: true } });
   const context = createContext(temp);
+  let exportCalls = 0;
+  let releaseFirstExport;
+  let firstExportStarted;
+  const firstExportStartedPromise = new Promise((resolve) => { firstExportStarted = resolve; });
+  const firstExportGate = new Promise((resolve) => { releaseFirstExport = resolve; });
   const overlappingExporter = {
     async exportArchive(options) {
+      exportCalls += 1;
       options.onDiagnostic?.({ monotonic_ms: 10, scope: "core", event: "core_start" });
-      await new Promise((resolve) => setTimeout(resolve, 10));
+      if (exportCalls === 1) {
+        firstExportStarted();
+        await firstExportGate;
+      }
       options.onDiagnostic?.({ monotonic_ms: 20, scope: "core", event: "core_end" });
       return { outputDirectory, htmlIndexPath: path.join(outputDirectory, "index.html"), manifestPath: path.join(outputDirectory, "manifest.json"), exportedProjectCount: 1, exportedSessionCount: 1, warnings: [] };
     },
   };
   const adapter = createExtensionAdapter(fake.vscode, { loadExporter: async () => overlappingExporter });
   const activation = await adapter.activate(context);
-  await Promise.all([
-    fake.registered.get(COMMANDS.exportAllSessions)(),
-    fake.registered.get(COMMANDS.exportAllSessions)(),
-  ]);
+  const firstExport = fake.registered.get(COMMANDS.exportAllSessions)();
+  await firstExportStartedPromise;
+  assert.equal(await fake.registered.get(COMMANDS.exportAllSessions)(), undefined, "the adapter must reject a second simultaneous export");
+  assert.equal(exportCalls, 1, "the rejected command must not reach the shared exporter");
+  assert.match(fake.messages.at(-1).message, /already running/);
+  releaseFirstExport();
+  await firstExport;
+  await fake.registered.get(COMMANDS.exportAllSessions)();
+  assert.equal(exportCalls, 2, "the adapter must accept a new export after the first one completed");
   const diagnostics = activation.getDiagnosticEvents();
   const runIds = [...new Set(diagnostics.map((event) => event.run_id))];
-  assert.equal(runIds.length, 2, "overlapping registered commands must retain separate traces");
-  for (const runId of runIds) {
-    const runEvents = diagnostics.filter((event) => event.run_id === runId);
-    assert.equal(runEvents.filter((event) => event.scope === "core" && event.event === "core_start").length, 1);
-    assert.equal(runEvents[0].event, "command_start");
-    assert.equal(runEvents.at(-1).event, "command_end");
-  }
+  assert.equal(runIds.length, 3, "both completed commands and the rejected command must retain separate traces");
+  const rejectedRun = runIds.map((runId) => diagnostics.filter((event) => event.run_id === runId)).find((events) => !events.some((event) => event.scope === "core" && event.event === "core_start"));
+  assert.ok(rejectedRun, "the rejected simultaneous command must not contain core events");
+  assert.equal(rejectedRun[0].event, "command_start");
+  assert.equal(rejectedRun.at(-1).event, "command_end");
+  assert.equal(context.globalState.get(STATE_OUTPUT_DIR), outputDirectory, "only a completed export may update the remembered output folder");
+  assert.equal(context.globalState.get(STATE_LATEST_HTML), path.join(outputDirectory, "index.html"), "only a completed export may update the latest index");
 }
 
 {
@@ -411,12 +425,14 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
 }
 
 {
-  const fake = createFakeVscode({ config: { outputDirectory } });
+  const fake = createFakeVscode({ openDialogResult: [{ fsPath: outputDirectory }] });
   const context = createContext(temp);
   const adapter = createExtensionAdapter(fake.vscode, { loadExporter: async () => ({ exportArchive: async () => { throw Object.assign(new Error("Synthetic core failure"), { code: "SYNTHETIC" }); } }) });
   await adapter.activate(context);
   await assert.rejects(() => adapter.exportAllSessions(context), /Synthetic core failure/);
   assert.match(fake.messages.at(-1).message, /SYNTHETIC: Synthetic core failure/);
+  assert.equal(context.globalState.get(STATE_OUTPUT_DIR, ""), "", "a failed export must not remember even a newly selected output folder");
+  assert.equal(context.globalState.get(STATE_LATEST_HTML, ""), "", "a failed export must not update the latest index");
 }
 
 {

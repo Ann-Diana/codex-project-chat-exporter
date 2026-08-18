@@ -37,40 +37,9 @@ const SESSION_KIND = Object.freeze({
   SUBAGENT: "SUBAGENT",
   UNKNOWN: "UNKNOWN",
 });
-let argumentError = null;
-let args = {};
-try {
-  args = parseArgs(process.argv.slice(2));
-} catch (error) {
-  argumentError = error;
-}
+const { args: cliArgs, error: argumentError } = parseCliInvocation(process.argv.slice(2));
 const toolRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-let codexHome;
-let sessionsDir;
-let archivedSessionsDir;
-let sessionIndexPath;
-let pathStyle;
-let markdownDirName;
-let outputPrefix;
-let defaultOutputBase;
-let outputDir;
-let projectFilter;
-let exportAll;
-let includeTools;
-let copyRaw;
-let redactMarkdown;
-let listOnly;
-let listSessionsOnly;
-let diagnoseOnly;
-let includeArchived;
-let allowOutputInToolDir;
-let performanceProfilePath;
-let exportProfile;
-let exportFormats;
-let progressReporter;
-let diagnosticReporter;
 const isCli = process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href;
-configureRuntime(args);
 
 class ExportError extends Error {
   constructor(code, message) {
@@ -141,21 +110,16 @@ function formatErrorWithHints(error) {
 }
 
 async function main() {
-  return runCommand({ print: true });
+  return runCommand(createExportContext(cliArgs), { print: true });
 }
 
 async function exportArchive(options = {}) {
-  const previous = captureRuntime();
-  configureRuntime(argsFromExportOptions(options), options.cwd || process.cwd(), {
+  const context = createExportContext(argsFromExportOptions(options), options.cwd || process.cwd(), {
     onProgress: options.onProgress,
     progressThrottleMs: options.progressThrottleMs,
     onDiagnostic: options.onDiagnostic,
   });
-  try {
-    return await runCommand({ print: false });
-  } finally {
-    restoreRuntime(previous);
-  }
+  return runCommand(context, { print: false });
 }
 
 function argsFromExportOptions(options) {
@@ -179,40 +143,47 @@ function argsFromExportOptions(options) {
   return next;
 }
 
-function configureRuntime(nextArgs = {}, cwd = process.cwd(), runtimeOptions = {}) {
-  args = nextArgs;
-  codexHome = path.resolve(args["codex-home"] || process.env.CODEX_HOME || path.join(os.homedir(), ".codex"));
-  sessionsDir = path.resolve(args["sessions-dir"] || path.join(codexHome, "sessions"));
-  archivedSessionsDir = path.resolve(args["archived-dir"] || path.join(codexHome, "archived_sessions"));
-  sessionIndexPath = path.resolve(args["session-index"] || path.join(codexHome, "session_index.jsonl"));
-  pathStyle = args["readable-paths"] ? "readable" : "short";
-  markdownDirName = pathStyle === "readable" ? "markdown" : "md";
-  outputPrefix = pathStyle === "readable" ? "codex-chat-export" : "cx";
-  defaultOutputBase = isPathInside(cwd, toolRoot) ? path.join(os.homedir(), "Documents") : cwd;
-  outputDir = path.resolve(args.out || path.join(defaultOutputBase, `${outputPrefix}-${stampForName(new Date())}`));
-  projectFilter = args.project || "";
-  exportAll = args.all || !projectFilter;
-  includeTools = Boolean(args["include-tools"]);
-  exportProfile = resolveExportProfile(args.profile, Boolean(args["no-raw"]));
-  exportFormats = { ...EXPORT_PROFILES[exportProfile], ...FUTURE_EXPORT_FORMATS };
-  copyRaw = exportFormats.raw;
-  redactMarkdown = !args["no-redact-markdown"];
-  listOnly = Boolean(args.list);
-  listSessionsOnly = Boolean(args["list-sessions"]);
-  diagnoseOnly = Boolean(args.diagnose);
-  includeArchived = !args["no-archived"];
-  allowOutputInToolDir = Boolean(args["allow-output-in-tool-dir"]);
-  performanceProfilePath = args["performance-profile"] ? path.resolve(args["performance-profile"]) : "";
-  progressReporter = createProgressReporter(runtimeOptions.onProgress, runtimeOptions.progressThrottleMs);
-  diagnosticReporter = createDiagnosticReporter(runtimeOptions.onDiagnostic);
-}
-
-function captureRuntime() {
-  return { args, codexHome, sessionsDir, archivedSessionsDir, sessionIndexPath, pathStyle, markdownDirName, outputPrefix, defaultOutputBase, outputDir, projectFilter, exportAll, includeTools, copyRaw, redactMarkdown, listOnly, listSessionsOnly, diagnoseOnly, includeArchived, allowOutputInToolDir, performanceProfilePath, exportProfile, exportFormats, progressReporter, diagnosticReporter };
-}
-
-function restoreRuntime(snapshot) {
-  ({ args, codexHome, sessionsDir, archivedSessionsDir, sessionIndexPath, pathStyle, markdownDirName, outputPrefix, defaultOutputBase, outputDir, projectFilter, exportAll, includeTools, copyRaw, redactMarkdown, listOnly, listSessionsOnly, diagnoseOnly, includeArchived, allowOutputInToolDir, performanceProfilePath, exportProfile, exportFormats, progressReporter, diagnosticReporter } = snapshot);
+function createExportContext(args = {}, cwd = process.cwd(), runtimeOptions = {}) {
+  const codexHome = path.resolve(args["codex-home"] || process.env.CODEX_HOME || path.join(os.homedir(), ".codex"));
+  const sessionsDir = path.resolve(args["sessions-dir"] || path.join(codexHome, "sessions"));
+  const archivedSessionsDir = path.resolve(args["archived-dir"] || path.join(codexHome, "archived_sessions"));
+  const sessionIndexPath = path.resolve(args["session-index"] || path.join(codexHome, "session_index.jsonl"));
+  const pathStyle = args["readable-paths"] ? "readable" : "short";
+  const markdownDirName = pathStyle === "readable" ? "markdown" : "md";
+  const outputPrefix = pathStyle === "readable" ? "codex-chat-export" : "cx";
+  const defaultOutputBase = isPathInside(cwd, toolRoot) ? path.join(os.homedir(), "Documents") : cwd;
+  const outputDir = path.resolve(args.out || path.join(defaultOutputBase, `${outputPrefix}-${stampForName(new Date())}`));
+  const projectFilter = args.project || "";
+  const exportAll = args.all || !projectFilter;
+  const exportProfile = resolveExportProfile(args.profile, Boolean(args["no-raw"]));
+  const exportFormats = Object.freeze({ ...EXPORT_PROFILES[exportProfile], ...FUTURE_EXPORT_FORMATS });
+  return Object.freeze({
+    args: Object.freeze({ ...args }),
+    codexHome,
+    sessionsDir,
+    archivedSessionsDir,
+    sessionIndexPath,
+    pathStyle,
+    markdownDirName,
+    outputPrefix,
+    defaultOutputBase,
+    outputDir,
+    projectFilter,
+    exportAll,
+    includeTools: Boolean(args["include-tools"]),
+    copyRaw: exportFormats.raw,
+    redactMarkdown: !args["no-redact-markdown"],
+    listOnly: Boolean(args.list),
+    listSessionsOnly: Boolean(args["list-sessions"]),
+    diagnoseOnly: Boolean(args.diagnose),
+    includeArchived: !args["no-archived"],
+    allowOutputInToolDir: Boolean(args["allow-output-in-tool-dir"]),
+    performanceProfilePath: args["performance-profile"] ? path.resolve(args["performance-profile"]) : "",
+    exportProfile,
+    exportFormats,
+    progressReporter: createProgressReporter(runtimeOptions.onProgress, runtimeOptions.progressThrottleMs),
+    diagnosticReporter: createDiagnosticReporter(runtimeOptions.onDiagnostic),
+  });
 }
 
 function resolveExportProfile(requestedProfile, legacyNoRaw = false) {
@@ -248,12 +219,13 @@ function createDiagnosticReporter(callback) {
   };
 }
 
-async function runCommand({ print }) {
+async function runCommand(context, { print }) {
+  const { performanceProfilePath, copyRaw, exportAll, exportProfile } = context;
   const profiler = performanceProfilePath ? createPerformanceProfiler({ rawEnabled: copyRaw, scope: exportAll ? "all" : "workspace", profile: exportProfile }) : null;
   let result;
   let failure;
   try {
-    result = await runCommandInternal({ print, profiler });
+    result = await runCommandInternal(context, { print, profiler });
   } catch (error) {
     failure = error;
   }
@@ -270,7 +242,29 @@ async function runCommand({ print }) {
   return result;
 }
 
-async function runCommandInternal({ print, profiler }) {
+async function runCommandInternal(context, { print, profiler }) {
+  const {
+    args,
+    codexHome,
+    sessionsDir,
+    archivedSessionsDir,
+    sessionIndexPath,
+    pathStyle,
+    markdownDirName,
+    outputDir,
+    projectFilter,
+    exportAll,
+    copyRaw,
+    listOnly,
+    listSessionsOnly,
+    diagnoseOnly,
+    includeArchived,
+    allowOutputInToolDir,
+    exportProfile,
+    exportFormats,
+    progressReporter,
+    diagnosticReporter,
+  } = context;
   const coreStartedAt = performance.now();
   const runtimeTimings = {
     discovery_ms: 0,
@@ -329,7 +323,7 @@ async function runCommandInternal({ print, profiler }) {
   if (needsCompleteInventory) {
     const metaMap = new Map();
     for (const entry of files) {
-      const enriched = await readAndEnrichSession(entry, titleIndex, profiler, "initial_parse_ms");
+      const enriched = await readAndEnrichSession(entry, titleIndex, profiler, "initial_parse_ms", context);
       parsedEntries.push(enriched);
       retainPreferredSession(metaMap, enriched);
     }
@@ -356,7 +350,7 @@ async function runCommandInternal({ print, profiler }) {
       routing = { ...routing, file: entry.file, sourceRootPath: entry.sourceRootPath, storage: entry.storage };
       if (!routing.cwd) {
         const routingEvidence = routing.routingSnapshot;
-        routing = await readAndEnrichSession(entry, titleIndex, profiler, "routing_fallback_parse_ms");
+        routing = await readAndEnrichSession(entry, titleIndex, profiler, "routing_fallback_parse_ms", context);
         routing.routingSnapshot = routingEvidence;
       }
       diagnosticReporter("routing_session_end", {
@@ -377,29 +371,31 @@ async function runCommandInternal({ print, profiler }) {
   }
 
   if (listOnly) {
-    if (print) printProjectList(metas);
+    if (print) printProjectList(metas, context);
     return { projects: metas.length, locations };
   }
 
   if (listSessionsOnly) {
-    if (print) printSessionList(metas);
+    if (print) printSessionList(metas, context);
     return { sessions: metas.length, locations };
   }
 
   if (diagnoseOnly) {
-    if (print) printDiagnostics(parsedEntries, metas, locations);
+    if (print) printDiagnostics(parsedEntries, metas, locations, context);
     return { parsedEntries: parsedEntries.length, sessions: metas.length, locations };
   }
 
   const selected = metas.filter((meta) => exportAll || matchesProject(meta.cwd, projectFilter));
   if (!selected.length) {
-    if (print) printProjectList(projectListMetas || metas);
+    if (print) printProjectList(projectListMetas || metas, context);
     throw new ExportError("NO_PROJECT_MATCH", `No sessions matched project filter: ${projectFilter}`);
   }
   profiler?.setCounts({ exportedSessions: selected.length });
 
   await assertSeparatedExportRoot(outputDir, locations.map((location) => location.root));
   await fsp.mkdir(outputDir, { recursive: true });
+  const exportLock = await acquireExportLock(outputDir);
+  try {
   if (exportFormats.markdown) await fsp.mkdir(path.join(outputDir, markdownDirName), { recursive: true });
   if (copyRaw) await fsp.mkdir(path.join(outputDir, "raw"), { recursive: true });
 
@@ -480,23 +476,23 @@ async function runCommandInternal({ print, profiler }) {
   if (exportFormats.markdown) progressReporter({ phase: "rendering", message: "Rendering reading views" });
   const processingStartedAt = performance.now();
   const rows = [];
-  for (const task of tasks) rows.push(await processExportTask(task, titleIndex, profiler));
+  for (const task of tasks) rows.push(await processExportTask(task, titleIndex, profiler, context));
   runtimeTimings.processing_ms = roundMs(performance.now() - processingStartedAt);
 
   progressReporter({ phase: "writing", message: "Writing indexes and manifest" });
   const indexesManifestStartedAt = performance.now();
   diagnosticReporter("indexes_and_manifest_start");
-  await writeIndexFiles(outputDir, rows, profiler);
+  await writeIndexFiles(outputDir, rows, profiler, context);
   diagnosticReporter("indexes_and_manifest_end");
   const summaryStart = performance.now();
   diagnosticReporter("summary_start");
-  await writeSummary(outputDir, rows);
+  await writeSummary(outputDir, rows, context);
   profiler?.addPhase("other", performance.now() - summaryStart, 0, (await fsp.stat(path.join(outputDir, "README.txt"))).size);
   diagnosticReporter("summary_end", { duration_ms: roundMs(performance.now() - summaryStart) });
   runtimeTimings.indexes_manifest_ms = roundMs(performance.now() - indexesManifestStartedAt);
   const verificationStartedAt = performance.now();
   diagnosticReporter("verification_start", { sessions: rows.length });
-  await verifyExport(outputDir, rows, profiler);
+  await verifyExport(outputDir, rows, profiler, context);
   runtimeTimings.verification_ms = roundMs(performance.now() - verificationStartedAt);
   diagnosticReporter("verification_end", { duration_ms: runtimeTimings.verification_ms, sessions: rows.length });
   progressReporter({ phase: "complete", message: "Export complete" });
@@ -521,11 +517,15 @@ async function runCommandInternal({ print, profiler }) {
     rows,
   };
 
-  if (print) printExportResult(result);
+  if (print) printExportResult(result, context);
   return result;
+  } finally {
+    await releaseExportLock(exportLock);
+  }
 }
 
-function printExportResult(result) {
+function printExportResult(result, context) {
+  const { exportProfile, pathStyle, exportFormats, markdownDirName, copyRaw } = context;
   console.log("");
   console.log(`Export complete: ${result.outputDirectory}`);
   console.log(`Sessions: ${result.exportedSessionCount}`);
@@ -707,7 +707,8 @@ async function readSessionMeta(file, { fallbackSessionId = "", collectAttachment
   return meta;
 }
 
-async function processExportTask(task, titleIndex, profiler) {
+async function processExportTask(task, titleIndex, profiler, context) {
+  const { exportFormats, copyRaw, outputDir, redactMarkdown, pathStyle, markdownDirName } = context;
   const { meta, projectDir, sessionCode, sourceOriginalFilename, rawExportName, rawRel, snapshot, parsedSnapshotMeta, metadataAlreadyParsed } = task;
   let renderMeta = meta;
   let stats = { userMessages: 0, assistantMessages: 0, subagentInputs: 0, runtimeContexts: 0, unclassifiedUserRoleRecords: 0, toolEvents: 0, model: meta.model || "", updatedAt: meta.updatedAt || meta.timestamp || "" };
@@ -745,7 +746,7 @@ async function processExportTask(task, titleIndex, profiler) {
     markdownRel = path.join(markdownDirName, projectDir, `${baseName}.md`);
     await fsp.mkdir(path.join(outputDir, markdownDirName, projectDir), { recursive: true });
     profiler?.recordAttachments(renderMeta.attachmentMetrics);
-    stats = await writeMarkdownTranscript(renderMeta, path.join(outputDir, markdownRel), copyRaw ? rawRel : "", profiler, meta);
+    stats = await writeMarkdownTranscript(renderMeta, path.join(outputDir, markdownRel), copyRaw ? rawRel : "", profiler, meta, context);
   } else {
     const title = neutralSessionTitle(meta);
     renderMeta = { ...meta, title, displayTitle: title, titleSource: "neutral_unclassified_snapshot", indexedTitleStatus: "NOT_EVALUATED", sessionKind: SESSION_KIND.UNKNOWN };
@@ -794,7 +795,8 @@ async function processExportTask(task, titleIndex, profiler) {
   };
 }
 
-async function readAndEnrichSession(entry, titleIndex, profiler, profilePhaseName) {
+async function readAndEnrichSession(entry, titleIndex, profiler, profilePhaseName, context) {
+  const { redactMarkdown } = context;
   const parseStart = performance.now();
   const meta = await readSessionMeta(entry.file, { collectAttachmentMetrics: Boolean(profiler) });
   const parseMs = performance.now() - parseStart;
@@ -1381,6 +1383,34 @@ function sameFileVersion(left, right) {
   return left.size === right.size && left.mtimeMs === right.mtimeMs;
 }
 
+function parseCliInvocation(argv) {
+  try {
+    return { args: parseArgs(argv), error: null };
+  } catch (error) {
+    return { args: {}, error };
+  }
+}
+
+async function acquireExportLock(outputRoot) {
+  const lockPath = path.join(outputRoot, ".codex-export.lock");
+  let handle;
+  try {
+    handle = await fsp.open(lockPath, "wx");
+    await handle.writeFile(`${JSON.stringify({ pid: process.pid, started_at: new Date().toISOString() })}\n`, "utf8");
+  } catch (error) {
+    await handle?.close().catch(() => {});
+    if (error?.code === "EEXIST") throw new ExportError("EXPORT_ALREADY_RUNNING", `Another export is already using the output folder: ${path.basename(outputRoot)}`);
+    throw new ExportError("EXPORT_LOCK_FAILED", `Could not lock the output folder: ${error?.message || error}`);
+  }
+  await handle.close();
+  const identity = await inspectSeparatedPath(lockPath, { requireRegularFile: true, requireReliableIdentity: true });
+  return { path: lockPath, identity };
+}
+
+async function releaseExportLock(lock) {
+  await removeOwnedTemporary(lock, { lstat: fsp.lstat, realpath: fsp.realpath, rm: fsp.rm, stat: fsp.stat });
+}
+
 async function assertSeparatedExportRoot(candidateOutputRoot, sourceRoots) {
   const output = await inspectSeparatedPath(candidateOutputRoot, { allowMissing: true });
   for (const sourceRoot of sourceRoots) {
@@ -1641,7 +1671,8 @@ function readableProjectDir(projectDirs, cwd) {
   return projectDirs.get(key);
 }
 
-async function writeMarkdownTranscript(meta, outputPath, rawRel, profiler = null, profileSession = meta) {
+async function writeMarkdownTranscript(meta, outputPath, rawRel, profiler = null, profileSession = meta, context) {
+  const { redactMarkdown, includeTools } = context;
   const renderStart = performance.now();
   const out = fs.createWriteStream(outputPath, { encoding: "utf8" });
   const stats = { userMessages: 0, assistantMessages: 0, subagentInputs: 0, runtimeContexts: 0, unclassifiedUserRoleRecords: 0, toolEvents: 0, model: meta.model || "", updatedAt: meta.latestTimestamp || meta.updatedAt || meta.timestamp || "" };
@@ -1682,14 +1713,14 @@ async function writeMarkdownTranscript(meta, outputPath, rawRel, profiler = null
         writeLine(out, "");
       } else if (classification.kind === USER_RECORD_KIND.SUBAGENT_INPUT) {
         stats.subagentInputs += 1;
-        writeClassifiedContext(out, "Subagent input / parent-agent handoff", text, item.timestamp);
+        writeClassifiedContext(out, "Subagent input / parent-agent handoff", text, item.timestamp, redactMarkdown);
       } else if (classification.kind === USER_RECORD_KIND.AUTOMATIC_RUNTIME_CONTEXT) {
         stats.runtimeContexts += 1;
         const suffix = classification.runtimeContextTypes.length ? ` — ${classification.runtimeContextTypes.join(" / ")}` : "";
-        writeClassifiedContext(out, `Automatic runtime context${suffix}`, text, item.timestamp);
+        writeClassifiedContext(out, `Automatic runtime context${suffix}`, text, item.timestamp, redactMarkdown);
       } else {
         stats.unclassifiedUserRoleRecords += 1;
-        writeClassifiedContext(out, "Unclassified user-role record", text, item.timestamp);
+        writeClassifiedContext(out, "Unclassified user-role record", text, item.timestamp, redactMarkdown);
       }
       continue;
     }
@@ -1730,7 +1761,7 @@ async function writeMarkdownTranscript(meta, outputPath, rawRel, profiler = null
   return stats;
 }
 
-function writeClassifiedContext(stream, label, text, timestamp) {
+function writeClassifiedContext(stream, label, text, timestamp, redactMarkdown) {
   const rendered = redactMarkdown ? redactSecrets(text) : text;
   const fence = markdownFence(rendered);
   writeLine(stream, "<details>");
@@ -1778,7 +1809,8 @@ function redactSecrets(text) {
   return result;
 }
 
-async function writeIndexFiles(dir, rows, profiler = null) {
+async function writeIndexFiles(dir, rows, profiler = null, context) {
+  const { diagnosticReporter, exportFormats, exportProfile, copyRaw, codexHome, sessionsDir, includeArchived, archivedSessionsDir, sessionIndexPath, pathStyle } = context;
   const generatedAt = new Date().toISOString();
   const indexRows = [...rows].sort((a, b) => (b.updated_at || b.started_at || "").localeCompare(a.updated_at || a.started_at || ""));
   const includeRawColumn = indexRows.some((row) => Boolean(row.raw_export_file));
@@ -2117,7 +2149,8 @@ function roundMs(value) {
   return Math.round(Number(value || 0) * 1000) / 1000;
 }
 
-async function writeSummary(dir, rows) {
+async function writeSummary(dir, rows, context) {
+  const { codexHome, sessionsDir, includeArchived, archivedSessionsDir, exportProfile, pathStyle, exportFormats, markdownDirName, copyRaw } = context;
   const projects = new Map();
   for (const row of rows) projects.set(row.project || "unknown", (projects.get(row.project || "unknown") || 0) + 1);
   const activeCount = rows.filter((row) => row.storage === "active").length;
@@ -2134,7 +2167,8 @@ async function writeSummary(dir, rows) {
   await fsp.writeFile(path.join(dir, "README.txt"), `${lines.join("\n")}\n`, "utf8");
 }
 
-async function verifyExport(dir, rows, profiler = null) {
+async function verifyExport(dir, rows, profiler = null, context) {
+  const { exportFormats } = context;
   const required = ["manifest.json", "README.txt"];
   if (exportFormats.html) required.push("index.html");
   if (exportFormats.markdown) required.push("index.md");
@@ -2197,7 +2231,8 @@ By default, exports use short paths such as md/p001-project/s0001.md and
 raw/p001-project/s0001.jsonl to make copied or unzipped archives safer on Windows.\n\nIf node is not found, use export-codex-project-chats.cmd or install Node.js 18+.`);
 }
 
-function printProjectList(metas) {
+function printProjectList(metas, context) {
+  const { sessionsDir, includeArchived, archivedSessionsDir } = context;
   const projects = new Map();
   for (const meta of metas) {
     const key = meta.cwd || "(unknown)";
@@ -2216,7 +2251,8 @@ function printProjectList(metas) {
   }
 }
 
-function printSessionList(metas) {
+function printSessionList(metas, context) {
+  const { sessionsDir, includeArchived, archivedSessionsDir } = context;
   console.log(`Active sessions directory: ${sessionsDir}`);
   console.log(`Archived sessions directory: ${includeArchived ? archivedSessionsDir : "disabled"}`);
   console.log(`Detected sessions after duplicate-ID handling: ${metas.length}`);
@@ -2239,7 +2275,8 @@ function printSessionList(metas) {
   console.log("Note: duplicate copies with the same session ID are shown once; an active copy takes precedence over an archived copy.");
 }
 
-function printDiagnostics(parsedEntries, metas, locations) {
+function printDiagnostics(parsedEntries, metas, locations, context) {
+  const { codexHome, sessionIndexPath, sessionsDir, archivedSessionsDir, includeArchived } = context;
   const byStorage = new Map();
   for (const location of locations) byStorage.set(location.storage, { root: location.root, files: 0, retained: 0 });
   for (const entry of parsedEntries) {
