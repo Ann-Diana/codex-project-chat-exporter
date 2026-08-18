@@ -439,6 +439,7 @@ async function runCommandInternal(context, { print, profiler, runState }) {
             const parseStart = performance.now();
             const parsedMeta = await readSessionMeta(publishedPath, {
               fallbackSessionId: meta.id,
+              fallbackTimestamp: meta.timestamp,
               collectAttachmentMetrics: Boolean(profiler),
               calculateSha256: true,
             });
@@ -611,7 +612,7 @@ async function readSessionIndex(indexPath, profiler = null) {
   return result;
 }
 
-async function readSessionMeta(file, { fallbackSessionId = "", collectAttachmentMetrics = false, calculateSha256 = false } = {}) {
+async function readSessionMeta(file, { fallbackSessionId = "", fallbackTimestamp = "", collectAttachmentMetrics = false, calculateSha256 = false } = {}) {
   const filenameId = extractSessionIdFromFilename(file);
   const stat = await fsp.stat(file).catch(() => null);
   const fileHash = calculateSha256 ? createHash("sha256") : null;
@@ -699,7 +700,7 @@ async function readSessionMeta(file, { fallbackSessionId = "", collectAttachment
   meta.firstUserText = eventAnalysis.firstDirectUserText;
   meta.sessionKind = eventAnalysis.sessionKind;
   if (!meta.cwd && meta.firstCwdText) meta.cwd = extractCwdFromText(meta.firstCwdText) || meta.cwd;
-  if (!meta.timestamp && stat) meta.timestamp = stat.mtime.toISOString();
+  if (!meta.timestamp) meta.timestamp = fallbackTimestamp || (stat ? stat.mtime.toISOString() : "");
   if (!meta.latestTimestamp) meta.latestTimestamp = meta.timestamp;
   if (fileHash) {
     const afterRead = await fsp.stat(file);
@@ -723,7 +724,11 @@ async function processExportTask(task, titleIndex, profiler, context, sourceProt
     let parsedMeta = parsedSnapshotMeta || meta;
     if (!metadataAlreadyParsed && !parsedSnapshotMeta) {
       const parseStart = performance.now();
-      parsedMeta = await readSessionMeta(parsePath, { fallbackSessionId: meta.id, collectAttachmentMetrics: Boolean(profiler) });
+      parsedMeta = await readSessionMeta(parsePath, {
+        fallbackSessionId: meta.id,
+        fallbackTimestamp: meta.timestamp,
+        collectAttachmentMetrics: Boolean(profiler),
+      });
       const parseMs = performance.now() - parseStart;
       profiler?.addPhase("parse_and_classify", parseMs, parsedMeta.fileSize, 0);
       profiler?.recordSession(meta, copyRaw ? "snapshot_parse_ms" : "selected_parse_ms", parseMs, parsedMeta.fileSize, 0);
@@ -2344,7 +2349,7 @@ Options:
   --no-raw                    Legacy shorthand for the readable profile when --profile is omitted.
   --no-redact-markdown        Disable redaction in Markdown and derived display titles.
   --readable-paths            Use longer human-readable export file names.
-  --performance-profile <file> Write a content-free local JSON performance profile.
+  --performance-profile <file> Write a message-free, path-redacted local JSON performance profile.
   --allow-output-in-tool-dir  Allow exporting into this tool/repository folder.
   --help, -h                  Show this help.
   --version, -v               Show the version.
@@ -2567,6 +2572,7 @@ export {
   parseArgs,
   portableBasename,
   redactSecrets,
+  readSessionMeta,
   readSessionRoutingMeta,
   readTopLevelJsonEventType,
   inspectUnprefixedEmbeddedImage,

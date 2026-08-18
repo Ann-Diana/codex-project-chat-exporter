@@ -8,6 +8,7 @@ import {
   USER_RECORD_KIND,
   copyStableRawSnapshot,
   createSessionEventClassifier,
+  readSessionMeta,
   readSessionRoutingMeta,
   resolveDisplayTitle,
   sha256File,
@@ -34,6 +35,43 @@ function classify(items) {
   const classifier = createSessionEventClassifier();
   items.forEach((item, index) => classifier.observe(item, index + 1));
   return classifier.finish();
+}
+
+{
+  const temp = await fs.mkdtemp(path.join(os.tmpdir(), "codex-exporter-timestamp-test-"));
+  try {
+    const sessionId = "019f0000-1111-7222-8333-444444444444";
+    const source = path.join(temp, `rollout-${sessionId}.jsonl`);
+    const snapshot = path.join(temp, "snapshot.jsonl");
+    await fs.writeFile(source, `${JSON.stringify({ type: "turn_context", payload: { cwd: "C:\\Projects\\alpha" } })}\n`, "utf8");
+    const sourceTime = new Date("2026-08-01T10:00:00.000Z");
+    const snapshotTime = new Date("2026-08-02T11:22:33.000Z");
+    await fs.utimes(source, sourceTime, sourceTime);
+    const routingMeta = await readSessionRoutingMeta(source);
+    await fs.copyFile(source, snapshot);
+    await fs.utimes(snapshot, snapshotTime, snapshotTime);
+    const parsedSnapshot = await readSessionMeta(snapshot, {
+      fallbackSessionId: routingMeta.id,
+      fallbackTimestamp: routingMeta.timestamp,
+    });
+    assert.equal(routingMeta.hasSessionMeta, false);
+    assert.equal(parsedSnapshot.hasSessionMeta, false);
+    assert.equal(parsedSnapshot.timestamp, routingMeta.timestamp, "snapshot parsing must preserve the source-derived timestamp fallback");
+    assert.notEqual(parsedSnapshot.timestamp, snapshotTime.toISOString(), "the copied snapshot mtime must not become the session start");
+
+    const authoritativeTimestamp = "2026-07-31T09:08:07.000Z";
+    const withSessionMeta = path.join(temp, "with-session-meta.jsonl");
+    await fs.writeFile(withSessionMeta, `${JSON.stringify(sessionMeta({ id: sessionId, timestamp: authoritativeTimestamp }))}\n`, "utf8");
+    await fs.utimes(withSessionMeta, snapshotTime, snapshotTime);
+    const parsedWithSessionMeta = await readSessionMeta(withSessionMeta, {
+      fallbackSessionId: sessionId,
+      fallbackTimestamp: routingMeta.timestamp,
+    });
+    assert.equal(parsedWithSessionMeta.hasSessionMeta, true);
+    assert.equal(parsedWithSessionMeta.timestamp, authoritativeTimestamp, "authoritative session metadata must take precedence over a source-derived fallback");
+  } finally {
+    await fs.rm(temp, { recursive: true, force: true });
+  }
 }
 
 {
