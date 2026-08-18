@@ -51,7 +51,7 @@ In `md/` for short paths or `markdown/` for readable paths, verify at least one 
 
 Do not treat Markdown or HTML as a lossless import source. Confirm that no inspected record disappeared from the corresponding raw JSONL snapshot.
 
-These manual checks are representative spot checks only. Complete synthetic parity is covered by the automated integration tests, and full real-session Raw/Assistant parity is covered by the recorded Realexport audit.
+These manual checks are representative spot checks only. Synthetic parity is covered by the automated integration tests.
 
 ## Inspect manifest and raw integrity
 
