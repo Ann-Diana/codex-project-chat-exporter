@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
+import fsSync from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -492,6 +493,82 @@ assert.equal(routerManifest.sessions[0].session_id, routedMeta.id, "structured r
 assert.equal(routerManifest.sessions[0].project, routedMeta.cwd, "structured routing and full selected-session parsing must agree on project routing");
 assert.equal(routerManifest.sessions[0].invalid_jsonl_line_count, 1);
 assert.deepEqual(await fs.readFile(path.join(routerOutput, routerManifest.sessions[0].raw_export_file)), await fs.readFile(routerSource), "invalid JSONL lines must remain byte-identical in canonical Raw output");
+
+const timestampHome = path.join(temp, "timestamp-codex-home");
+const timestampSessions = path.join(timestampHome, "sessions", "2026", "08", "18");
+const fallbackSessionId = "019f0000-1111-7222-8333-555555555555";
+const metadataSessionId = "019f0000-1111-7222-8333-666666666666";
+const timestampFallbackSource = path.join(timestampSessions, `rollout-${fallbackSessionId}.jsonl`);
+const timestampMetadataSource = path.join(timestampSessions, `rollout-${metadataSessionId}.jsonl`);
+const fallbackSourceTime = new Date("2001-02-03T04:05:06.000Z");
+const metadataSourceTime = new Date("2002-03-04T05:06:07.000Z");
+const forcedCopyTime = new Date("2040-05-06T07:08:09.000Z");
+const authoritativeMetadataTime = "2020-11-12T13:14:15.000Z";
+await fs.mkdir(timestampSessions, { recursive: true });
+await fs.writeFile(timestampFallbackSource, jsonl([
+  { type: "turn_context", timestamp: "2026-08-18T10:00:00.000Z", payload: { cwd: "C:\\Projects\\timestamp-fallback", model: "gpt-test" } },
+  { type: "response_item", timestamp: "2026-08-18T10:00:01.000Z", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "Verify source-derived timestamps." }] } },
+  { type: "response_item", timestamp: "2026-08-18T10:00:02.000Z", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "Verified." }] } },
+]));
+await fs.writeFile(timestampMetadataSource, jsonl([
+  { type: "session_meta", timestamp: authoritativeMetadataTime, payload: { id: metadataSessionId, cwd: "C:\\Projects\\timestamp-metadata", timestamp: authoritativeMetadataTime, source: "vscode", thread_source: "user" } },
+  { type: "response_item", timestamp: "2026-08-18T11:00:01.000Z", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "Keep authoritative session metadata." }] } },
+  { type: "response_item", timestamp: "2026-08-18T11:00:02.000Z", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "Kept." }] } },
+]));
+await fs.utimes(timestampFallbackSource, fallbackSourceTime, fallbackSourceTime);
+await fs.utimes(timestampMetadataSource, metadataSourceTime, metadataSourceTime);
+
+for (const profile of ["complete", "readable", "source-snapshots"]) {
+  const timestampOutput = path.join(temp, `timestamp-${profile}-output`);
+  const result = await exportArchive({
+    codexHome: timestampHome,
+    scope: "all",
+    outputDirectory: timestampOutput,
+    exportProfile: profile,
+    onDiagnostic: (event) => {
+      if (event.event !== "snapshot_copy_end") return;
+      const pending = [];
+      const visit = (directory) => {
+        for (const entry of fsSync.readdirSync(directory, { withFileTypes: true })) {
+          const candidate = path.join(directory, entry.name);
+          if (entry.isDirectory()) visit(candidate);
+          else if (entry.isFile() && entry.name.includes(".partial-")) pending.push(candidate);
+        }
+      };
+      visit(timestampOutput);
+      assert.equal(pending.length, 1, `${profile} must expose exactly one in-progress Raw copy`);
+      fsSync.utimesSync(pending[0], forcedCopyTime, forcedCopyTime);
+    },
+  });
+  const timestampManifest = JSON.parse(await fs.readFile(result.manifestPath, "utf8"));
+  const fallbackSession = timestampManifest.sessions.find((session) => session.session_id === fallbackSessionId);
+  const metadataSession = timestampManifest.sessions.find((session) => session.session_id === metadataSessionId);
+  assert.equal(fallbackSession.started_at, fallbackSourceTime.toISOString(), `${profile} must preserve the source-derived started_at fallback`);
+  assert.equal(metadataSession.started_at, authoritativeMetadataTime, `${profile} must preserve authoritative session_meta timestamps`);
+  assert.notEqual(metadataSession.started_at, metadataSourceTime.toISOString(), `${profile} must not replace session_meta with the source mtime`);
+
+  const timestampHtml = await fs.readFile(result.htmlIndexPath, "utf8");
+  assert.match(timestampHtml, new RegExp(fallbackSourceTime.toISOString()), `${profile} HTML index must use the source-derived started_at`);
+  assert.match(timestampHtml, new RegExp(authoritativeMetadataTime), `${profile} HTML index must use the authoritative session_meta timestamp`);
+
+  if (profile === "complete" || profile === "source-snapshots") {
+    for (const session of [fallbackSession, metadataSession]) {
+      const copiedStat = await fs.stat(path.join(timestampOutput, session.raw_export_file));
+      assert.ok(Math.abs(copiedStat.mtimeMs - forcedCopyTime.getTime()) < 1_000, `${profile} fixture must retain the forced Raw-copy mtime`);
+    }
+  } else {
+    assert.equal(fallbackSession.raw_export_file, "");
+    assert.equal(metadataSession.raw_export_file, "");
+  }
+
+  if (profile === "source-snapshots") {
+    assert.equal(await pathExists(path.join(timestampOutput, "index.md")), false);
+  } else {
+    const timestampMarkdownIndex = await fs.readFile(path.join(timestampOutput, "index.md"), "utf8");
+    assert.match(timestampMarkdownIndex, new RegExp(fallbackSourceTime.toISOString()), `${profile} Markdown index must use the source-derived started_at`);
+    assert.match(timestampMarkdownIndex, new RegExp(authoritativeMetadataTime), `${profile} Markdown index must use the authoritative session_meta timestamp`);
+  }
+}
 
 assert.ok(html.includes(dangerousTitle), "HTML output must preserve the title independently of Markdown escaping");
 assert.ok(html.includes("beta\rbare\nline\r\nend"), "HTML output must preserve project metadata independently of Markdown escaping");
