@@ -24,14 +24,14 @@ Use this checklist for the uniquely named pre-commit VSIX candidate. It tests th
 
 Expected files by profile:
 
-- **Complete**: export-time-verified `raw/`, Markdown transcripts, `index.html`, `index.md`, `manifest.json`, and `README.txt`.
+- **Complete**: `raw/` checked at export time, Markdown transcripts, `index.html`, `index.md`, `manifest.json`, and `README.txt`.
 - **Readable**: Markdown transcripts and both indexes plus `manifest.json` and `README.txt`, without new Raw snapshots.
-- **Source snapshots**: export-time-verified `raw/`, a reduced `index.html`, `manifest.json`, and `README.txt`, without Markdown transcripts or `index.md`.
+- **Source snapshots**: `raw/` checked at export time, a reduced `index.html`, `manifest.json`, and `README.txt`, without Markdown transcripts or `index.md`.
 
 1. Run **Codex Export: Export…** and cancel the scope Quick Pick. Confirm that no output folder is requested or changed.
 2. Run it again, choose a scope, then cancel the profile Quick Pick. Confirm the same no-side-effect behavior.
 3. Export a small known scope with **Readable**. Confirm that Markdown and both indexes exist, no new `raw/` is created, and the HTML index has no Raw column even if an old `raw/` folder exists.
-4. Export to a new empty folder with **Verified source snapshots**. Confirm that Raw files verified at export time, `manifest.json`, `README.txt`, and `index.html` exist, while no Markdown transcript directory or `index.md` exists and the HTML index has no Markdown column or transcript links.
+4. Export to a new empty folder with **Source snapshots**. Confirm that Raw files checked at export time, `manifest.json`, `README.txt`, and `index.html` exist, while no Markdown transcript directory or `index.md` exists and the HTML index has no Markdown column or transcript links.
 5. For a dedicated troubleshooting run only, enable `codexProjectChatExporter.diagnosticOutput`. Confirm that the first diagnostic line includes the candidate build identifier, one `run_id`, and `command_start`; then disable the setting again.
 
 ## Inspect classified reading views

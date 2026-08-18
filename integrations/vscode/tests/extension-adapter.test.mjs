@@ -132,11 +132,11 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
   assert.deepEqual(EXPORT_PROFILES.map(({ label, profile }) => ({ label, profile })), [
     { label: "Complete export", profile: "complete" },
     { label: "Readable export", profile: "readable" },
-    { label: "Verified source snapshots", profile: "source-snapshots" },
+    { label: "Source snapshots", profile: "source-snapshots" },
   ]);
   assert.equal("codexProjectChatExporter.includeOriginalJsonl" in extensionPackage.contributes.configuration.properties, false);
   assert.equal("codexProjectChatExporter.exportProfile" in extensionPackage.contributes.configuration.properties, false);
-  assert.equal(extensionPackage.version, "0.1.1", "the optimized diagnostic candidate must install as a distinguishable extension version");
+  assert.equal(extensionPackage.version, "0.1.2", "the final pre-push candidate must install as a distinguishable extension version");
   assert.equal(extensionPackage.contributes.configuration.properties["codexProjectChatExporter.diagnosticOutput"].default, false);
   assert.equal(formatExportSummary(1, 1), "1 session across 1 project");
   assert.equal(formatExportSummary(2, 1), "2 sessions across 1 project");
@@ -241,7 +241,7 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
 
 {
   lastOptions = undefined;
-  const fake = createFakeVscode({ config: { outputDirectory }, quickPickSelector: (items, options) => options?.placeHolder === "Choose what to export" ? items.find((item) => item.label === "All Sessions") : items.find((item) => item.label === "Verified source snapshots") });
+  const fake = createFakeVscode({ config: { outputDirectory }, quickPickSelector: (items, options) => options?.placeHolder === "Choose what to export" ? items.find((item) => item.label === "All Sessions") : items.find((item) => item.label === "Source snapshots") });
   const context = createContext(temp);
   const adapter = createExtensionAdapter(fake.vscode, { loadExporter: async () => exporter });
   await adapter.activate(context);

@@ -73,7 +73,7 @@ Before finalizing a raw snapshot, the exporter:
 
 The exporter retries an unstable source up to three times. A persistent change produces `SOURCE_CHANGED_DURING_EXPORT`; a locked or inaccessible source produces `SOURCE_SNAPSHOT_LOCKED`; other copy failures produce `SOURCE_SNAPSHOT_FAILED`. The affected export run fails rather than recording an unverified Raw copy as verified at export.
 
-For an included and verified raw snapshot:
+For an included Raw snapshot checked at export time:
 
 - `snapshot_status` is `STABLE`;
 - `raw_copy_status` is `VERIFIED_AT_EXPORT`;
@@ -173,7 +173,7 @@ Reasoning, internal events, invalid JSON lines, and other event types remain ava
 
 `index.html` and `index.md` provide metadata navigation. The HTML index filters project, title, date, model, and storage status; it is not a transcript full-text search engine.
 
-The `source-snapshots` profile intentionally omits Markdown transcripts and `index.md`. Its HTML metadata index links only to verified Raw snapshots and does not imply that event classification was performed; classification-derived counters are `null` in that profile.
+The `source-snapshots` profile intentionally omits Markdown transcripts and `index.md`. Its HTML metadata index links only to Raw snapshots checked at export time and does not imply that event classification was performed; classification-derived counters are `null` in that profile.
 
 ## Import boundary
 

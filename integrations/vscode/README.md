@@ -18,14 +18,14 @@ The exporter remains IDE-agnostic. The extension only provides native VS Code co
 Build or obtain the `.vsix` file, then install it locally in VS Code Desktop:
 
 ```powershell
-code --install-extension .\codex-project-chat-exporter-vscode-0.1.1.vsix --force
+code --install-extension .\codex-project-chat-exporter-vscode-0.1.2.vsix --force
 ```
 
 If `code` is not on PATH, use VS Code's Extensions view and choose `Install from VSIX...`.
 
 ## Commands
 
-- `Codex Export: Export…` — choose **Current Workspace** or **All Sessions**, then **Complete export**, **Readable export**, or **Verified source snapshots**.
+- `Codex Export: Export…` — choose **Current Workspace** or **All Sessions**, then **Complete export**, **Readable export**, or **Source snapshots**.
 - `Codex Export: Open Latest Export`
 - `Codex Export: Open Export Folder`
 
@@ -36,9 +36,9 @@ The extension keeps the older direct-command IDs registered for compatibility, b
 - `codexProjectChatExporter.outputDirectory`: absolute local export folder. The folder picker supplies an absolute path; when editing the setting manually, use an absolute path. A rejected relative value is shown with this setting name and an absolute example. If empty, the extension asks on first export and remembers the selected folder.
 - `codexProjectChatExporter.codexHome`: optional absolute local Codex home folder. Empty uses `CODEX_HOME` or the default local `.codex` folder.
 - **Export…** asks for one of three profiles on every run:
-  - **Complete** creates export-time-verified `raw/`, Markdown transcripts, `index.html`, `index.md`, `manifest.json`, and `README.txt`.
+  - **Complete** creates `raw/` checked at export time, Markdown transcripts, `index.html`, `index.md`, `manifest.json`, and `README.txt`.
   - **Readable** creates Markdown transcripts, both indexes, `manifest.json`, and `README.txt` without new Raw snapshots.
-  - **Source snapshots** creates export-time-verified `raw/`, a reduced `index.html`, `manifest.json`, and `README.txt` without Markdown transcripts or `index.md`.
+  - **Source snapshots** creates `raw/` checked at export time, a reduced `index.html`, `manifest.json`, and `README.txt` without Markdown transcripts or `index.md`.
 - `codexProjectChatExporter.pathStyle`: defaults to `short` (`md/` and compact filenames); `readable` uses `markdown/` and longer timestamp/title-based filenames.
 - `codexProjectChatExporter.includeTools`: defaults to `false`; include tool call input/output in Markdown. Tool data can be sensitive.
 - `codexProjectChatExporter.diagnosticOutput`: defaults to `false`; enable only for a troubleshooting run that needs detailed content-free phase timing in the output channel. Normal exports show only a concise runtime summary.
@@ -50,6 +50,8 @@ The extension works locally and makes no network requests. It adds no telemetry 
 Generated exports can contain sensitive chats, absolute local paths, runtime contexts, tool output, and attachment data or references. Raw JSONL and `manifest.json` are not share-safe by default.
 
 The extension delegates classification, masking, snapshot integrity, and manifest generation to the shared exporter core. See the [FAQ](https://github.com/Ann-Diana/codex-project-chat-exporter/blob/main/FAQ.md) and [archive format version 1 specification](https://github.com/Ann-Diana/codex-project-chat-exporter/blob/main/docs/archive-format-v1.md).
+
+For included Raw files, `raw_copy_status`, `raw_verified_at`, and `raw_sha256` record the export-time check. Raw files remain mutable; any later use or future importer must hash the current file again and reject a mismatch.
 
 ## Tested configuration
 

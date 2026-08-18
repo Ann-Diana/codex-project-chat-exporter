@@ -5,7 +5,7 @@ const { performance } = require("node:perf_hooks");
 const { pathToFileURL } = require("node:url");
 
 const CONFIG_SECTION = "codexProjectChatExporter";
-const DIAGNOSTIC_BUILD_ID = "0.1.1-raw-hash-optimized";
+const DIAGNOSTIC_BUILD_ID = "0.1.2-pre-push";
 const STATE_OUTPUT_DIR = "codexProjectChatExporter.outputDirectory";
 const STATE_LATEST_HTML = "codexProjectChatExporter.latestHtmlIndexPath";
 const COMMANDS = {
@@ -16,9 +16,9 @@ const COMMANDS = {
   openExportFolder: "codexArchive.openExportFolder",
 };
 const EXPORT_PROFILES = Object.freeze([
-  { label: "Complete export", description: "Verified Raw JSONL plus Markdown reading views and HTML index", profile: "complete" },
+  { label: "Complete export", description: "Raw JSONL checked at export time plus Markdown reading views and HTML index", profile: "complete" },
   { label: "Readable export", description: "Markdown reading views and HTML index without Raw JSONL", profile: "readable" },
-  { label: "Verified source snapshots", description: "Verified Raw JSONL and index without human-readable transcripts", profile: "source-snapshots" },
+  { label: "Source snapshots", description: "Raw JSONL checked at export time and index without human-readable transcripts", profile: "source-snapshots" },
 ]);
 
 function createExtensionAdapter(vscode, injected = {}) {

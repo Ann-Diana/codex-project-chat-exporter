@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 
 ## Unreleased
 
+### Changed
+
+- Prepared VS Code extension 0.1.2 with three visible export commands and clearer Source snapshots wording.
+- Replaced continuing Raw-integrity claims with export-time verification metadata and documented mandatory rehashing for later use.
+
 ### Fixed
 
 - Completed escaping of backslashes, pipes, and line breaks in Markdown index table cells.

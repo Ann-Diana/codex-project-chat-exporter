@@ -115,9 +115,9 @@ The exporter does not clean an existing output folder. A `raw/` directory from a
 
 ## Which export profile should I use?
 
-- **Complete** (`complete`) is the default and creates export-time-verified `raw/`, Markdown transcripts, `index.html`, `index.md`, `manifest.json`, and `README.txt`.
+- **Complete** (`complete`) is the default and creates `raw/` checked at export time, Markdown transcripts, `index.html`, `index.md`, `manifest.json`, and `README.txt`.
 - **Readable** (`readable`) creates Markdown transcripts, both indexes, `manifest.json`, and `README.txt` without new Raw snapshots.
-- **Source snapshots** (`source-snapshots`) creates export-time-verified `raw/`, a reduced `index.html`, `manifest.json`, and `README.txt` without Markdown transcripts or `index.md`. The reduced index uses project, storage, start time, session ID, and Raw links rather than unavailable title or model metadata.
+- **Source snapshots** (`source-snapshots`) creates `raw/` checked at export time, a reduced `index.html`, `manifest.json`, and `README.txt` without Markdown transcripts or `index.md`. The reduced index uses project, storage, start time, session ID, and Raw links rather than unavailable title or model metadata.
 
 An explicit CLI `--profile` wins over the legacy CLI Raw switch. Without an explicit profile, CLI `--no-raw` maps to `readable` for compatibility. The VS Code extension asks for the profile on every export.
 

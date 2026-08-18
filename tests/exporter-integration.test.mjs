@@ -10,6 +10,8 @@ import { exportArchive, readSessionRoutingMeta, sha256File } from "../bin/export
 
 const execFileAsync = promisify(execFile);
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const retiredContinuingIntegrityField = ["raw", "integrity", "verified"].join("_");
+const retiredImportReadinessField = ["import", "ready"].join("_");
 const script = path.join(repoRoot, "bin", "export-codex-project-chats.mjs");
 const temp = await fs.mkdtemp(path.join(os.tmpdir(), "codex-exporter-test-"));
 const codexHome = path.join(temp, ".codex");
@@ -152,8 +154,8 @@ for (const session of manifest.sessions) {
   assert.equal(session.snapshot_status, "STABLE");
   assert.equal(session.raw_copy_status, "VERIFIED_AT_EXPORT");
   assert.equal(new Date(session.raw_verified_at).toISOString(), session.raw_verified_at);
-  assert.equal("raw_integrity_verified" in session, false, "the manifest must not claim a continuing integrity state");
-  assert.equal("import_ready" in session, false, "snapshot integrity must not imply a tested Codex import path");
+  assert.equal(retiredContinuingIntegrityField in session, false, "the manifest must not claim a continuing integrity state");
+  assert.equal(retiredImportReadinessField in session, false, "snapshot verification must not imply a tested Codex import path");
   assert.match(session.raw_sha256, /^[0-9a-f]{64}$/);
   assert.ok(session.raw_size_bytes > 0);
   assert.ok(session.jsonl_line_count >= session.parsed_event_count);
@@ -209,8 +211,8 @@ for (const session of apiManifest.sessions) {
   assert.equal(session.snapshot_status, "NOT_INCLUDED");
   assert.equal(session.raw_copy_status, "NOT_INCLUDED");
   assert.equal(session.raw_verified_at, null);
-  assert.equal("raw_integrity_verified" in session, false);
-  assert.equal("import_ready" in session, false);
+  assert.equal(retiredContinuingIntegrityField in session, false);
+  assert.equal(retiredImportReadinessField in session, false);
 }
 const apiProfileText = await fs.readFile(apiProfilePath, "utf8");
 const apiProfile = JSON.parse(apiProfileText);
@@ -314,7 +316,7 @@ for (const session of sourceSnapshotsManifest.sessions) {
   assert.equal(session.snapshot_status, "STABLE");
   assert.equal(session.raw_copy_status, "VERIFIED_AT_EXPORT");
   assert.equal(new Date(session.raw_verified_at).toISOString(), session.raw_verified_at);
-  assert.equal("raw_integrity_verified" in session, false);
+  assert.equal(retiredContinuingIntegrityField in session, false);
   assert.deepEqual(await fs.readFile(path.join(sourceSnapshotsOutput, session.raw_export_file)), await fs.readFile(session.source_jsonl));
 }
 assert.deepEqual(progressEvents.map((event) => event.phase).filter((phase, index, phases) => index === 0 || phase !== phases[index - 1]), ["discovery", "routing", "snapshot", "processing", "writing", "complete"]);
@@ -423,7 +425,7 @@ const persistedActiveSession = persistedManifest.sessions.find((session) => sess
 assert.equal(persistedActiveSession.raw_copy_status, "VERIFIED_AT_EXPORT", "the status must remain an explicitly historical export-time statement");
 assert.equal(persistedActiveSession.raw_verified_at, activeSession.raw_verified_at);
 assert.equal(persistedActiveSession.raw_sha256, recordedRawHash);
-assert.equal("raw_integrity_verified" in persistedActiveSession, false);
+assert.equal(retiredContinuingIntegrityField in persistedActiveSession, false);
 
 await fs.rm(temp, { recursive: true, force: true });
 console.log("exporter integration tests passed");

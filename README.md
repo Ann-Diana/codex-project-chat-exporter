@@ -69,9 +69,9 @@ node .\bin\export-codex-project-chats.mjs --project my-project --out C:\cx\my-pr
 
 Choose one profile. The legacy `--no-raw` switch remains shorthand for `readable` when no explicit profile is supplied:
 
-- **Complete** (`--profile complete`, default): export-time-verified `raw/`, Markdown transcripts in `md/`, `index.html`, `index.md`, `manifest.json`, and `README.txt`.
+- **Complete** (`--profile complete`, default): `raw/` checked at export time, Markdown transcripts in `md/`, `index.html`, `index.md`, `manifest.json`, and `README.txt`.
 - **Readable** (`--profile readable`): Markdown transcripts and both indexes plus `manifest.json` and `README.txt`, without new Raw snapshots.
-- **Source snapshots** (`--profile source-snapshots`): export-time-verified `raw/`, a reduced `index.html`, `manifest.json`, and `README.txt`, without Markdown transcripts or `index.md`.
+- **Source snapshots** (`--profile source-snapshots`): `raw/` checked at export time, a reduced `index.html`, `manifest.json`, and `README.txt`, without Markdown transcripts or `index.md`.
 
 Show all list, diagnosis, profile, tool, path, and raw-output options:
 
@@ -136,7 +136,7 @@ The HTML index filters metadata such as project, title, date, model, and active/
 
 ## Experimental VS Code extension
 
-The optional Visual Studio Code extension calls the same export core as the CLI. Its primary command first chooses **Current Workspace** or **All Sessions**, then **Complete export**, **Readable export**, or **Verified source snapshots**:
+The optional Visual Studio Code extension calls the same export core as the CLI. Its primary command first chooses **Current Workspace** or **All Sessions**, then **Complete export**, **Readable export**, or **Source snapshots**:
 
 - `Codex Export: Export…`
 - `Codex Export: Open Latest Export`
