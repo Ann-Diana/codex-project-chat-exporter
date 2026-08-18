@@ -92,6 +92,7 @@ function createExtensionAdapter(vscode, injected = {}) {
   }
 
   async function runExport(context, scopeOptions, explicitProfile) {
+    ensureDesktopLocalExtensionHost();
     const adapterExportStartedAt = performance.now();
     writeDiagnostic("adapter_export_start", { selected_scope: scopeOptions.scope, profile: explicitProfile || "complete" });
     const outputDirectory = await resolveOutputDirectory(context);
@@ -112,8 +113,12 @@ function createExtensionAdapter(vscode, injected = {}) {
       pathStyle: config.get("pathStyle", "short"),
       includeTools: config.get("includeTools", false),
     };
-    const codexHome = config.get("codexHome", "");
-    if (codexHome) options.codexHome = codexHome;
+    const codexHome = getUserOnlyConfigValue("codexHome", "");
+    if (codexHome) {
+      const validatedCodexHome = validateLocalAbsolutePath(codexHome, "codexProjectChatExporter.codexHome");
+      if (!validatedCodexHome) return undefined;
+      options.codexHome = validatedCodexHome;
+    }
 
     outputChannel.appendLine(`Starting ${scopeOptions.scope === "all" ? "all-session" : "workspace"} export.`);
     outputChannel.appendLine(`Export profile: ${configuredProfile}`);
@@ -179,12 +184,13 @@ function createExtensionAdapter(vscode, injected = {}) {
   }
 
   function ensureDesktopLocalExtensionHost() {
+    if (vscode.workspace.isTrusted === false) throw new Error("Codex exports are disabled in untrusted VS Code workspaces.");
     if (vscode.env.remoteName) throw new Error(`Remote extension hosts are not supported by this MVP: ${vscode.env.remoteName}`);
     if (vscode.env.uiKind && vscode.env.uiKind !== vscode.UIKind.Desktop) throw new Error("vscode.dev and github.dev are not supported by this MVP.");
   }
 
   async function resolveOutputDirectory(context) {
-    const configValue = getConfig().get("outputDirectory", "");
+    const configValue = getUserOnlyConfigValue("outputDirectory", "");
     if (configValue) return validateAbsoluteOutputDirectory(configValue);
     const remembered = context.globalState.get(STATE_OUTPUT_DIR, "");
     if (remembered) return validateAbsoluteOutputDirectory(remembered);
@@ -196,17 +202,25 @@ function createExtensionAdapter(vscode, injected = {}) {
   }
 
   async function openLatestArchive(context) {
+    ensureDesktopLocalExtensionHost();
     const latest = context.globalState.get(STATE_LATEST_HTML, "");
-    if (!latest || !deps.fs.existsSync(latest)) {
+    if (!latest) {
       vscode.window.showWarningMessage("No latest Codex export HTML index was found. Run an export first.");
       return false;
     }
-    await openFile(latest);
+    const validated = validateLocalAbsolutePath(latest, STATE_LATEST_HTML);
+    if (!validated) return false;
+    if (!deps.fs.existsSync(validated)) {
+      vscode.window.showWarningMessage("No latest Codex export HTML index was found. Run an export first.");
+      return false;
+    }
+    await openFile(validated);
     return true;
   }
 
   async function openExportFolder(context) {
-    const folder = getConfig().get("outputDirectory", "") || context.globalState.get(STATE_OUTPUT_DIR, "");
+    ensureDesktopLocalExtensionHost();
+    const folder = getUserOnlyConfigValue("outputDirectory", "") || context.globalState.get(STATE_OUTPUT_DIR, "");
     if (!folder) {
       vscode.window.showWarningMessage("No Codex export folder is configured yet.");
       return false;
@@ -218,10 +232,28 @@ function createExtensionAdapter(vscode, injected = {}) {
   }
 
   function validateAbsoluteOutputDirectory(folder) {
+    return validateLocalAbsolutePath(folder, "codexProjectChatExporter.outputDirectory");
+  }
+
+  function validateLocalAbsolutePath(folder, settingName) {
+    if (isWindowsNetworkOrDevicePath(folder)) {
+      vscode.window.showWarningMessage(`The value "${folder}" is a Windows network or device path. Choose an absolute local path in the setting "${settingName}".`);
+      return null;
+    }
     if (deps.path.isAbsolute(folder)) return folder;
     const example = process.platform === "win32" ? "C:\\Codex-Exports" : "/Users/you/Codex-Exports";
-    vscode.window.showWarningMessage(`The value "${folder}" is not an absolute output folder. Use an absolute path such as "${example}" in the setting "codexProjectChatExporter.outputDirectory".`);
+    vscode.window.showWarningMessage(`The value "${folder}" is not an absolute local path. Use an absolute path such as "${example}" in the setting "${settingName}".`);
     return null;
+  }
+
+  function getUserOnlyConfigValue(key, fallback) {
+    const inspected = getConfig().inspect(key);
+    if (!inspected) return fallback;
+    const workspaceFields = ["workspaceValue", "workspaceFolderValue", "workspaceLanguageValue", "workspaceFolderLanguageValue"];
+    if (workspaceFields.some((field) => inspected[field] !== undefined)) {
+      throw new Error(`The sensitive setting "${CONFIG_SECTION}.${key}" must be configured in VS Code User settings, not Workspace or Workspace Folder settings.`);
+    }
+    return inspected.globalValue ?? inspected.defaultValue ?? fallback;
   }
 
   async function openFile(filePath) {
@@ -300,4 +332,8 @@ function safeErrorMessage(error) {
   return `${code}${error.message || String(error)}`;
 }
 
-module.exports = { COMMANDS, CONFIG_SECTION, DIAGNOSTIC_BUILD_ID, EXPORT_PROFILES, STATE_LATEST_HTML, STATE_OUTPUT_DIR, createExtensionAdapter, formatExportSummary, formatRuntimeSummary, resolveConfiguredProfile, safeErrorMessage };
+function isWindowsNetworkOrDevicePath(value) {
+  return String(value || "").replaceAll("/", "\\").startsWith("\\\\");
+}
+
+module.exports = { COMMANDS, CONFIG_SECTION, DIAGNOSTIC_BUILD_ID, EXPORT_PROFILES, STATE_LATEST_HTML, STATE_OUTPUT_DIR, createExtensionAdapter, formatExportSummary, formatRuntimeSummary, isWindowsNetworkOrDevicePath, resolveConfiguredProfile, safeErrorMessage };

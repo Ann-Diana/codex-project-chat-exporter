@@ -33,8 +33,8 @@ The extension keeps the older direct-command IDs registered for compatibility, b
 
 ## Settings
 
-- `codexProjectChatExporter.outputDirectory`: absolute local export folder. The folder picker supplies an absolute path; when editing the setting manually, use an absolute path. A rejected relative value is shown with this setting name and an absolute example. If empty, the extension asks on first export and remembers the selected folder.
-- `codexProjectChatExporter.codexHome`: optional absolute local Codex home folder. Empty uses `CODEX_HOME` or the default local `.codex` folder.
+- `codexProjectChatExporter.outputDirectory`: absolute local export folder in VS Code User settings. Workspace and Workspace Folder values are rejected. UNC and Windows device paths are rejected; mapped network drives cannot be identified portably and are not claimed to be detected. If empty, the extension asks on first export and remembers the selected folder.
+- `codexProjectChatExporter.codexHome`: optional absolute local Codex home folder in VS Code User settings. Workspace and Workspace Folder values are rejected. Empty uses `CODEX_HOME` or the default local `.codex` folder.
 - **Export…** asks for one of three profiles on every run:
   - **Complete** creates `raw/` checked at export time, Markdown transcripts, `index.html`, `index.md`, `manifest.json`, and `README.txt`.
   - **Readable** creates Markdown transcripts, both indexes, `manifest.json`, and `README.txt` without new Raw snapshots.
@@ -45,7 +45,7 @@ The extension keeps the older direct-command IDs registered for compatibility, b
 
 ## Privacy
 
-The extension works locally and makes no network requests. It adds no telemetry and does not modify, move, or delete Codex session files. It stores only the chosen output folder and latest HTML index path in VS Code global state.
+The extension works in trusted local desktop workspaces and makes no application-level network requests. It adds no telemetry and does not modify, move, or delete Codex session files. It stores only the chosen output folder and latest HTML index path in VS Code global state. Avoid selecting a mapped network drive because the extension cannot identify every mapped-drive configuration without platform-specific dependencies.
 
 Generated exports can contain sensitive chats, absolute local paths, runtime contexts, tool output, and attachment data or references. Raw JSONL and `manifest.json` are not share-safe by default.
 

@@ -19,6 +19,7 @@ Use this checklist for the uniquely named pre-commit VSIX candidate. It tests th
 6. Confirm that the native progress notification advances through phases and shows at least one `Processing session X of Y` message.
 7. Open the `Codex Project Chat Exporter` output channel and confirm that it records the complete output folder, HTML index, and manifest paths.
 8. With `codexProjectChatExporter.diagnosticOutput` disabled, confirm that the channel shows one concise runtime summary and no `[DIAG]` event stream.
+9. Confirm that `outputDirectory` and `codexHome` are User settings, Workspace values are rejected, and UNC/device output paths are rejected. Mapped network drives remain a documented platform limit.
 
 ## Check all profiles and cancellation
 

@@ -7,7 +7,7 @@ import { createRequire } from "node:module";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const require = createRequire(import.meta.url);
-const { COMMANDS, DIAGNOSTIC_BUILD_ID, EXPORT_PROFILES, STATE_LATEST_HTML, STATE_OUTPUT_DIR, createExtensionAdapter, formatExportSummary, resolveConfiguredProfile } = require("../src/vscode-adapter.cjs");
+const { COMMANDS, DIAGNOSTIC_BUILD_ID, EXPORT_PROFILES, STATE_LATEST_HTML, STATE_OUTPUT_DIR, createExtensionAdapter, formatExportSummary, isWindowsNetworkOrDevicePath, resolveConfiguredProfile } = require("../src/vscode-adapter.cjs");
 
 function createState() {
   const values = new Map();
@@ -28,6 +28,7 @@ function createFakeVscode(overrides = {}) {
   const progressCalls = [];
   const progressReports = [];
   const config = new Map(Object.entries(overrides.config || {}));
+  const configScopes = overrides.configScopes || {};
   const vscode = {
     UIKind: { Desktop: 1, Web: 2 },
     ProgressLocation: { Notification: 15 },
@@ -38,10 +39,11 @@ function createFakeVscode(overrides = {}) {
     },
     Uri: { file: (fsPath) => ({ scheme: "file", fsPath }) },
     workspace: {
+      isTrusted: overrides.isTrusted !== false,
       workspaceFolders: overrides.workspaceFolders || [],
       getConfiguration: () => ({
-        get: (key, fallback) => config.has(key) ? config.get(key) : fallback,
-        inspect: (key) => ({ globalValue: config.has(key) ? config.get(key) : undefined, workspaceValue: undefined, workspaceFolderValue: undefined }),
+        get: (key, fallback) => configScopes[key]?.workspaceFolderValue ?? configScopes[key]?.workspaceValue ?? configScopes[key]?.globalValue ?? (config.has(key) ? config.get(key) : fallback),
+        inspect: (key) => ({ globalValue: configScopes[key]?.globalValue ?? (config.has(key) ? config.get(key) : undefined), workspaceValue: configScopes[key]?.workspaceValue, workspaceFolderValue: configScopes[key]?.workspaceFolderValue, workspaceLanguageValue: configScopes[key]?.workspaceLanguageValue, workspaceFolderLanguageValue: configScopes[key]?.workspaceFolderLanguageValue }),
       }),
     },
     window: {
@@ -138,9 +140,18 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
   assert.equal("codexProjectChatExporter.exportProfile" in extensionPackage.contributes.configuration.properties, false);
   assert.equal(extensionPackage.version, "0.1.2", "the final pre-push candidate must install as a distinguishable extension version");
   assert.equal(extensionPackage.contributes.configuration.properties["codexProjectChatExporter.diagnosticOutput"].default, false);
+  assert.equal(extensionPackage.contributes.configuration.properties["codexProjectChatExporter.outputDirectory"].scope, "application");
+  assert.equal(extensionPackage.contributes.configuration.properties["codexProjectChatExporter.codexHome"].scope, "application");
   assert.equal(formatExportSummary(1, 1), "1 session across 1 project");
   assert.equal(formatExportSummary(2, 1), "2 sessions across 1 project");
   assert.equal(formatExportSummary(100, 20), "100 sessions across 20 projects");
+}
+
+{
+  assert.equal(isWindowsNetworkOrDevicePath("\\\\server\\share\\exports"), true);
+  assert.equal(isWindowsNetworkOrDevicePath("\\\\?\\UNC\\server\\share\\exports"), true);
+  assert.equal(isWindowsNetworkOrDevicePath("\\\\.\\C:\\exports"), true);
+  assert.equal(isWindowsNetworkOrDevicePath("C:\\Codex-Exports"), false);
 }
 
 {
@@ -357,6 +368,49 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
 }
 
 {
+  let exportCalled = false;
+  const workspaceOutput = path.join(temp, "workspace-controlled-output");
+  const fake = createFakeVscode({ configScopes: { outputDirectory: { workspaceValue: workspaceOutput } } });
+  const context = createContext(temp);
+  const adapter = createExtensionAdapter(fake.vscode, { loadExporter: async () => ({ exportArchive: async () => { exportCalled = true; } }) });
+  await adapter.activate(context);
+  await assert.rejects(() => adapter.exportAllSessions(context), /must be configured in VS Code User settings/);
+  assert.equal(exportCalled, false, "workspace-scoped outputDirectory must never reach the exporter");
+}
+
+{
+  let exportCalled = false;
+  const workspaceCodexHome = path.join(temp, "workspace-controlled-codex-home");
+  const fake = createFakeVscode({ config: { outputDirectory }, configScopes: { codexHome: { workspaceFolderValue: workspaceCodexHome } } });
+  const context = createContext(temp);
+  const adapter = createExtensionAdapter(fake.vscode, { loadExporter: async () => ({ exportArchive: async () => { exportCalled = true; } }) });
+  await adapter.activate(context);
+  await assert.rejects(() => adapter.exportAllSessions(context), /must be configured in VS Code User settings/);
+  assert.equal(exportCalled, false, "workspace-folder codexHome must never reach the exporter");
+}
+
+{
+  let exportCalled = false;
+  const fake = createFakeVscode({ config: { outputDirectory: "\\\\server\\share\\exports" } });
+  const context = createContext(temp);
+  const adapter = createExtensionAdapter(fake.vscode, { loadExporter: async () => ({ exportArchive: async () => { exportCalled = true; } }) });
+  await adapter.activate(context);
+  assert.equal(await adapter.exportAllSessions(context), undefined, "UNC export targets must fail closed");
+  assert.equal(exportCalled, false);
+  assert.match(fake.messages.at(-1).message, /network or device path/);
+}
+
+{
+  let exportCalled = false;
+  const fake = createFakeVscode({ config: { outputDirectory }, isTrusted: false });
+  const context = createContext(temp);
+  const adapter = createExtensionAdapter(fake.vscode, { loadExporter: async () => ({ exportArchive: async () => { exportCalled = true; } }) });
+  await adapter.activate(context);
+  await assert.rejects(() => adapter.exportAllSessions(context), /disabled in untrusted VS Code workspaces/);
+  assert.equal(exportCalled, false);
+}
+
+{
   const fake = createFakeVscode({ config: { outputDirectory } });
   const context = createContext(temp);
   const adapter = createExtensionAdapter(fake.vscode, { loadExporter: async () => ({ exportArchive: async () => { throw Object.assign(new Error("Synthetic core failure"), { code: "SYNTHETIC" }); } }) });
@@ -379,12 +433,34 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
 }
 
 {
+  const fake = createFakeVscode({});
+  const context = createContext(temp);
+  const adapter = createExtensionAdapter(fake.vscode, { loadExporter: async () => exporter });
+  await adapter.activate(context);
+  await context.globalState.update(STATE_LATEST_HTML, "\\\\server\\share\\index.html");
+  assert.equal(await adapter.openLatestArchive(context), false, "a remembered UNC index must not be opened");
+  assert.equal(fake.opened.length, 0);
+  assert.match(fake.messages.at(-1).message, /network or device path/);
+}
+
+{
   const fake = createFakeVscode({ config: { outputDirectory } });
   const context = createContext(temp);
   const adapter = createExtensionAdapter(fake.vscode, { loadExporter: async () => exporter });
   await adapter.activate(context);
   assert.equal(await adapter.openExportFolder(context), true);
   assert.equal(fake.opened.at(-1), outputDirectory);
+}
+
+{
+  const fake = createFakeVscode({});
+  const context = createContext(temp);
+  const adapter = createExtensionAdapter(fake.vscode, { loadExporter: async () => exporter });
+  await adapter.activate(context);
+  await context.globalState.update(STATE_OUTPUT_DIR, "\\\\server\\share\\exports");
+  assert.equal(await adapter.openExportFolder(context), false, "a remembered UNC output folder must not be opened");
+  assert.equal(fake.opened.length, 0);
+  assert.match(fake.messages.at(-1).message, /network or device path/);
 }
 
 {
