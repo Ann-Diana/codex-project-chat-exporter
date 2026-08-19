@@ -66,9 +66,11 @@ No built-in uploader, telemetry, or application-level HTTP, web, or API client i
 
 A configured path can still reside on network-backed storage. The VS Code extension rejects UNC and Windows device paths, but mapped network drives cannot be identified reliably in every configuration. Choose a known local destination when locality matters.
 
-## How does this differ from Codex's experimental `/export`?
+## How does this differ from Codex's native `/export`?
 
-The currently observed native `/export` exports one conversation. Codex Project Chat Exporter creates a project-aware local bulk export of detected active and archived sessions with an index, manifest, and optional Raw snapshots verified at export time. The two functions are complementary, and the native experiment may evolve.
+[Codex 0.148.0](https://github.com/openai/codex/releases/tag/rust-v0.148.0) added [`/export`](https://github.com/openai/codex/pull/37358) for exporting the current TUI conversation to the clipboard or a Markdown file. It is the better fit when one current TUI conversation is the intended result.
+
+Codex Project Chat Exporter instead bulk-exports detected local sessions across projects, including archived sessions. It creates a static index, manifest, optional Raw snapshots verified at export time, and an optional VS Code workflow. It does not try to improve upon the native export's transcript fidelity.
 
 ## Does it export both active and archived sessions?
 

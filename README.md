@@ -4,7 +4,7 @@
 
 Export local active and archived Codex sessions into a portable, project-aware export folder for review, preservation, migration preparation, or privacy-reviewed project handoff.
 
-Codex's currently observed experimental `/export` exports one conversation. Codex Project Chat Exporter instead creates a project-aware local bulk export of detected active and archived sessions with an index, manifest, and optional Raw snapshots verified at export time. The two functions are complementary, and the native experiment may evolve.
+[Codex 0.148.0](https://github.com/openai/codex/releases/tag/rust-v0.148.0) added [`/export`](https://github.com/openai/codex/pull/37358) for the current TUI conversation, to the clipboard or a Markdown file. Codex Project Chat Exporter serves a different workflow: it bulk-exports detected local sessions across projects—including archived sessions—with a static index, manifest, optional Raw snapshots verified at export time, and an optional VS Code interface. Use `/export` for one current TUI conversation; use this project for a project-aware local collection or VS Code workflow.
 
 - Sessions are grouped by their stored project/work directory.
 - Three profiles cover complete exports, reading views without Raw, and source snapshots verified at export time without transcripts.
@@ -38,6 +38,8 @@ It is migration preparation, not a tested restore system. Raw snapshots and port
   <img src="docs/screenshots/launcher-demo.png" alt="Interactive Windows launcher" width="49%">
   <img src="docs/screenshots/folder-structure-demo.png" alt="Generated export folder structure" width="49%">
 </p>
+
+![Synthetic Codex Project Chat Export Index with project grouping, session metadata, Markdown links and optional Raw links](docs/screenshots/index-html-demo.png)
 
 All screenshots contain synthetic demo data only.
 

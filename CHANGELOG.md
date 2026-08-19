@@ -12,6 +12,7 @@ All notable changes to this project are documented here.
 - Added source/output and link-alias separation, run-owned cleanup, isolated export contexts, and same-destination locking.
 - Prepared the experimental VS Code integration with three visible commands, scope/profile Quick Picks, application-scoped sensitive paths, and local-host trust checks.
 - Aligned export, privacy, archive-format, and security documentation with the current unreleased branch.
+- Clarified the project's bulk, project-aware, and VS Code scope after Codex 0.148.0 introduced native export of the current TUI conversation.
 
 ### Fixed
 

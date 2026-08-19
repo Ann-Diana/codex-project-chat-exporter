@@ -4,6 +4,8 @@ Experimental Visual Studio Code interface for Codex Project Chat Exporter.
 
 The exporter remains IDE-agnostic. The extension only provides native VS Code commands and calls the same local export core used by the CLI.
 
+Unlike Codex's native TUI `/export`, the extension can export the current VS Code workspace or all detected local sessions through a native VS Code workflow.
+
 ## Features
 
 - Export the currently opened local workspace.
