@@ -4,6 +4,8 @@ All notable changes to this project are documented here.
 
 ## Unreleased
 
+## 0.2.0 – 2026-08-20
+
 ### Added
 
 - Added Complete, Readable, and Source snapshots export profiles to the shared exporter, available through the CLI and the VS Code extension.

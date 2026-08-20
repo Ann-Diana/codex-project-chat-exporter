@@ -107,6 +107,9 @@ await fs.writeFile(path.join(codexHome, "session_index.jsonl"), [
   JSON.stringify({ id: "session-subagent", thread_name: "# AGENTS.md instructions", updated_at: "2026-07-21T10:00:02.000Z" }),
 ].join("\n") + "\n");
 
+const version = await execFileAsync(process.execPath, [script, "--version"], { cwd: temp });
+assert.equal(version.stdout.trim(), "0.2.0");
+
 const projectList = await execFileAsync(process.execPath, [script, "--codex-home", codexHome, "--list"], { cwd: temp });
 assert.match(projectList.stdout, /C:\\Projects\\alpha \(5: 3 active, 2 archived\)/);
 

@@ -8,7 +8,7 @@ import { performance } from "node:perf_hooks";
 import readline from "node:readline";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-const VERSION = "0.1.0";
+const VERSION = "0.2.0";
 const ARCHIVE_FORMAT_VERSION = 1;
 const EXPORT_PROFILE = Object.freeze({
   COMPLETE: "complete",
