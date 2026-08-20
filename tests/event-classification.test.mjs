@@ -342,7 +342,7 @@ try {
   await assert.rejects(() => copyStableRawSnapshot(source, lockedDestination, {
     maxAttempts: 1,
     io: {
-      copyFile: async () => { const error = new Error("locked"); error.code = "EBUSY"; throw error; },
+      copyOpenedFile: async () => { const error = new Error("locked"); error.code = "EBUSY"; throw error; },
     },
   }), (error) => error?.code === "SOURCE_SNAPSHOT_LOCKED");
 
@@ -420,9 +420,82 @@ try {
   await assert.rejects(() => copyStableRawSnapshot(changedAfterRoutingSource, incompleteDestination, {
     maxAttempts: 1,
     routingSnapshot: incompleteRouting.routingSnapshot,
-    io: { copyFile: async (sourcePath, temporaryPath) => fs.writeFile(temporaryPath, (await fs.readFile(sourcePath)).subarray(0, 2)) },
+    io: {
+      copyOpenedFile: async (sourceHandle, temporaryHandle) => {
+        const bytes = Buffer.alloc(2);
+        const { bytesRead } = await sourceHandle.read(bytes, 0, bytes.length, 0);
+        await temporaryHandle.write(bytes, 0, bytesRead, 0);
+      },
+    },
   }), (error) => error?.code === "SOURCE_CHANGED_DURING_EXPORT");
   assert.equal((await fs.readdir(path.dirname(incompleteDestination))).some((name) => name.includes(".partial-")), false, "failed snapshots must not leave partial files behind");
+
+  const sourceBytesBeforeIdentityAttacks = await fs.readFile(changedAfterRoutingSource);
+  const sourceHashBeforeIdentityAttacks = await sha256File(changedAfterRoutingSource);
+
+  const replacedTemporaryDestination = path.join(temp, "raw", "replaced-temporary.jsonl");
+  let replacedTemporaryPath;
+  await assert.rejects(() => copyStableRawSnapshot(changedAfterRoutingSource, replacedTemporaryDestination, {
+    maxAttempts: 1,
+    routingSnapshot: incompleteRouting.routingSnapshot,
+    beforeExportVerification: async ({ temporaryPath }) => {
+      replacedTemporaryPath = temporaryPath;
+      await fs.unlink(temporaryPath);
+      await fs.link(changedAfterRoutingSource, temporaryPath);
+    },
+  }), (error) => error?.code === "UNSAFE_EXPORT_PATH");
+  assert.equal(await sha256File(changedAfterRoutingSource), sourceHashBeforeIdentityAttacks, "a hardlink injected as the temporary file must not change the source");
+  assert.deepEqual(await fs.readFile(changedAfterRoutingSource), sourceBytesBeforeIdentityAttacks);
+  await assert.rejects(() => fs.stat(replacedTemporaryDestination), /ENOENT/, "a replaced temporary file must not be published");
+  assert.equal((await fs.stat(replacedTemporaryPath)).ino, (await fs.stat(changedAfterRoutingSource)).ino, "foreign temporary hardlinks are left untouched rather than cleaned as run-owned files");
+
+  const equalMetadataDestination = path.join(temp, "raw", "equal-metadata-replacement.jsonl");
+  const equalMetadataReplacement = path.join(temp, "equal-metadata-replacement.tmp");
+  await fs.copyFile(changedAfterRoutingSource, equalMetadataReplacement);
+  const sourceMetadata = await fs.stat(changedAfterRoutingSource);
+  await fs.utimes(equalMetadataReplacement, sourceMetadata.atime, sourceMetadata.mtime);
+  await assert.rejects(() => copyStableRawSnapshot(changedAfterRoutingSource, equalMetadataDestination, {
+    maxAttempts: 1,
+    routingSnapshot: incompleteRouting.routingSnapshot,
+    beforeExportVerification: async ({ temporaryPath }) => {
+      await fs.unlink(temporaryPath);
+      await fs.rename(equalMetadataReplacement, temporaryPath);
+    },
+  }), (error) => error?.code === "UNSAFE_EXPORT_PATH");
+  assert.equal(await sha256File(changedAfterRoutingSource), sourceHashBeforeIdentityAttacks, "matching bytes, size, and mtime must not substitute for file identity");
+  await assert.rejects(() => fs.stat(equalMetadataDestination), /ENOENT/);
+
+  const hardlinkAfterRenameDestination = path.join(temp, "raw", "hardlink-after-rename.jsonl");
+  await assert.rejects(() => copyStableRawSnapshot(changedAfterRoutingSource, hardlinkAfterRenameDestination, {
+    maxAttempts: 1,
+    routingSnapshot: incompleteRouting.routingSnapshot,
+    io: {
+      rename: async (from, to) => {
+        await fs.rename(from, to);
+        if (path.resolve(to) === path.resolve(hardlinkAfterRenameDestination) && from.includes(".partial-")) {
+          await fs.unlink(to);
+          await fs.link(changedAfterRoutingSource, to);
+        }
+      },
+    },
+  }), (error) => error?.code === "UNSAFE_EXPORT_PATH");
+  assert.equal(await sha256File(changedAfterRoutingSource), sourceHashBeforeIdentityAttacks, "a hardlink injected after rename must leave the source byte-identical");
+  assert.deepEqual(await fs.readFile(changedAfterRoutingSource), sourceBytesBeforeIdentityAttacks);
+
+  const hardlinkDuringHashDestination = path.join(temp, "raw", "hardlink-during-hash.jsonl");
+  await assert.rejects(() => copyStableRawSnapshot(changedAfterRoutingSource, hardlinkDuringHashDestination, {
+    maxAttempts: 1,
+    routingSnapshot: incompleteRouting.routingSnapshot,
+    io: {
+      hashFile: async (file) => {
+        await fs.unlink(file);
+        await fs.link(changedAfterRoutingSource, file);
+        return sha256File(file);
+      },
+    },
+  }), (error) => error?.code === "UNSAFE_EXPORT_PATH");
+  assert.equal(await sha256File(changedAfterRoutingSource), sourceHashBeforeIdentityAttacks, "a hardlink injected during export hashing must leave the source byte-identical");
+  assert.deepEqual(await fs.readFile(changedAfterRoutingSource), sourceBytesBeforeIdentityAttacks);
 
   const countedDestination = path.join(temp, "raw", "counted.jsonl");
   const countedRouting = await readSessionRoutingMeta(changedAfterRoutingSource);

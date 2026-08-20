@@ -1229,11 +1229,11 @@ async function readLatestTimestamp(file, fallback = "") {
 }
 
 async function copyStableRawSnapshot(sourcePath, destinationPath, options = {}) {
-  const io = { copyFile: fsp.copyFile, hashFile: sha256File, lstat: fsp.lstat, realpath: fsp.realpath, rename: fsp.rename, rm: fsp.rm, stat: fsp.stat, ...options.io };
+  const io = { copyOpenedFile, hashFile: sha256File, lstat: fsp.lstat, open: fsp.open, realpath: fsp.realpath, rename: fsp.rename, rm: fsp.rm, stat: fsp.stat, ...options.io };
   const maxAttempts = Math.max(1, options.maxAttempts || 3);
   const diagnostic = typeof options.diagnostic === "function" ? options.diagnostic : () => {};
   const diagnosticContext = options.diagnosticContext || {};
-  const sourceIdentity = await inspectSeparatedPath(sourcePath, { io, requireRegularFile: true });
+  const sourceIdentity = await inspectSeparatedPath(sourcePath, { io, requireRegularFile: true, requireReliableIdentity: true });
   await assertSnapshotDestinationSeparated(sourceIdentity, destinationPath, io);
   await fsp.mkdir(path.dirname(destinationPath), { recursive: true });
   let lastReason = "source changed during export";
@@ -1250,9 +1250,11 @@ async function copyStableRawSnapshot(sourcePath, destinationPath, options = {}) 
     let temporaryOwned = false;
     let previousDestination = null;
     let publishedIdentity = null;
+    let destinationCompromised = false;
     await assertSnapshotTemporarySeparated(sourceIdentity, destinationPath, temporaryPath, io);
     try {
       const before = await timedSnapshotStat(sourcePath, "source_before_copy", attempt);
+      if (reliableFileIdentity(before) !== sourceIdentity.identity) throw new ExportError("UNSAFE_EXPORT_PATH", "The source session identity changed before snapshot copying");
       let sourceSha256 = "";
       let sourceHashBasis = "FALLBACK";
       if (routingSnapshotReusable && routingSnapshotMatches(options.routingSnapshot, before)) {
@@ -1269,7 +1271,7 @@ async function copyStableRawSnapshot(sourcePath, destinationPath, options = {}) 
         options.profiler?.addPhase("source_hashing", sourceHashMs, sourceHashBefore.size, 0);
         options.profiler?.recordSession(options.profileSession, "source_hash_ms", sourceHashMs, sourceHashBefore.size, 0);
         const sourceHashAfter = await timedSnapshotStat(sourcePath, "source_after_hash", attempt);
-        if (!sameFileVersion(sourceHashBefore, sourceHashAfter) || !sameFileVersion(before, sourceHashAfter)) {
+        if (reliableFileIdentity(sourceHashBefore) !== sourceIdentity.identity || reliableFileIdentity(sourceHashAfter) !== sourceIdentity.identity || !sameFileVersion(sourceHashBefore, sourceHashAfter) || !sameFileVersion(before, sourceHashAfter)) {
           lastReason = "source size or modification time changed while calculating its hash";
           routingSnapshotReusable = false;
           diagnostic("snapshot_attempt_end", { ...diagnosticContext, attempt, status: "RETRY", reason: "SOURCE_CHANGED", duration_ms: roundMs(performance.now() - attemptStartedAt) });
@@ -1280,8 +1282,36 @@ async function copyStableRawSnapshot(sourcePath, destinationPath, options = {}) 
       if (options.beforeCopy) await options.beforeCopy({ attempt, sourcePath, temporaryPath, sourceHashBasis });
       const copyStart = performance.now();
       diagnostic("snapshot_copy_start", { ...diagnosticContext, attempt });
-      await io.copyFile(sourcePath, temporaryPath, fs.constants.COPYFILE_EXCL);
-      temporaryOwned = true;
+      let sourceHandle;
+      let temporaryHandle;
+      try {
+        sourceHandle = await io.open(sourcePath, "r");
+        const openedSourceStat = await sourceHandle.stat();
+        if (!openedSourceStat.isFile() || reliableFileIdentity(openedSourceStat) !== sourceIdentity.identity) {
+          throw new ExportError("UNSAFE_EXPORT_PATH", "The opened source session does not match the validated source file");
+        }
+        temporaryHandle = await io.open(temporaryPath, "wx");
+        const openedTemporaryStat = await temporaryHandle.stat();
+        if (!openedTemporaryStat.isFile()) throw new ExportError("UNSAFE_EXPORT_PATH", `Expected a regular raw snapshot temporary file: ${path.basename(temporaryPath)}`);
+        const openedTemporaryIdentity = reliableFileIdentity(openedTemporaryStat);
+        if (!openedTemporaryIdentity) throw new ExportError("UNSAFE_EXPORT_PATH", `Reliable file identity is unavailable for ${path.basename(temporaryPath)}`);
+        if (openedTemporaryIdentity === sourceIdentity.identity) throw new ExportError("OUTPUT_OVERLAPS_SOURCE", "Raw temporary file aliases its source session file");
+        temporaryOwned = { path: temporaryPath, identity: { identity: openedTemporaryIdentity } };
+        await io.copyOpenedFile(sourceHandle, temporaryHandle, before.size);
+        const writtenTemporaryStat = await temporaryHandle.stat();
+        if (reliableFileIdentity(writtenTemporaryStat) !== openedTemporaryIdentity) {
+          throw new ExportError("UNSAFE_EXPORT_PATH", `Raw temporary file identity changed while copying: ${path.basename(temporaryPath)}`);
+        }
+      } finally {
+        await temporaryHandle?.close().catch(() => {});
+        await sourceHandle?.close().catch(() => {});
+      }
+      const copiedIdentity = await inspectSeparatedPath(temporaryPath, { io, requireRegularFile: true, requireReliableIdentity: true });
+      if (!sameReliableFileIdentity(temporaryOwned?.identity, copiedIdentity)) {
+        temporaryOwned = null;
+        throw new ExportError("UNSAFE_EXPORT_PATH", `Raw temporary file was replaced after copying: ${path.basename(temporaryPath)}`);
+      }
+      assertDistinctPathIdentity(sourceIdentity, copiedIdentity, "Raw temporary file aliases its source session file");
       const copiedStat = await timedSnapshotStat(temporaryPath, "temporary_after_copy", attempt);
       const copyMs = performance.now() - copyStart;
       diagnostic("snapshot_copy_end", { ...diagnosticContext, attempt, duration_ms: roundMs(copyMs), bytes: copiedStat.size });
@@ -1289,15 +1319,34 @@ async function copyStableRawSnapshot(sourcePath, destinationPath, options = {}) 
       options.profiler?.recordSession(options.profileSession, "raw_copy_ms", copyMs, before.size, copiedStat.size);
       if (options.afterCopy) await options.afterCopy({ attempt, sourcePath, temporaryPath });
       const afterCopy = await timedSnapshotStat(sourcePath, "source_after_copy", attempt);
-      const stableMetadata = sameFileVersion(before, afterCopy) && copiedStat.size === before.size;
+      const stableMetadata = reliableFileIdentity(afterCopy) === sourceIdentity.identity && sameFileVersion(before, afterCopy) && copiedStat.size === before.size;
       if (stableMetadata) {
         if (options.beforeExportVerification) await options.beforeExportVerification({ attempt, sourcePath, temporaryPath });
+        const publicationCandidate = await inspectSeparatedPath(temporaryPath, { io, requireRegularFile: true, requireReliableIdentity: true });
+        if (!sameReliableFileIdentity(temporaryOwned?.identity, publicationCandidate)) {
+          temporaryOwned = null;
+          throw new ExportError("UNSAFE_EXPORT_PATH", `Raw temporary file was replaced before publication: ${path.basename(temporaryPath)}`);
+        }
+        assertDistinctPathIdentity(sourceIdentity, publicationCandidate, "Raw temporary file aliases its source session file");
         previousDestination = await moveExistingDestinationAside(sourceIdentity, destinationPath, io);
         await io.rename(temporaryPath, destinationPath);
-        temporaryOwned = false;
-        published = true;
+        const runOwnedIdentity = temporaryOwned.identity;
+        temporaryOwned = null;
         publishedIdentity = await inspectSeparatedPath(destinationPath, { io, requireRegularFile: true, requireReliableIdentity: true });
+        if (!sameReliableFileIdentity(runOwnedIdentity, publishedIdentity)) {
+          destinationCompromised = true;
+          publishedIdentity = null;
+          throw new ExportError("UNSAFE_EXPORT_PATH", `Published Raw destination was replaced during publication: ${path.basename(destinationPath)}`);
+        }
+        assertDistinctPathIdentity(sourceIdentity, publishedIdentity, "Published Raw destination aliases its source session file");
+        published = true;
         const exportedBeforeVerification = await timedSnapshotStat(destinationPath, "published_before_verification", attempt);
+        if (reliableFileIdentity(exportedBeforeVerification) !== publishedIdentity.identity) {
+          destinationCompromised = true;
+          published = false;
+          publishedIdentity = null;
+          throw new ExportError("UNSAFE_EXPORT_PATH", `Published Raw destination changed before verification: ${path.basename(destinationPath)}`);
+        }
         const exportHashStart = performance.now();
         const exportHashStage = options.verifyPublishedSnapshot ? "snapshot_parse" : "snapshot";
         diagnostic("export_hash_start", { ...diagnosticContext, attempt, stage: exportHashStage });
@@ -1311,6 +1360,12 @@ async function copyStableRawSnapshot(sourcePath, destinationPath, options = {}) 
           options.profiler?.recordSession(options.profileSession, "snapshot_hash_ms", exportHashMs, exportedBeforeVerification.size, 0);
         }
         const exportedAfterVerification = await timedSnapshotStat(destinationPath, "published_after_verification", attempt);
+        if (reliableFileIdentity(exportedAfterVerification) !== publishedIdentity.identity) {
+          destinationCompromised = true;
+          published = false;
+          publishedIdentity = null;
+          throw new ExportError("UNSAFE_EXPORT_PATH", `Published Raw destination changed during verification: ${path.basename(destinationPath)}`);
+        }
         const exportedStable = verification.stable !== false && sameFileVersion(exportedBeforeVerification, exportedAfterVerification);
         if (exportedStable && verification.sizeBytes === before.size && verification.sha256 === sourceSha256) {
           await removeOwnedTemporary(previousDestination, io);
@@ -1351,8 +1406,12 @@ async function copyStableRawSnapshot(sourcePath, destinationPath, options = {}) 
           throw new ExportError("UNSAFE_EXPORT_PATH", `Could not safely roll back the published raw snapshot: ${rollbackError?.message || rollbackError}`);
         }
       }
+      if (destinationCompromised) {
+        throw new ExportError("UNSAFE_EXPORT_PATH", `The Raw destination changed during publication and was left untouched for manual inspection: ${path.basename(destinationPath)}`);
+      }
       if (temporaryOwned) await removeOwnedTemporary({ path: temporaryPath, identity: await inspectSeparatedPath(temporaryPath, { io, requireRegularFile: true, requireReliableIdentity: true }) }, io);
       if (previousDestination) await restorePreviousDestination(destinationPath, previousDestination, io);
+      if (error instanceof ExportError) throw error;
       if (["EACCES", "EBUSY", "EPERM"].includes(error?.code)) throw new ExportError("SOURCE_SNAPSHOT_LOCKED", `Could not create a stable raw snapshot because the source file is locked or inaccessible: ${path.basename(sourcePath)}`);
       throw new ExportError("SOURCE_SNAPSHOT_FAILED", `Could not create a stable raw snapshot for ${path.basename(sourcePath)}: ${error?.message || error}`);
     }
@@ -1371,6 +1430,24 @@ async function copyStableRawSnapshot(sourcePath, destinationPath, options = {}) 
     diagnostic("snapshot_stability_check", { ...diagnosticContext, attempt, checkpoint, duration_ms: roundMs(durationMs), size_bytes: stat.size });
     return stat;
   }
+}
+
+async function copyOpenedFile(sourceHandle, destinationHandle, expectedSize) {
+  const buffer = Buffer.allocUnsafe(1024 * 1024);
+  let position = 0;
+  while (position < expectedSize) {
+    const requested = Math.min(buffer.length, expectedSize - position);
+    const { bytesRead } = await sourceHandle.read(buffer, 0, requested, position);
+    if (bytesRead === 0) break;
+    let written = 0;
+    while (written < bytesRead) {
+      const result = await destinationHandle.write(buffer, written, bytesRead - written, position + written);
+      if (result.bytesWritten === 0) throw new Error("Could not write the complete raw snapshot temporary file");
+      written += result.bytesWritten;
+    }
+    position += bytesRead;
+  }
+  if (position !== expectedSize) throw new Error("Copied raw snapshot size differs from the validated source size");
 }
 
 function isStableRoutingSnapshot(snapshot) {
