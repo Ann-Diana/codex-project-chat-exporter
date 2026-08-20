@@ -5,7 +5,7 @@ Use this checklist for the uniquely named final candidate prepared during the la
 ## Install or update
 
 1. Close any earlier test export folder and note the currently installed extension version.
-2. In Visual Studio Code Desktop, run **Extensions: Install from VSIX...** and select the new candidate. Alternatively run `code --install-extension <absolute-vsix-path> --force`.
+2. In Visual Studio Code Desktop, run **Extensions: Install from VSIX...** and select the new candidate. Alternatively run `code --install-extension "<absolute-vsix-path>" --force`.
 3. Reload Visual Studio Code when prompted.
 4. Confirm that **Codex Project Chat Exporter** is installed and still marked experimental in its documentation.
 

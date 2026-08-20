@@ -28,7 +28,7 @@ Markdown applies best-effort masking for some token shapes and long base64-like 
 ## Safe use
 
 - Prefer a new empty destination on known local or encrypted storage; mapped network drives are not reliably identifiable in every configuration.
-- Use Readable for smaller reading views when new Raw snapshots are unnecessary.
+- Use the `readable` profile when Markdown and HTML reading views are sufficient and Raw JSONL snapshots are not required. This reduces copied data but does not make the export share-safe.
 - Keep Raw and manifest files private and review every generated file before sharing.
 - Keep exports outside public repositories and never attach real session logs to public reports.
 - If `.codex-export.lock` remains after a crash, first prove no export is running, inspect its PID and start time, and remove only that confirmed stale lock file.

@@ -70,7 +70,7 @@ A configured path can still reside on network-backed storage. The VS Code extens
 
 [Codex 0.148.0](https://github.com/openai/codex/releases/tag/rust-v0.148.0) added [`/export`](https://github.com/openai/codex/pull/37358) for exporting the current TUI conversation to the clipboard or a Markdown file. It is the better fit when one current TUI conversation is the intended result.
 
-Codex Project Chat Exporter instead bulk-exports detected local sessions across projects, including archived sessions. It creates a static index, manifest, optional Raw snapshots verified at export time, and an optional VS Code workflow. It does not try to improve upon the native export's transcript fidelity.
+Codex Project Chat Exporter instead bulk-exports detected local sessions for one project/work folder or across all projects, including archived sessions. It creates a static index, manifest, and optional Raw snapshots verified at export time. Its optional VS Code extension provides the corresponding **Current Workspace** and **All Sessions** workflows. It does not try to improve upon the native export's transcript fidelity.
 
 ## Does it export both active and archived sessions?
 

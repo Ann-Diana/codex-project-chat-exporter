@@ -4,13 +4,16 @@ All notable changes to this project are documented here.
 
 ## Unreleased
 
+### Added
+
+- Added Complete, Readable, and Source snapshots export profiles to the shared exporter, available through the CLI and the VS Code extension.
+- Added an experimental VS Code extension with three visible commands, scope and profile selection, progress reporting, and actions for opening the latest export or its output folder.
+
 ### Changed
 
-- Classified direct user turns, subagent inputs, runtime contexts, and uncertain user-role records without changing canonical Raw events.
-- Added Complete, Readable, and Source snapshots profiles with progress reporting and targeted snapshot performance improvements.
-- Replaced continuing Raw-integrity claims with export-time verification metadata and documented mandatory rehashing for later use.
-- Added source/output and link-alias separation, run-owned cleanup, isolated export contexts, and same-destination locking.
-- Prepared the experimental VS Code integration with three visible commands, scope/profile Quick Picks, application-scoped sensitive paths, and local-host trust checks.
+- Classified direct user turns, subagent inputs, runtime contexts, and uncertain user-role records in derived reading views without changing canonical Raw events.
+- Improved Source snapshots performance while retaining export-time SHA-256 verification.
+- Replaced continuing Raw-integrity claims with time-specific verification metadata and documented mandatory rehashing before later use.
 - Aligned export, privacy, archive-format, and security documentation with the current unreleased branch.
 - Clarified the project's bulk, project-aware, and VS Code scope after Codex 0.148.0 introduced native export of the current TUI conversation.
 
@@ -18,6 +21,12 @@ All notable changes to this project are documented here.
 
 - Completed escaping of backslashes, pipes, and line breaks in Markdown index table cells.
 - Preserved the original source-derived `started_at` fallback when parsing a copied Raw snapshot without `session_meta`.
+
+### Security
+
+- Separated source and output paths, including path and link aliases, and limited cleanup to files owned by the current export run.
+- Isolated concurrent export contexts and prevented simultaneous exports to the same destination.
+- Scoped sensitive VS Code settings to the application level, required trusted local workspaces, and rejected remote, web, UNC, and Windows device-path export targets.
 
 ### Removed
 

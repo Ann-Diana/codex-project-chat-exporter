@@ -8,19 +8,21 @@ Unlike Codex's native TUI `/export`, the extension can export the current VS Cod
 
 ## Features
 
-- Export the currently opened local workspace.
-- Export all detected local Codex sessions, including archived sessions when present.
+- **Current Workspace** exports detected active and archived sessions associated with the currently opened local workspace.
+- **All Sessions** exports all detected active and archived sessions from the configured Codex home.
 - Choose scope and export profile from two native Quick Picks.
 - Open the latest generated HTML index.
 - Open the configured or last used export folder.
 - Show throttled phase and `Processing session X of Y` progress, success messages, warnings, and technical details in the `Codex Project Chat Exporter` output channel.
+
+The VS Code extension scans both active and archived Codex session stores. Export profiles change the generated output, not which session stores are scanned.
 
 ## Installation
 
 Build or obtain the current `.vsix` candidate, then install it locally in VS Code Desktop:
 
 ```powershell
-code --install-extension <absolute-vsix-path> --force
+code --install-extension "<absolute-vsix-path>" --force
 ```
 
 If `code` is not on PATH, use VS Code's Extensions view and choose `Install from VSIX...`.
