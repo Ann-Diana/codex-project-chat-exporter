@@ -2,7 +2,7 @@
   "name": "codex-project-chat-exporter-vscode",
   "displayName": "Codex Project Chat Exporter",
   "description": "Experimental local Visual Studio Code interface for project-aware export of active and archived Codex sessions.",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "publisher": "ann-diana",
   "license": "MIT",
   "repository": {

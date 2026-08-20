@@ -5,7 +5,7 @@ const { performance } = require("node:perf_hooks");
 const { pathToFileURL } = require("node:url");
 
 const CONFIG_SECTION = "codexProjectChatExporter";
-const DIAGNOSTIC_BUILD_ID = "0.1.2-pre-push";
+const DIAGNOSTIC_BUILD_ID = "0.1.3-pre-push";
 const STATE_OUTPUT_DIR = "codexProjectChatExporter.outputDirectory";
 const STATE_LATEST_HTML = "codexProjectChatExporter.latestHtmlIndexPath";
 const COMMANDS = {

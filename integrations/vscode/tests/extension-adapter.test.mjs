@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { createRequire } from "node:module";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { buildVsix } from "../scripts/build-vsix.mjs";
 
 const require = createRequire(import.meta.url);
 const { COMMANDS, DIAGNOSTIC_BUILD_ID, EXPORT_PROFILES, STATE_LATEST_HTML, STATE_OUTPUT_DIR, createExtensionAdapter, formatExportSummary, isWindowsNetworkOrDevicePath, resolveConfiguredProfile } = require("../src/vscode-adapter.cjs");
@@ -138,13 +139,60 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
   ]);
   assert.equal("codexProjectChatExporter.includeOriginalJsonl" in extensionPackage.contributes.configuration.properties, false);
   assert.equal("codexProjectChatExporter.exportProfile" in extensionPackage.contributes.configuration.properties, false);
-  assert.equal(extensionPackage.version, "0.1.2", "the final pre-push candidate must install as a distinguishable extension version");
+  assert.equal(extensionPackage.version, "0.1.3", "the final pre-push candidate must install as a distinguishable extension version");
   assert.equal(extensionPackage.contributes.configuration.properties["codexProjectChatExporter.diagnosticOutput"].default, false);
   assert.equal(extensionPackage.contributes.configuration.properties["codexProjectChatExporter.outputDirectory"].scope, "application");
   assert.equal(extensionPackage.contributes.configuration.properties["codexProjectChatExporter.codexHome"].scope, "application");
   assert.equal(formatExportSummary(1, 1), "1 session across 1 project");
   assert.equal(formatExportSummary(2, 1), "2 sessions across 1 project");
   assert.equal(formatExportSummary(100, 20), "100 sessions across 20 projects");
+}
+
+{
+  const buildTemp = await fsp.mkdtemp(path.join(os.tmpdir(), "codex-vsix-build-success-"));
+  const distDir = path.join(buildTemp, "dist");
+  const foreignFile = path.join(distDir, "keep-me.txt");
+  const staleCandidate = path.join(distDir, "codex-project-chat-exporter-vscode-0.0.0.vsix");
+  await fsp.mkdir(distDir, { recursive: true });
+  await fsp.writeFile(foreignFile, "foreign", "utf8");
+  await fsp.writeFile(staleCandidate, "stale", "utf8");
+  const result = await buildVsix({
+    distDir,
+    archiveWriter: async ({ archivePath }) => fsp.writeFile(archivePath, "synthetic VSIX", "utf8"),
+  });
+  assert.equal(path.basename(result.vsixPath), "codex-project-chat-exporter-vscode-0.1.3.vsix");
+  assert.equal(await fsp.readFile(foreignFile, "utf8"), "foreign", "the build must not remove unrelated dist files");
+  assert.equal((await fsp.stat(result.vsixPath)).isFile(), true);
+  assert.equal(await fsp.stat(staleCandidate).then(() => true, () => false), false, "superseded build-owned VSIX files should be pruned");
+  assert.equal(await fsp.stat(result.stage).then(() => true, () => false), false, "successful builds must remove their stage directory");
+  assert.equal(await fsp.stat(result.archivePath).then(() => true, () => false), false, "successful builds must remove their temporary archive path");
+  await fsp.rm(buildTemp, { recursive: true, force: true });
+}
+
+{
+  const buildTemp = await fsp.mkdtemp(path.join(os.tmpdir(), "codex-vsix-build-failure-"));
+  const distDir = path.join(buildTemp, "dist");
+  const foreignFile = path.join(distDir, "keep-me.txt");
+  await fsp.mkdir(distDir, { recursive: true });
+  await fsp.writeFile(foreignFile, "foreign", "utf8");
+  let attemptedArchivePath;
+  let attemptedStage;
+  await assert.rejects(
+    () => buildVsix({
+      distDir,
+      archiveWriter: async ({ stage, archivePath }) => {
+        attemptedArchivePath = archivePath;
+        attemptedStage = stage;
+        await fsp.writeFile(archivePath, "partial", "utf8");
+        throw new Error("Synthetic archive failure");
+      },
+    }),
+    /Synthetic archive failure/,
+  );
+  assert.equal(await fsp.readFile(foreignFile, "utf8"), "foreign", "failed builds must not remove unrelated dist files");
+  assert.equal(await fsp.stat(attemptedStage).then(() => true, () => false), false, "failed builds must remove their stage directory");
+  assert.equal(await fsp.stat(attemptedArchivePath).then(() => true, () => false), false, "failed builds must remove their temporary archive path");
+  await fsp.rm(buildTemp, { recursive: true, force: true });
 }
 
 {
