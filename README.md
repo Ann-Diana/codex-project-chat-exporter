@@ -4,7 +4,7 @@
 
 Export local active and archived Codex sessions into a portable, project-aware export folder for review, preservation, migration preparation, or privacy-reviewed project handoff.
 
-[Codex 0.148.0](https://github.com/openai/codex/releases/tag/rust-v0.148.0) added [`/export`](https://github.com/openai/codex/pull/37358) for the current TUI conversation, to the clipboard or a Markdown file. Codex Project Chat Exporter serves a different workflow: it bulk-exports detected local sessions for one project/work folder or across all projects—including archived sessions—with a static index, manifest, optional Raw snapshots verified at export time, and an optional VS Code interface. Use `/export` for one current TUI conversation; use this project for a project-aware local collection or VS Code workflow.
+[Codex 0.148.0](https://github.com/openai/codex/releases/tag/rust-v0.148.0) added [`/export`](https://github.com/openai/codex/pull/37358) for the current TUI conversation, to the clipboard or a Markdown file. Codex Project Chat Exporter serves a different workflow: it bulk-exports detected local sessions for one project/work folder or across all projects–including archived sessions–with a static index, manifest, optional Raw snapshots verified at export time, and an optional VS Code interface. Use `/export` for one current TUI conversation; use this project for a project-aware local collection or VS Code workflow.
 
 - Sessions are grouped by their stored project/work directory.
 - Three profiles cover complete exports, reading views without Raw, and source snapshots verified at export time without transcripts.
@@ -150,14 +150,14 @@ Installation, settings, limitations, and packaged-candidate checks are documente
 
 ## More information
 
-- [FAQ](FAQ.md) — launcher troubleshooting, session discovery, privacy, and operational details.
-- [Archive format v1](docs/archive-format-v1.md) — canonical data, manifest, snapshots, classification, and import limits.
-- [Packaged VSIX test plan](integrations/vscode/PACKAGED_TEST_PLAN.md) — installation and manual Extension Host checks.
-- [Tests](tests) — synthetic helper, classification, integration, and adapter coverage.
-- [Changelog](CHANGELOG.md) — release history.
+- [FAQ](FAQ.md) – launcher troubleshooting, session discovery, privacy, and operational details.
+- [Archive format v1](docs/archive-format-v1.md) – canonical data, manifest, snapshots, classification, and import limits.
+- [Packaged VSIX test plan](integrations/vscode/PACKAGED_TEST_PLAN.md) – installation and manual Extension Host checks.
+- [Tests](tests) – synthetic helper, classification, integration, and adapter coverage.
+- [Changelog](CHANGELOG.md) – release history.
 
 Run the complete automated suite with `npm test`. Source-level adapter tests do not replace installing and exercising the built VSIX in a real Extension Host.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT – see [LICENSE](LICENSE).

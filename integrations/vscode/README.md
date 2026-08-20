@@ -29,7 +29,7 @@ If `code` is not on PATH, use VS Code's Extensions view and choose `Install from
 
 ## Commands
 
-- `Codex Export: Export…` — choose **Current Workspace** or **All Sessions**, then **Complete export**, **Readable export**, or **Source snapshots**.
+- `Codex Export: Export…` – choose **Current Workspace** or **All Sessions**, then **Complete export**, **Readable export**, or **Source snapshots**.
 - `Codex Export: Open Latest Export`
 - `Codex Export: Open Export Folder`
 

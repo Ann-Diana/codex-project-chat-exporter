@@ -1923,7 +1923,7 @@ async function writeMarkdownTranscript(meta, outputPath, rawRel, profiler = null
         writeClassifiedContext(out, "Subagent input / parent-agent handoff", text, item.timestamp, redactMarkdown);
       } else if (classification.kind === USER_RECORD_KIND.AUTOMATIC_RUNTIME_CONTEXT) {
         stats.runtimeContexts += 1;
-        const suffix = classification.runtimeContextTypes.length ? ` — ${classification.runtimeContextTypes.join(" / ")}` : "";
+        const suffix = classification.runtimeContextTypes.length ? ` – ${classification.runtimeContextTypes.join(" / ")}` : "";
         writeClassifiedContext(out, `Automatic runtime context${suffix}`, text, item.timestamp, redactMarkdown);
       } else {
         stats.unclassifiedUserRoleRecords += 1;
