@@ -1409,13 +1409,13 @@ async function copyStableRawSnapshot(sourcePath, destinationPath, options = {}) 
       if (destinationCompromised) {
         throw new ExportError("UNSAFE_EXPORT_PATH", `The Raw destination changed during publication and was left untouched for manual inspection: ${path.basename(destinationPath)}`);
       }
-      if (temporaryOwned) await removeOwnedTemporary({ path: temporaryPath, identity: await inspectSeparatedPath(temporaryPath, { io, requireRegularFile: true, requireReliableIdentity: true }) }, io);
+      if (temporaryOwned) await removeOwnedTemporary(temporaryOwned, io);
       if (previousDestination) await restorePreviousDestination(destinationPath, previousDestination, io);
       if (error instanceof ExportError) throw error;
       if (["EACCES", "EBUSY", "EPERM"].includes(error?.code)) throw new ExportError("SOURCE_SNAPSHOT_LOCKED", `Could not create a stable raw snapshot because the source file is locked or inaccessible: ${path.basename(sourcePath)}`);
       throw new ExportError("SOURCE_SNAPSHOT_FAILED", `Could not create a stable raw snapshot for ${path.basename(sourcePath)}: ${error?.message || error}`);
     }
-    if (temporaryOwned) await removeOwnedTemporary({ path: temporaryPath, identity: await inspectSeparatedPath(temporaryPath, { io, requireRegularFile: true, requireReliableIdentity: true }) }, io);
+    if (temporaryOwned) await removeOwnedTemporary(temporaryOwned, io);
     if (attempt < maxAttempts) options.profiler?.recordSnapshotRetryCount(1);
   }
 

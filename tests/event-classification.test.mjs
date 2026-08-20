@@ -37,6 +37,11 @@ function classify(items) {
   return classifier.finish();
 }
 
+async function fileIdentity(file) {
+  const stat = await fs.stat(file, { bigint: true });
+  return `${stat.dev}:${stat.ino}`;
+}
+
 {
   const temp = await fs.mkdtemp(path.join(os.tmpdir(), "codex-exporter-timestamp-test-"));
   try {
@@ -273,6 +278,7 @@ try {
   assert.equal(await sha256File(source), await sha256File(destination), "stable snapshot bytes must match the source bytes");
   assert.equal(snapshot.sourceBeforeSizeBytes, snapshot.sourceAfterSizeBytes);
   assert.equal(snapshot.sourceBeforeMtimeMs, snapshot.sourceAfterMtimeMs);
+  assert.equal((await fs.readdir(path.dirname(destination))).some((name) => name.includes(".partial-")), false, "successful snapshots must clean their run-owned temporary files");
 
   await assert.rejects(() => copyStableRawSnapshot(source, source, { maxAttempts: 1 }), (error) => error?.code === "OUTPUT_OVERLAPS_SOURCE");
   assert.equal(await fs.readFile(source, "utf8"), `${JSON.stringify(sessionMeta())}\n`, "the validated same-path reproduction must leave the source unchanged");
@@ -345,6 +351,7 @@ try {
       copyOpenedFile: async () => { const error = new Error("locked"); error.code = "EBUSY"; throw error; },
     },
   }), (error) => error?.code === "SOURCE_SNAPSHOT_LOCKED");
+  assert.equal((await fs.readdir(path.dirname(lockedDestination))).some((name) => name.startsWith(`${path.basename(lockedDestination)}.partial-`)), false, "ordinary failed snapshots must clean their unchanged run-owned temporary files");
 
   const routingSource = path.join(temp, "routing.jsonl");
   const routingItems = [
@@ -429,6 +436,75 @@ try {
     },
   }), (error) => error?.code === "SOURCE_CHANGED_DURING_EXPORT");
   assert.equal((await fs.readdir(path.dirname(incompleteDestination))).some((name) => name.includes(".partial-")), false, "failed snapshots must not leave partial files behind");
+
+  const catchCleanupDestination = path.join(temp, "raw", "catch-cleanup-replacement.jsonl");
+  const catchCleanupSourceHash = await sha256File(changedAfterRoutingSource);
+  let catchCleanupPartial = "";
+  let catchCleanupDisplaced = "";
+  let catchCleanupOwnedIdentity = "";
+  let catchCleanupReplacementIdentity = "";
+  await assert.rejects(() => copyStableRawSnapshot(changedAfterRoutingSource, catchCleanupDestination, {
+    maxAttempts: 1,
+    routingSnapshot: incompleteRouting.routingSnapshot,
+    afterCopy: async ({ temporaryPath }) => {
+      catchCleanupPartial = temporaryPath;
+      catchCleanupDisplaced = `${temporaryPath}.owned-displaced`;
+      catchCleanupOwnedIdentity = await fileIdentity(temporaryPath);
+      await fs.rename(temporaryPath, catchCleanupDisplaced);
+      await fs.writeFile(temporaryPath, "FOREIGN-CATCH-REPLACEMENT", "utf8");
+      catchCleanupReplacementIdentity = await fileIdentity(temporaryPath);
+      throw new Error("synthetic catch cleanup failure after replacement");
+    },
+  }), (error) => error?.code === "UNSAFE_EXPORT_PATH");
+  assert.notEqual(catchCleanupOwnedIdentity, catchCleanupReplacementIdentity, "the adversarial catch test must replace the run-owned file with a different identity");
+  assert.equal(await fs.readFile(catchCleanupPartial, "utf8"), "FOREIGN-CATCH-REPLACEMENT", "catch cleanup must leave a foreign replacement untouched");
+  assert.equal(await fs.readFile(catchCleanupDisplaced, "utf8"), await fs.readFile(changedAfterRoutingSource, "utf8"), "cleanup must not search for or remove the run-owned file after a third party moves it");
+  assert.equal(await sha256File(changedAfterRoutingSource), catchCleanupSourceHash, "catch cleanup replacement must leave the source byte-identical");
+  await assert.rejects(() => fs.stat(catchCleanupDestination), /ENOENT/, "a catch cleanup identity mismatch must not publish or verify an export");
+
+  const retryCleanupDestination = path.join(temp, "raw", "retry-cleanup-replacement.jsonl");
+  const retryCleanupSourceHash = await sha256File(changedAfterRoutingSource);
+  let retryCleanupPartial = "";
+  let retryCleanupDisplaced = "";
+  let retryCleanupOwnedIdentity = "";
+  let retryCleanupReplacementIdentity = "";
+  let retryCleanupSourceStatCalls = 0;
+  const realStat = fs.stat.bind(fs);
+  await assert.rejects(() => copyStableRawSnapshot(changedAfterRoutingSource, retryCleanupDestination, {
+    maxAttempts: 1,
+    routingSnapshot: incompleteRouting.routingSnapshot,
+    io: {
+      stat: async (candidate, options) => {
+        const stat = await realStat(candidate, options);
+        if (path.resolve(candidate) === path.resolve(changedAfterRoutingSource) && !options?.bigint) {
+          retryCleanupSourceStatCalls += 1;
+          if (retryCleanupSourceStatCalls >= 3) {
+            return new Proxy(stat, {
+              get(target, property) {
+                if (property === "mtimeMs") return target.mtimeMs + 1000;
+                const value = target[property];
+                return typeof value === "function" ? value.bind(target) : value;
+              },
+            });
+          }
+        }
+        return stat;
+      },
+    },
+    afterCopy: async ({ temporaryPath }) => {
+      retryCleanupPartial = temporaryPath;
+      retryCleanupDisplaced = `${temporaryPath}.owned-displaced`;
+      retryCleanupOwnedIdentity = await fileIdentity(temporaryPath);
+      await fs.rename(temporaryPath, retryCleanupDisplaced);
+      await fs.writeFile(temporaryPath, "FOREIGN-RETRY-REPLACEMENT", "utf8");
+      retryCleanupReplacementIdentity = await fileIdentity(temporaryPath);
+    },
+  }), (error) => error?.code === "UNSAFE_EXPORT_PATH");
+  assert.notEqual(retryCleanupOwnedIdentity, retryCleanupReplacementIdentity, "the adversarial retry test must replace the run-owned file with a different identity");
+  assert.equal(await fs.readFile(retryCleanupPartial, "utf8"), "FOREIGN-RETRY-REPLACEMENT", "post-attempt cleanup must leave a foreign replacement untouched");
+  assert.equal(await fs.readFile(retryCleanupDisplaced, "utf8"), await fs.readFile(changedAfterRoutingSource, "utf8"), "post-attempt cleanup must not search for or remove a displaced run-owned file");
+  assert.equal(await sha256File(changedAfterRoutingSource), retryCleanupSourceHash, "post-attempt cleanup replacement must leave the source byte-identical");
+  await assert.rejects(() => fs.stat(retryCleanupDestination), /ENOENT/, "a retry cleanup identity mismatch must not publish or verify an export");
 
   const sourceBytesBeforeIdentityAttacks = await fs.readFile(changedAfterRoutingSource);
   const sourceHashBeforeIdentityAttacks = await sha256File(changedAfterRoutingSource);
