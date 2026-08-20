@@ -39,6 +39,7 @@ Expected files by profile:
 7. In an untrusted window, confirm all three visible export/open commands refuse to continue. Confirm remote, WSL, SSH, Dev Container, web, and virtual workspace hosts are rejected as documented.
 8. Start a synthetic export and immediately invoke Export again; confirm the adapter rejects the second command. Automated tests separately cover the core lock for simultaneous writes to one destination.
 9. Confirm the remembered output folder and latest HTML index change only after a successful completed export.
+10. Confirm **Open Export Folder** opens only the folder recorded by the last successful export, not a configured folder that has not completed an export. A replaced or linked folder or `index.html` must be refused with a prompt to run a new export.
 
 ## Inspect classified reading views
 

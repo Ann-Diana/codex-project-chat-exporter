@@ -3,12 +3,13 @@ import fs from "node:fs";
 import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { buildVsix } from "../scripts/build-vsix.mjs";
 
 const require = createRequire(import.meta.url);
-const { COMMANDS, DIAGNOSTIC_BUILD_ID, EXPORT_PROFILES, STATE_LATEST_HTML, STATE_OUTPUT_DIR, createExtensionAdapter, formatExportSummary, isWindowsNetworkOrDevicePath, resolveConfiguredProfile } = require("../src/vscode-adapter.cjs");
+const { COMMANDS, DIAGNOSTIC_BUILD_ID, EXPORT_PROFILES, STATE_LATEST_HTML, STATE_LATEST_HTML_TARGET, STATE_OUTPUT_DIR, STATE_OUTPUT_TARGET, createExtensionAdapter, defaultLoadExporter, formatExportSummary, isWindowsNetworkOrDevicePath, resolveConfiguredProfile } = require("../src/vscode-adapter.cjs");
 
 function createState() {
   const values = new Map();
@@ -149,32 +150,40 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
 }
 
 {
+  const buildTemp = await fsp.mkdtemp(path.join(os.tmpdir(), "codex-vsix-build-foreign-"));
+  const distDir = path.join(buildTemp, "dist");
+  const foreignCandidate = path.join(distDir, "codex-project-chat-exporter-vscode-0.0.0.vsix");
+  await fsp.mkdir(distDir, { recursive: true });
+  await fsp.writeFile(foreignCandidate, "foreign candidate", "utf8");
+  await assert.rejects(() => buildVsix({ distDir }), /Unexpected dist artifacts/);
+  assert.equal(await fsp.readFile(foreignCandidate, "utf8"), "foreign candidate", "same-prefix files not owned by the current build must remain untouched");
+  assert.deepEqual(await fsp.readdir(distDir), [path.basename(foreignCandidate)], "a blocked build must not create stage or partial artifacts");
+  await fsp.rm(buildTemp, { recursive: true, force: true });
+}
+
+{
   const buildTemp = await fsp.mkdtemp(path.join(os.tmpdir(), "codex-vsix-build-success-"));
   const distDir = path.join(buildTemp, "dist");
-  const foreignFile = path.join(distDir, "keep-me.txt");
-  const staleCandidate = path.join(distDir, "codex-project-chat-exporter-vscode-0.0.0.vsix");
+  const currentCandidate = path.join(distDir, "codex-project-chat-exporter-vscode-0.1.3.vsix");
   await fsp.mkdir(distDir, { recursive: true });
-  await fsp.writeFile(foreignFile, "foreign", "utf8");
-  await fsp.writeFile(staleCandidate, "stale", "utf8");
+  await fsp.writeFile(currentCandidate, "previous candidate", "utf8");
   const result = await buildVsix({
     distDir,
     archiveWriter: async ({ archivePath }) => fsp.writeFile(archivePath, "synthetic VSIX", "utf8"),
   });
   assert.equal(path.basename(result.vsixPath), "codex-project-chat-exporter-vscode-0.1.3.vsix");
-  assert.equal(await fsp.readFile(foreignFile, "utf8"), "foreign", "the build must not remove unrelated dist files");
+  assert.equal(await fsp.readFile(result.vsixPath, "utf8"), "synthetic VSIX", "the exact canonical candidate may be replaced in a controlled publication step");
   assert.equal((await fsp.stat(result.vsixPath)).isFile(), true);
-  assert.equal(await fsp.stat(staleCandidate).then(() => true, () => false), false, "superseded build-owned VSIX files should be pruned");
   assert.equal(await fsp.stat(result.stage).then(() => true, () => false), false, "successful builds must remove their stage directory");
   assert.equal(await fsp.stat(result.archivePath).then(() => true, () => false), false, "successful builds must remove their temporary archive path");
+  assert.deepEqual(await fsp.readdir(distDir), [path.basename(currentCandidate)], "successful builds must leave only the exact canonical candidate");
   await fsp.rm(buildTemp, { recursive: true, force: true });
 }
 
 {
   const buildTemp = await fsp.mkdtemp(path.join(os.tmpdir(), "codex-vsix-build-failure-"));
   const distDir = path.join(buildTemp, "dist");
-  const foreignFile = path.join(distDir, "keep-me.txt");
   await fsp.mkdir(distDir, { recursive: true });
-  await fsp.writeFile(foreignFile, "foreign", "utf8");
   let attemptedArchivePath;
   let attemptedStage;
   await assert.rejects(
@@ -189,10 +198,37 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
     }),
     /Synthetic archive failure/,
   );
-  assert.equal(await fsp.readFile(foreignFile, "utf8"), "foreign", "failed builds must not remove unrelated dist files");
   assert.equal(await fsp.stat(attemptedStage).then(() => true, () => false), false, "failed builds must remove their stage directory");
   assert.equal(await fsp.stat(attemptedArchivePath).then(() => true, () => false), false, "failed builds must remove their temporary archive path");
+  assert.deepEqual(await fsp.readdir(distDir), [], "failed builds must leave no run-owned stage or partial artifacts");
   await fsp.rm(buildTemp, { recursive: true, force: true });
+}
+
+{
+  const installedRoot = path.join(temp, "installed-extension", "extensions", "candidate");
+  const packagedCore = path.join(installedRoot, "vendor", "codex-project-chat-exporter", "bin", "export-codex-project-chats.mjs");
+  const integrityFile = path.join(installedRoot, "vendor", "codex-project-chat-exporter", "integrity.json");
+  const externalCore = path.resolve(installedRoot, "..", "..", "bin", "export-codex-project-chats.mjs");
+  const packagedBytes = 'export const loadedFrom = "packaged";\n';
+  await fsp.mkdir(path.dirname(packagedCore), { recursive: true });
+  await fsp.mkdir(path.dirname(externalCore), { recursive: true });
+  await fsp.writeFile(packagedCore, packagedBytes, "utf8");
+  await fsp.writeFile(externalCore, 'export const loadedFrom = "external";\n', "utf8");
+  await fsp.writeFile(integrityFile, JSON.stringify({ format: 1, files: { "bin/export-codex-project-chats.mjs": createHash("sha256").update(packagedBytes).digest("hex") } }), "utf8");
+  const loaded = await defaultLoadExporter({ extensionPath: installedRoot });
+  assert.equal(loaded.loadedFrom, "packaged", "installed extensions must ignore any external development core");
+
+  const missingRoot = path.join(temp, "installed-extension-missing");
+  await fsp.mkdir(missingRoot, { recursive: true });
+  await assert.rejects(() => defaultLoadExporter({ extensionPath: missingRoot }), (error) => error?.code === "PACKAGED_EXPORTER_MISSING");
+
+  const tamperedRoot = path.join(temp, "installed-extension-tampered");
+  const tamperedCore = path.join(tamperedRoot, "vendor", "codex-project-chat-exporter", "bin", "export-codex-project-chats.mjs");
+  const tamperedIntegrity = path.join(tamperedRoot, "vendor", "codex-project-chat-exporter", "integrity.json");
+  await fsp.mkdir(path.dirname(tamperedCore), { recursive: true });
+  await fsp.writeFile(tamperedCore, 'export const loadedFrom = "tampered";\n', "utf8");
+  await fsp.writeFile(tamperedIntegrity, JSON.stringify({ format: 1, files: { "bin/export-codex-project-chats.mjs": "0".repeat(64) } }), "utf8");
+  await assert.rejects(() => defaultLoadExporter({ extensionPath: tamperedRoot }), (error) => error?.code === "PACKAGED_EXPORTER_INTEGRITY_FAILED");
 }
 
 {
@@ -216,6 +252,8 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
   assert.equal(result.exportedSessionCount, 2);
   assert.equal(context.globalState.get(STATE_OUTPUT_DIR), outputDirectory);
   assert.equal(context.globalState.get(STATE_LATEST_HTML), path.join(outputDirectory, "index.html"));
+  assert.equal(context.globalState.get(STATE_OUTPUT_TARGET).kind, "directory");
+  assert.equal(context.globalState.get(STATE_LATEST_HTML_TARGET).kind, "file");
   const infoMessage = fake.messages.find((message) => message.type === "info");
   assert.match(infoMessage.message, /2 sessions across 1 project/);
   assert.match(infoMessage.message, new RegExp(outputDirectory.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
@@ -484,14 +522,15 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
 }
 
 {
-  const fake = createFakeVscode({});
+  const latestOutput = path.join(temp, "open-latest-output");
+  const fake = createFakeVscode({ openDialogResult: [{ fsPath: latestOutput }] });
   const context = createContext(temp);
   const adapter = createExtensionAdapter(fake.vscode, { loadExporter: async () => exporter });
   await adapter.activate(context);
   assert.equal(await adapter.openLatestArchive(context), false);
   assert.match(fake.messages.at(-1).message, /No latest Codex export/);
-  const html = path.join(outputDirectory, "index.html");
-  await context.globalState.update(STATE_LATEST_HTML, html);
+  await adapter.exportAllSessions(context, "readable");
+  const html = path.join(latestOutput, "index.html");
   assert.equal(await adapter.openLatestArchive(context), true);
   assert.equal(fake.opened.at(-1), html);
 }
@@ -508,12 +547,17 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
 }
 
 {
-  const fake = createFakeVscode({ config: { outputDirectory } });
+  const rememberedOutput = path.join(temp, "remembered-open-folder");
+  const configuredButUnused = path.join(temp, "configured-but-unused");
+  const fake = createFakeVscode({ config: { outputDirectory: configuredButUnused }, openDialogResult: [{ fsPath: rememberedOutput }] });
   const context = createContext(temp);
   const adapter = createExtensionAdapter(fake.vscode, { loadExporter: async () => exporter });
   await adapter.activate(context);
+  assert.equal(await adapter.openExportFolder(context), false, "a configured folder without a completed export must not be confused with the last verified export");
+  fake.config.delete("outputDirectory");
+  await adapter.exportAllSessions(context, "readable");
   assert.equal(await adapter.openExportFolder(context), true);
-  assert.equal(fake.opened.at(-1), outputDirectory);
+  assert.equal(fake.opened.at(-1), rememberedOutput);
 }
 
 {
@@ -525,6 +569,75 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
   assert.equal(await adapter.openExportFolder(context), false, "a remembered UNC output folder must not be opened");
   assert.equal(fake.opened.length, 0);
   assert.match(fake.messages.at(-1).message, /network or device path/);
+}
+
+{
+  const swappedOutput = path.join(temp, "swapped-open-output");
+  const movedOutput = path.join(temp, "swapped-open-output-original");
+  const fake = createFakeVscode({ openDialogResult: [{ fsPath: swappedOutput }] });
+  const context = createContext(temp);
+  const adapter = createExtensionAdapter(fake.vscode, { loadExporter: async () => exporter });
+  await adapter.activate(context);
+  await adapter.exportAllSessions(context, "readable");
+  await fsp.rename(swappedOutput, movedOutput);
+  await fsp.mkdir(swappedOutput, { recursive: true });
+  await fsp.writeFile(path.join(swappedOutput, "index.html"), "replacement", "utf8");
+  assert.equal(await adapter.openExportFolder(context), false, "a replaced output directory must be rejected");
+  assert.equal(await adapter.openLatestArchive(context), false, "an index below a replaced output directory must be rejected");
+  assert.match(fake.messages.at(-1).message, /changed after export/);
+}
+
+{
+  const replacedIndexOutput = path.join(temp, "replaced-index-output");
+  const fake = createFakeVscode({ openDialogResult: [{ fsPath: replacedIndexOutput }] });
+  const context = createContext(temp);
+  const adapter = createExtensionAdapter(fake.vscode, { loadExporter: async () => exporter });
+  await adapter.activate(context);
+  await adapter.exportAllSessions(context, "readable");
+  const indexPath = path.join(replacedIndexOutput, "index.html");
+  await fsp.unlink(indexPath);
+  await fsp.writeFile(indexPath, "replacement with a new identity", "utf8");
+  assert.equal(await adapter.openLatestArchive(context), false, "a replaced index file must be rejected even at the same path");
+  assert.equal(await adapter.openExportFolder(context), true, "an unchanged verified output directory remains openable independently of a replaced index");
+}
+
+{
+  const linkedIndexOutput = path.join(temp, "linked-index-output");
+  const outsideIndex = path.join(temp, "outside-index.html");
+  const fake = createFakeVscode({ openDialogResult: [{ fsPath: linkedIndexOutput }] });
+  const context = createContext(temp);
+  const adapter = createExtensionAdapter(fake.vscode, { loadExporter: async () => exporter });
+  await adapter.activate(context);
+  await adapter.exportAllSessions(context, "readable");
+  const indexPath = path.join(linkedIndexOutput, "index.html");
+  await fsp.writeFile(outsideIndex, "outside", "utf8");
+  await fsp.unlink(indexPath);
+  try {
+    await fsp.symlink(outsideIndex, indexPath, "file");
+    assert.equal(await adapter.openLatestArchive(context), false, "a symlinked index outside the verified export must be rejected");
+  } catch (error) {
+    if (!["EPERM", "EACCES", "ENOSYS"].includes(error?.code)) throw error;
+  }
+}
+
+{
+  const junctionOutput = path.join(temp, "junction-open-output");
+  const movedOutput = path.join(temp, "junction-open-output-original");
+  const outsideDirectory = path.join(temp, "junction-outside-directory");
+  const fake = createFakeVscode({ openDialogResult: [{ fsPath: junctionOutput }] });
+  const context = createContext(temp);
+  const adapter = createExtensionAdapter(fake.vscode, { loadExporter: async () => exporter });
+  await adapter.activate(context);
+  await adapter.exportAllSessions(context, "readable");
+  await fsp.rename(junctionOutput, movedOutput);
+  await fsp.mkdir(outsideDirectory, { recursive: true });
+  try {
+    await fsp.symlink(outsideDirectory, junctionOutput, process.platform === "win32" ? "junction" : "dir");
+    assert.equal(await adapter.openExportFolder(context), false, "a junction or directory symlink replacing the verified export folder must be rejected");
+    assert.equal(await adapter.openLatestArchive(context), false, "an index reached through a replaced export-folder junction must be rejected");
+  } catch (error) {
+    if (!["EPERM", "EACCES", "ENOSYS"].includes(error?.code)) throw error;
+  }
 }
 
 {

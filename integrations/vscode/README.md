@@ -12,7 +12,7 @@ Unlike Codex's native TUI `/export`, the extension can export the current VS Cod
 - **All Sessions** exports all detected active and archived sessions from the configured Codex home.
 - Choose scope and export profile from two native Quick Picks.
 - Open the latest generated HTML index.
-- Open the configured or last used export folder.
+- Open the folder from the last successfully completed and recorded export.
 - Show throttled phase and `Processing session X of Y` progress, success messages, warnings, and technical details in the `Codex Project Chat Exporter` output channel.
 
 The VS Code extension scans both active and archived Codex session stores. Export profiles change the generated output, not which session stores are scanned.
@@ -51,7 +51,9 @@ The normal output channel records complete output-directory, HTML-index, and man
 
 ## Privacy
 
-The extension works only in a trusted local desktop window. **Current Workspace** needs at least one local `file:` workspace folder; **All Sessions** can run without an open folder. Export and open commands are blocked while the current window is untrusted. The extension adds no telemetry or built-in upload and makes no application-level HTTP, web, or API calls. It stores the chosen output folder and latest HTML index path in VS Code global state only after a successful export.
+The extension works only in a trusted local desktop window. **Current Workspace** needs at least one local `file:` workspace folder; **All Sessions** can run without an open folder. Export and open commands are blocked while the current window is untrusted. The extension adds no telemetry or built-in upload and makes no application-level HTTP, web, or API calls. It stores the chosen output folder, latest HTML index path, canonical paths, and available file-system identities in VS Code global state only after a successful export.
+
+Open commands re-check the stored local path, type, canonical location, containment, and file-system identity immediately before handing it to VS Code. A changed, linked, or unverifiable target is refused and requires a new export. This is a point-in-time check; the extension cannot promise that the operating system target remains unchanged after the final check and during the subsequent host handoff.
 
 The application-scoped `outputDirectory` and `codexHome` settings reject Workspace and Workspace Folder values at runtime. UNC and Windows device paths are rejected. Avoid mapped network drives because they cannot be identified reliably in every configuration without platform-specific dependencies.
 

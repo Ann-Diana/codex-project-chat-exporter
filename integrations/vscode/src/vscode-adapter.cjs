@@ -1,6 +1,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { AsyncLocalStorage } = require("node:async_hooks");
+const { createHash } = require("node:crypto");
 const { performance } = require("node:perf_hooks");
 const { pathToFileURL } = require("node:url");
 
@@ -8,6 +9,8 @@ const CONFIG_SECTION = "codexProjectChatExporter";
 const DIAGNOSTIC_BUILD_ID = "0.1.3-pre-push";
 const STATE_OUTPUT_DIR = "codexProjectChatExporter.outputDirectory";
 const STATE_LATEST_HTML = "codexProjectChatExporter.latestHtmlIndexPath";
+const STATE_OUTPUT_TARGET = "codexProjectChatExporter.outputDirectoryTarget";
+const STATE_LATEST_HTML_TARGET = "codexProjectChatExporter.latestHtmlIndexTarget";
 const COMMANDS = {
   exportMenu: "codexArchive.export",
   exportCurrentWorkspace: "codexArchive.exportCurrentWorkspace",
@@ -24,6 +27,7 @@ const EXPORT_PROFILES = Object.freeze([
 function createExtensionAdapter(vscode, injected = {}) {
   const deps = {
     fs,
+    fsp: fs.promises,
     path,
     loadExporter: defaultLoadExporter,
     ...injected,
@@ -151,6 +155,9 @@ function createExtensionAdapter(vscode, injected = {}) {
           }
         });
         writeDiagnostic("with_progress_end", { duration_ms: roundDiagnosticMs(performance.now() - withProgressStartedAt) });
+        const openTargets = await captureCompletedExportTargets(result);
+        await context.globalState.update(STATE_OUTPUT_TARGET, openTargets.output);
+        await context.globalState.update(STATE_LATEST_HTML_TARGET, openTargets.index);
         await context.globalState.update(STATE_OUTPUT_DIR, result.outputDirectory);
         await context.globalState.update(STATE_LATEST_HTML, result.htmlIndexPath);
         const summary = formatExportSummary(result.exportedSessionCount, result.exportedProjectCount);
@@ -162,8 +169,8 @@ function createExtensionAdapter(vscode, injected = {}) {
         writeDiagnostic("success_message_show", { duration_ms: roundDiagnosticMs(performance.now() - adapterExportStartedAt) });
         const action = await vscode.window.showInformationMessage(`Exported ${summary} to ${result.outputDirectory}.`, "Open HTML Index", "Open Export Folder");
         writeDiagnostic("success_message_resolved", { action: action === "Open HTML Index" ? "OPEN_INDEX" : action === "Open Export Folder" ? "OPEN_FOLDER" : "DISMISSED", duration_ms: roundDiagnosticMs(performance.now() - adapterExportStartedAt) });
-        if (action === "Open HTML Index") await openFile(result.htmlIndexPath);
-        if (action === "Open Export Folder") await openFile(result.outputDirectory);
+        if (action === "Open HTML Index") await openVerifiedTarget(openTargets.index, openTargets.output);
+        if (action === "Open Export Folder") await openVerifiedTarget(openTargets.output);
         return result;
       } catch (error) {
         const message = safeErrorMessage(error);
@@ -218,25 +225,24 @@ function createExtensionAdapter(vscode, injected = {}) {
     }
     const validated = validateLocalAbsolutePath(latest, STATE_LATEST_HTML);
     if (!validated) return false;
-    if (!deps.fs.existsSync(validated)) {
-      vscode.window.showWarningMessage("No latest Codex export HTML index was found. Run an export first.");
-      return false;
-    }
-    await openFile(validated);
-    return true;
+    const storedIndex = context.globalState.get(STATE_LATEST_HTML_TARGET, null);
+    const storedOutput = context.globalState.get(STATE_OUTPUT_TARGET, null);
+    if (!storedIndex || !storedOutput || storedIndex.path !== validated) return refuseStaleOpenTarget("latest HTML index");
+    return openVerifiedTarget(storedIndex, storedOutput);
   }
 
   async function openExportFolder(context) {
     ensureDesktopLocalExtensionHost();
-    const folder = getUserOnlyConfigValue("outputDirectory", "") || context.globalState.get(STATE_OUTPUT_DIR, "");
+    const folder = context.globalState.get(STATE_OUTPUT_DIR, "");
     if (!folder) {
       vscode.window.showWarningMessage("No Codex export folder is configured yet.");
       return false;
     }
     const validated = validateAbsoluteOutputDirectory(folder);
     if (!validated) return false;
-    await openFile(validated);
-    return true;
+    const storedOutput = context.globalState.get(STATE_OUTPUT_TARGET, null);
+    if (!storedOutput || storedOutput.path !== validated) return refuseStaleOpenTarget("export folder");
+    return openVerifiedTarget(storedOutput);
   }
 
   function validateAbsoluteOutputDirectory(folder) {
@@ -266,6 +272,59 @@ function createExtensionAdapter(vscode, injected = {}) {
 
   async function openFile(filePath) {
     return vscode.env.openExternal(vscode.Uri.file(filePath));
+  }
+
+  async function captureCompletedExportTargets(result) {
+    const output = await inspectOpenTarget(result.outputDirectory, "directory");
+    const index = await inspectOpenTarget(result.htmlIndexPath, "file", output);
+    return { index, output };
+  }
+
+  async function openVerifiedTarget(record, expectedOutput = null) {
+    try {
+      const verifiedOutput = expectedOutput ? await verifyOpenTarget(expectedOutput) : null;
+      const verified = await verifyOpenTarget(record, verifiedOutput);
+      await openFile(verified.path);
+      return true;
+    } catch (error) {
+      vscode.window.showWarningMessage(`The saved Codex export target cannot be opened safely because it changed after export. Run a new export before opening it. ${safeErrorMessage(error)}`);
+      return false;
+    }
+  }
+
+  function refuseStaleOpenTarget(label) {
+    vscode.window.showWarningMessage(`The saved Codex ${label} has no current verification record. Run a new export before opening it.`);
+    return false;
+  }
+
+  async function verifyOpenTarget(record, expectedOutput = null) {
+    if (!record || !["file", "directory"].includes(record.kind) || !record.path || !record.canonicalPath || !record.identity) {
+      throw new Error("Stored export target verification data is incomplete");
+    }
+    const current = await inspectOpenTarget(record.path, record.kind, expectedOutput);
+    if (openPathKey(current.canonicalPath) !== openPathKey(record.canonicalPath) || current.identity !== record.identity) {
+      throw new Error("Stored export target identity no longer matches");
+    }
+    return current;
+  }
+
+  async function inspectOpenTarget(candidate, kind, expectedOutput = null) {
+    if (!deps.path.isAbsolute(candidate) || isWindowsNetworkOrDevicePath(candidate)) throw new Error("Export target is not an absolute local path");
+    const absolutePath = deps.path.resolve(candidate);
+    const lstat = await deps.fsp.lstat(absolutePath);
+    if (lstat.isSymbolicLink()) throw new Error("Symbolic-link or junction export targets are not opened");
+    if (kind === "file" && !lstat.isFile()) throw new Error("Expected the export target to be a regular file");
+    if (kind === "directory" && !lstat.isDirectory()) throw new Error("Expected the export target to be a directory");
+    const canonicalPath = await deps.fsp.realpath(absolutePath);
+    if (isWindowsNetworkOrDevicePath(canonicalPath)) throw new Error("Canonical export target is a network or device path");
+    if (openPathKey(canonicalPath) !== openPathKey(absolutePath)) throw new Error("Export target resolves through an alias or reparse point");
+    const stat = await deps.fsp.stat(canonicalPath, { bigint: true });
+    if (kind === "file" && !stat.isFile()) throw new Error("Expected the canonical export target to be a regular file");
+    if (kind === "directory" && !stat.isDirectory()) throw new Error("Expected the canonical export target to be a directory");
+    const identity = reliableOpenIdentity(stat);
+    if (!identity) throw new Error("Reliable export target identity is unavailable");
+    if (expectedOutput && !isOpenPathInside(canonicalPath, expectedOutput.canonicalPath)) throw new Error("Export index is outside the verified export folder");
+    return { canonicalPath, identity, kind, path: absolutePath, verifiedAt: new Date().toISOString() };
   }
 
   function getConfig() {
@@ -328,10 +387,68 @@ function formatRuntimeSummary(timings = {}) {
 }
 
 async function defaultLoadExporter(context) {
-  const devPath = path.resolve(context.extensionPath, "..", "..", "bin", "export-codex-project-chats.mjs");
+  const extensionRoot = await fs.promises.realpath(path.resolve(context.extensionPath));
   const packagedPath = path.join(context.extensionPath, "vendor", "codex-project-chat-exporter", "bin", "export-codex-project-chats.mjs");
-  const modulePath = fs.existsSync(devPath) ? devPath : packagedPath;
-  return import(pathToFileURL(modulePath).href);
+  const integrityPath = path.join(context.extensionPath, "vendor", "codex-project-chat-exporter", "integrity.json");
+  const [packagedStat, integrityStat] = await Promise.all([fs.promises.lstat(packagedPath), fs.promises.lstat(integrityPath)]).catch((error) => {
+    throw Object.assign(new Error(`The packaged Codex exporter core is missing or inaccessible: ${error?.message || error}`), { code: "PACKAGED_EXPORTER_MISSING" });
+  });
+  if (!packagedStat.isFile() || packagedStat.isSymbolicLink() || !integrityStat.isFile() || integrityStat.isSymbolicLink()) {
+    throw Object.assign(new Error("The packaged Codex exporter core or integrity record is not a regular package file"), { code: "PACKAGED_EXPORTER_INTEGRITY_FAILED" });
+  }
+  const [canonicalModule, canonicalIntegrity] = await Promise.all([fs.promises.realpath(packagedPath), fs.promises.realpath(integrityPath)]);
+  if (!isOpenPathInside(canonicalModule, extensionRoot) || !isOpenPathInside(canonicalIntegrity, extensionRoot)) {
+    throw Object.assign(new Error("The packaged Codex exporter core resolves outside the installed extension"), { code: "PACKAGED_EXPORTER_INTEGRITY_FAILED" });
+  }
+  let integrity;
+  try {
+    integrity = JSON.parse(await fs.promises.readFile(canonicalIntegrity, "utf8"));
+  } catch (error) {
+    throw Object.assign(new Error(`The packaged Codex exporter integrity record cannot be read: ${error?.message || error}`), { code: "PACKAGED_EXPORTER_INTEGRITY_FAILED" });
+  }
+  const expectedSha256 = integrity?.files?.["bin/export-codex-project-chats.mjs"];
+  if (!isLowerHexSha256(expectedSha256)) {
+    throw Object.assign(new Error("The packaged Codex exporter integrity record is invalid"), { code: "PACKAGED_EXPORTER_INTEGRITY_FAILED" });
+  }
+  const actualSha256 = await sha256LocalFile(canonicalModule);
+  if (actualSha256 !== expectedSha256) {
+    throw Object.assign(new Error("The packaged Codex exporter core does not match its integrity record"), { code: "PACKAGED_EXPORTER_INTEGRITY_FAILED" });
+  }
+  return import(pathToFileURL(canonicalModule).href);
+}
+
+async function sha256LocalFile(filePath) {
+  const hash = createHash("sha256");
+  const input = fs.createReadStream(filePath);
+  for await (const chunk of input) hash.update(chunk);
+  return hash.digest("hex");
+}
+
+function reliableOpenIdentity(stat) {
+  if (typeof stat?.dev === "bigint" && typeof stat?.ino === "bigint") {
+    if (stat.dev < 0n || stat.ino <= 0n) return null;
+    return `${stat.dev}:${stat.ino}`;
+  }
+  if (!Number.isSafeInteger(stat?.dev) || !Number.isSafeInteger(stat?.ino) || stat.dev < 0 || stat.ino <= 0) return null;
+  return `${stat.dev}:${stat.ino}`;
+}
+
+function isLowerHexSha256(value) {
+  if (typeof value !== "string" || value.length !== 64) return false;
+  for (const character of value) {
+    if (!(character >= "0" && character <= "9") && !(character >= "a" && character <= "f")) return false;
+  }
+  return true;
+}
+
+function openPathKey(value) {
+  const resolved = path.resolve(value);
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+function isOpenPathInside(candidate, root) {
+  const relative = path.relative(root, candidate);
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
 function safeErrorMessage(error) {
@@ -344,4 +461,4 @@ function isWindowsNetworkOrDevicePath(value) {
   return String(value || "").replaceAll("/", "\\").startsWith("\\\\");
 }
 
-module.exports = { COMMANDS, CONFIG_SECTION, DIAGNOSTIC_BUILD_ID, EXPORT_PROFILES, STATE_LATEST_HTML, STATE_OUTPUT_DIR, createExtensionAdapter, formatExportSummary, formatRuntimeSummary, isWindowsNetworkOrDevicePath, resolveConfiguredProfile, safeErrorMessage };
+module.exports = { COMMANDS, CONFIG_SECTION, DIAGNOSTIC_BUILD_ID, EXPORT_PROFILES, STATE_LATEST_HTML, STATE_LATEST_HTML_TARGET, STATE_OUTPUT_DIR, STATE_OUTPUT_TARGET, createExtensionAdapter, defaultLoadExporter, formatExportSummary, formatRuntimeSummary, isWindowsNetworkOrDevicePath, resolveConfiguredProfile, safeErrorMessage };
