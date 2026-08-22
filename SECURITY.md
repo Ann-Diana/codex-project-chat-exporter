@@ -25,6 +25,12 @@ Reportable security issues include source overwrite/deletion, path traversal, so
 
 The VS Code extension stores the latest export paths for convenience. Immediately before opening a file or folder, it revalidates the local path, expected file type, canonical target, containment within the recorded export location, and filesystem identity. This reduces path-replacement and link-alias risks, but cannot eliminate changes made after the final check and before VS Code or the operating system processes the target.
 
+### Local filesystem trust boundary
+
+The exporter checks for accidental source/output overlap and for link or alias structures that are already present when a path is inspected. It should not be run with elevated or administrator privileges. Output folders must be private, local, and not writable by other users.
+
+Active filesystem races by another process running under the same user account are outside the guaranteed protection boundary. Additional before/after path checks reduce accidental misuse but cannot remove that operating-system timing boundary.
+
 ## Redaction limits
 
 Markdown applies best-effort masking for some token shapes and long base64-like values. It can miss names, paths, addresses, customer data, source code, proprietary text, and credentials. Raw JSONL is byte-preserving and unredacted. Raw files and manifests are not share-safe.
@@ -35,6 +41,7 @@ Markdown applies best-effort masking for some token shapes and long base64-like 
 - Use the `readable` profile when Markdown and HTML reading views are sufficient and Raw JSONL snapshots are not required. This reduces copied data but does not make the export share-safe.
 - Keep Raw and manifest files private and review every generated file before sharing.
 - Keep exports outside public repositories and never attach real session logs to public reports.
+- Treat an output folder containing `EXPORT_INCOMPLETE.txt` as an incomplete generation. Do not use its manifest or indexes; choose a new empty destination, or inspect and remove the incomplete export manually.
 - If `.codex-export.lock` remains after a crash, first prove no export is running, inspect its PID and start time, and remove only that confirmed stale lock file.
 
 ## Reporting a vulnerability

@@ -16,6 +16,14 @@ When raw export is enabled, each raw JSONL file is a byte-identical snapshot of 
 
 When raw export is disabled, the export contains no new canonical session bytes. The manifest still identifies `raw_jsonl` as the canonical representation type but marks each omitted snapshot explicitly.
 
+## Generation completion marker
+
+`EXPORT_INCOMPLETE.txt` invalidates the entire export generation while it exists. In that state, `manifest.json`, `index.html`, and `index.md` are not valid descriptions or reading views of the current files, even if they are present and individually well formed.
+
+The exporter creates the marker before changing files from an existing generation. It publishes and verifies the new manifest before removing the run-owned marker. Marker removal is the generation commit point. A failed or interrupted export leaves the marker in place; it does not claim that the previous generation was restored.
+
+A verifier or future importer must check for `EXPORT_INCOMPLETE.txt` before reading `manifest.json` and must reject the export when the marker exists. The marker contains only a fixed status explanation and no session content or local paths.
+
 ## Manifest header
 
 `manifest.json` uses:
@@ -181,7 +189,7 @@ The `source-snapshots` profile intentionally omits Markdown transcripts and `ind
 
 Version 1 prepares portable preservation metadata but implements no import command and has no validated Codex roundtrip. It does not promise reconstruction of Codex UI state, indexes, project registration, sidebar history, attachment files, or future compatibility with Codex's internal format.
 
-A future importer must use canonical raw JSONL and validated manifest mapping. It must hash every current Raw file again, compare that digest with `raw_sha256`, and reject any mismatch before consuming the file. It must also avoid overwriting an existing local session unless a separately designed, explicit conflict policy proves that action safe. Markdown or HTML alone is insufficient. Neither the format version, a stored hash, nor portable source mapping establishes import capability, permanent tamper resistance, sealing, or restore readiness.
+A future importer must reject any generation containing `EXPORT_INCOMPLETE.txt` before reading its manifest. For a completed generation, it must use canonical raw JSONL and validated manifest mapping, hash every current Raw file again, compare that digest with `raw_sha256`, and reject any mismatch before consuming the file. It must also avoid overwriting an existing local session unless a separately designed, explicit conflict policy proves that action safe. Markdown or HTML alone is insufficient. Neither the format version, a stored hash, nor portable source mapping establishes import capability, permanent tamper resistance, sealing, or restore readiness.
 
 ## Privacy boundary
 

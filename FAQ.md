@@ -113,9 +113,9 @@ No. The redaction patterns catch only some common token-shaped secrets and long 
 
 They do not reliably remove paths, names, email addresses, IP addresses, customer data, source code, proprietary information, or every credential format.
 
-## Why is `raw/` still present after using `--no-raw`?
+## Why is an empty `raw/` folder still present after using `--no-raw`?
 
-The exporter does not clean an existing output folder. A `raw/` directory or other file from an earlier run remains untouched. Use a new empty destination folder for a clean export.
+A successful repetition export removes only files that a structurally valid previous manifest assigns to the previous exporter generation. It does not recursively delete directories or unknown files, so an empty `raw/` directory can remain. If a run fails after generation changes begin, `EXPORT_INCOMPLETE.txt` remains and invalidates the manifest and indexes until the folder is manually reviewed or replaced with a new empty destination.
 
 ## Which export profile should I use?
 
