@@ -440,6 +440,16 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
 }
 
 {
+  const callsBeforeWorkspaceToolOverride = exportCallCount;
+  const fake = createFakeVscode({ config: { outputDirectory }, configScopes: { includeTools: { workspaceValue: true } } });
+  const context = createContext(temp);
+  const adapter = createExtensionAdapter(fake.vscode, { loadExporter: async () => exporter });
+  await adapter.activate(context);
+  await assert.rejects(() => adapter.exportAllSessions(context), /includeTools.*User settings/);
+  assert.equal(exportCallCount, callsBeforeWorkspaceToolOverride, "workspace-controlled includeTools must fail before the export core runs");
+}
+
+{
   assert.equal(resolveConfiguredProfile("source-snapshots"), "source-snapshots");
   assert.equal(resolveConfiguredProfile(), "complete");
 }

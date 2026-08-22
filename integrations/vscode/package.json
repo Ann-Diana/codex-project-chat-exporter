@@ -86,6 +86,7 @@
         "codexProjectChatExporter.includeTools": {
           "type": "boolean",
           "default": false,
+          "scope": "application",
           "description": "Include potentially sensitive tool call input and output in the derived Markdown reading views."
         },
         "codexProjectChatExporter.diagnosticOutput": {

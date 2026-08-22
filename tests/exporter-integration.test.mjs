@@ -595,6 +595,37 @@ const emptyProjectRow = indexMarkdown.split("\n").find((line) => line.includes(e
 assert.ok(emptyProjectRow, "expected the empty-project row in index.md");
 assert.ok(emptyProjectRow.startsWith(`|  | ${escapedTitle} |`), "an empty cell must remain an empty Markdown table cell");
 
+const timestampSafetyHome = path.join(temp, "timestamp-safety-home");
+const timestampSafetySessions = path.join(timestampSafetyHome, "sessions", "2026", "08", "22");
+const timestampSafetyOutput = path.join(temp, "timestamp-safety-output");
+const timestampSafetyId = "019f0000-2222-7333-8444-555555555555";
+const validTimestamp = "2026-08-22T10:00:00.000Z";
+const validOffsetTimestamp = "2026-08-22T12:00:01+02:00";
+const unsafeTimestamp = '9999-08-22T10:00:01.000Z<img src=x onerror="alert(1)">';
+const timestampSafetySource = path.join(timestampSafetySessions, `rollout-2026-08-22T10-00-00-${timestampSafetyId}.jsonl`);
+const timestampSafetyEvents = [
+  { type: "session_meta", timestamp: validTimestamp, payload: { id: timestampSafetyId, cwd: "C:\\Projects\\timestamp-safety", timestamp: validTimestamp, source: "vscode", thread_source: "user" } },
+  { type: "response_item", timestamp: validOffsetTimestamp, payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "Valid offset timestamp." }] } },
+  { type: "response_item", timestamp: unsafeTimestamp, payload: { type: "message", role: "user", content: [{ type: "input_text", text: "# AGENTS.md instructions\n<environment_context>synthetic timestamp context</environment_context>" }], internal_chat_message_metadata_passthrough: { turn_id: "turn-timestamp-safety" } } },
+];
+await fs.mkdir(timestampSafetySessions, { recursive: true });
+const timestampSafetyRaw = Buffer.from(`${timestampSafetyEvents.map((item) => JSON.stringify(item)).join("\n")}\n`);
+await fs.writeFile(timestampSafetySource, timestampSafetyRaw);
+const timestampSafetyResult = await exportArchive({ codexHome: timestampSafetyHome, scope: "all", outputDirectory: timestampSafetyOutput, exportProfile: "readable" });
+const timestampSafetyManifest = JSON.parse(await fs.readFile(timestampSafetyResult.manifestPath, "utf8"));
+const timestampSafetySession = timestampSafetyManifest.sessions[0];
+const timestampSafetyMarkdown = await fs.readFile(path.join(timestampSafetyOutput, timestampSafetySession.markdown_file), "utf8");
+const timestampSafetyHtml = await fs.readFile(timestampSafetyResult.htmlIndexPath, "utf8");
+assert.equal(timestampSafetySession.started_at, validTimestamp, "manifest metadata must preserve valid source timestamps");
+assert.equal(timestampSafetySession.updated_at, unsafeTimestamp, "invalid source timestamps must remain unchanged in manifest metadata");
+assert.deepEqual(await fs.readFile(timestampSafetySource), timestampSafetyRaw, "timestamp display handling must not change canonical source JSONL bytes");
+assert.match(timestampSafetyMarkdown, new RegExp(validTimestamp.replaceAll(".", "\\.")), "valid ISO timestamps must remain visible without changes");
+assert.match(timestampSafetyMarkdown, new RegExp(validOffsetTimestamp.replaceAll("+", "\\+")), "valid ISO timestamps with offsets must remain visible without changes");
+assert.match(timestampSafetyMarkdown, /invalid timestamp/, "invalid timestamps must use a neutral Markdown placeholder");
+assert.doesNotMatch(timestampSafetyMarkdown, /<img src=x|onerror=/, "invalid timestamps must not inject HTML into Markdown reading views");
+assert.match(timestampSafetyHtml, /invalid timestamp/, "invalid timestamps must use a neutral HTML index placeholder");
+assert.doesNotMatch(timestampSafetyHtml, /<img src=x|onerror=/, "invalid timestamps must not reach HTML index markup or search data");
+
 for (const session of manifest.sessions) {
   assert.ok((await fs.stat(path.join(outputDir, session.markdown_file))).size > 0);
   assert.ok((await fs.stat(path.join(outputDir, session.raw_export_file))).size > 0);

@@ -1888,8 +1888,8 @@ async function writeMarkdownTranscript(meta, outputPath, rawRel, profiler = null
   writeLine(out, `- Project: ${meta.cwd || ""}`);
   writeLine(out, `- Storage: ${meta.storage || "active"}`);
   writeLine(out, `- Session ID: ${meta.id || ""}`);
-  writeLine(out, `- Started: ${meta.timestamp || ""}`);
-  writeLine(out, `- Updated: ${stats.updatedAt || ""}`);
+  writeLine(out, `- Started: ${formatDerivedTimestamp(meta.timestamp)}`);
+  writeLine(out, `- Updated: ${formatDerivedTimestamp(stats.updatedAt)}`);
   if (meta.model) writeLine(out, `- Model: ${meta.model}`);
   if (rawRel) writeLine(out, `- Raw JSONL: ${rawRel.replace(/\\/g, "/")}`);
   writeLine(out, "");
@@ -1914,7 +1914,7 @@ async function writeMarkdownTranscript(meta, outputPath, rawRel, profiler = null
       const classification = meta.eventAnalysis?.classifications?.get(recordNumber) || { kind: USER_RECORD_KIND.UNCLASSIFIED_USER_ROLE_RECORD, runtimeContextTypes: [] };
       if (classification.kind === USER_RECORD_KIND.DIRECT_USER_TURN) {
         stats.userMessages += 1;
-        writeLine(out, `## User${item.timestamp ? ` - ${item.timestamp}` : ""}`);
+        writeLine(out, `## User${formatDerivedTimestampSuffix(item.timestamp)}`);
         writeLine(out, "");
         writeLine(out, redactMarkdown ? redactSecrets(text) : text);
         writeLine(out, "");
@@ -1935,7 +1935,7 @@ async function writeMarkdownTranscript(meta, outputPath, rawRel, profiler = null
       const text = extractText(payload.content);
       if (!text.trim()) continue;
       stats.assistantMessages += 1;
-      writeLine(out, `## Assistant${item.timestamp ? ` - ${item.timestamp}` : ""}`);
+      writeLine(out, `## Assistant${formatDerivedTimestampSuffix(item.timestamp)}`);
       writeLine(out, "");
       writeLine(out, redactMarkdown ? redactSecrets(text) : text);
       writeLine(out, "");
@@ -1944,7 +1944,7 @@ async function writeMarkdownTranscript(meta, outputPath, rawRel, profiler = null
     if (["function_call", "custom_tool_call", "function_call_output", "custom_tool_call_output"].includes(payload.type)) {
       stats.toolEvents += 1;
       if (includeTools) {
-        writeLine(out, `## Tool ${payload.type}${payload.name ? ` - ${payload.name}` : ""}${item.timestamp ? ` - ${item.timestamp}` : ""}`);
+        writeLine(out, `## Tool ${payload.type}${payload.name ? ` - ${payload.name}` : ""}${formatDerivedTimestampSuffix(item.timestamp)}`);
         writeLine(out, "");
         const toolText = payload.arguments || payload.input || payload.output || JSON.stringify(payload, null, 2);
         const renderedToolText = redactMarkdown ? redactSecrets(String(toolText)) : String(toolText);
@@ -1973,7 +1973,7 @@ function writeClassifiedContext(stream, label, text, timestamp, redactMarkdown) 
   const rendered = redactMarkdown ? redactSecrets(text) : text;
   const fence = markdownFence(rendered);
   writeLine(stream, "<details>");
-  writeLine(stream, `<summary>${label}${timestamp ? ` - ${timestamp}` : ""}</summary>`);
+  writeLine(stream, `<summary>${label}${formatDerivedTimestampSuffix(timestamp)}</summary>`);
   writeLine(stream, "");
   writeLine(stream, `${fence}text`);
   writeLine(stream, rendered);
@@ -2027,7 +2027,7 @@ async function writeIndexFiles(dir, rows, profiler = null, context, sourceProtec
   let indexBytes = 0;
   if (exportFormats.markdown) {
     const md = ["# Codex Project Chat Export Index", "", `Generated: ${generatedAt}`, "", includeRawColumn ? "| Project | Title | Storage | Started | Markdown | Raw |" : "| Project | Title | Storage | Started | Markdown |", includeRawColumn ? "| --- | --- | --- | --- | --- | --- |" : "| --- | --- | --- | --- | --- |"];
-    for (const row of indexRows) md.push(includeRawColumn ? `| ${mdCell(row.project_name || row.project)} | ${mdCell(row.title || row.session_id)} | ${mdCell(row.storage)} | ${mdCell(row.started_at)} | ${mdLink(row.markdown_file)} | ${row.raw_export_file ? mdLink(row.raw_export_file) : ""} |` : `| ${mdCell(row.project_name || row.project)} | ${mdCell(row.title || row.session_id)} | ${mdCell(row.storage)} | ${mdCell(row.started_at)} | ${mdLink(row.markdown_file)} |`);
+    for (const row of indexRows) md.push(includeRawColumn ? `| ${mdCell(row.project_name || row.project)} | ${mdCell(row.title || row.session_id)} | ${mdCell(row.storage)} | ${mdCell(formatDerivedTimestamp(row.started_at))} | ${mdLink(row.markdown_file)} | ${row.raw_export_file ? mdLink(row.raw_export_file) : ""} |` : `| ${mdCell(row.project_name || row.project)} | ${mdCell(row.title || row.session_id)} | ${mdCell(row.storage)} | ${mdCell(formatDerivedTimestamp(row.started_at))} | ${mdLink(row.markdown_file)} |`);
     md.push("");
     const markdownIndex = `${md.join("\n")}\n`;
     await writeSeparatedOutputFile(path.join(dir, "index.md"), sourceProtection, (handle) => handle.writeFile(markdownIndex, "utf8"));
@@ -2542,6 +2542,16 @@ function printDiagnostics(parsedEntries, metas, locations, context) {
 }
 
 function writeLine(stream, text) { stream.write(`${text}\n`); }
+const DERIVED_ISO_TIMESTAMP_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/;
+function formatDerivedTimestamp(value) {
+  if (!value) return "";
+  const timestamp = String(value);
+  return DERIVED_ISO_TIMESTAMP_PATTERN.test(timestamp) && Number.isFinite(Date.parse(timestamp)) ? timestamp : "invalid timestamp";
+}
+function formatDerivedTimestampSuffix(value) {
+  const timestamp = formatDerivedTimestamp(value);
+  return timestamp ? ` - ${timestamp}` : "";
+}
 function mdCell(value) {
   return String(value ?? "")
     .replaceAll("\\", "\\\\")
@@ -2559,13 +2569,15 @@ function renderHtmlIndex(rows, generatedAt, options = {}) {
   const includeRawColumn = rows.some((row) => Boolean(row.raw_export_file));
   const includeMarkdownColumn = rows.some((row) => Boolean(row.markdown_file));
   const bodyRows = rows.map((row) => {
+    const startedAt = formatDerivedTimestamp(row.started_at);
+    const updatedAt = formatDerivedTimestamp(row.updated_at);
     const searchable = reducedMetadata
-      ? [row.project_name || row.project, row.storage, row.started_at, row.session_id].join(" ").toLowerCase()
-      : [row.project_name || row.project, row.title || row.session_id, row.storage, row.started_at, row.updated_at, row.model].join(" ").toLowerCase();
+      ? [row.project_name || row.project, row.storage, startedAt, row.session_id].join(" ").toLowerCase()
+      : [row.project_name || row.project, row.title || row.session_id, row.storage, startedAt, updatedAt, row.model].join(" ").toLowerCase();
     const rawCell = includeRawColumn ? `<td>${row.raw_export_file ? htmlLink(row.raw_export_file, path.posix.basename(toPosixPath(row.raw_export_file))) : ""}</td>` : "";
     const markdownCell = includeMarkdownColumn ? `<td>${row.markdown_file ? htmlLink(row.markdown_file, path.posix.basename(toPosixPath(row.markdown_file))) : ""}</td>` : "";
-    if (reducedMetadata) return `      <tr data-search="${htmlEscape(searchable)}"><td>${htmlEscape(row.project_name || row.project)}</td><td>${htmlEscape(row.storage || "active")}</td><td>${htmlEscape(row.started_at)}</td><td>${htmlEscape(row.session_id)}</td>${rawCell}</tr>`;
-    return `      <tr data-search="${htmlEscape(searchable)}"><td>${htmlEscape(row.project_name || row.project)}</td><td>${htmlEscape(row.title || row.session_id)}</td><td>${htmlEscape(row.storage || "active")}</td><td>${htmlEscape(row.started_at)}</td><td>${htmlEscape(row.model || "")}</td>${markdownCell}${rawCell}</tr>`;
+    if (reducedMetadata) return `      <tr data-search="${htmlEscape(searchable)}"><td>${htmlEscape(row.project_name || row.project)}</td><td>${htmlEscape(row.storage || "active")}</td><td>${htmlEscape(startedAt)}</td><td>${htmlEscape(row.session_id)}</td>${rawCell}</tr>`;
+    return `      <tr data-search="${htmlEscape(searchable)}"><td>${htmlEscape(row.project_name || row.project)}</td><td>${htmlEscape(row.title || row.session_id)}</td><td>${htmlEscape(row.storage || "active")}</td><td>${htmlEscape(startedAt)}</td><td>${htmlEscape(row.model || "")}</td>${markdownCell}${rawCell}</tr>`;
   }).join("\n");
   const filterPlaceholder = reducedMetadata ? "Project, storage, date, or session ID" : "Project, title, date, model, active or archived";
   const profileNote = reducedMetadata ? "\n  <p class=\"meta\">Source snapshots intentionally use a reduced index and do not inspect complete readable metadata.</p>" : "";

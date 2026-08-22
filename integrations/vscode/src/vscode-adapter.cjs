@@ -122,7 +122,7 @@ function createExtensionAdapter(vscode, injected = {}) {
         outputDirectory,
         exportProfile: configuredProfile,
         pathStyle: config.get("pathStyle", "short"),
-        includeTools: config.get("includeTools", false),
+        includeTools: getUserOnlyConfigValue("includeTools", false),
       };
       const codexHome = getUserOnlyConfigValue("codexHome", "");
       if (codexHome) {
