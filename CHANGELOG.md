@@ -13,7 +13,7 @@ All notable changes to this project are documented here.
 
 ### Changed
 
-- Classified direct user turns, subagent inputs, runtime contexts, and uncertain user-role records in derived reading views without changing canonical Raw events.
+- Markdown reading views now distinguish direct user turns, assistant responses, subagent inputs, automatic runtime contexts, and unclassified user-role records without changing canonical Raw events.
 - Improved Source snapshots performance while retaining export-time SHA-256 verification.
 - Replaced continuing Raw-integrity claims with time-specific verification metadata and documented mandatory rehashing before later use.
 - Aligned export, privacy, archive-format, and security documentation with the current unreleased branch.
@@ -50,7 +50,7 @@ Initial public release.
 - Project-level counts plus an individual `--list-sessions` view that distinguishes active and archived chats.
 - `--diagnose` output with active/archived scan paths, JSONL counts, incomplete metadata, invalid JSON lines, and ID mismatch warnings.
 - Readable Markdown transcripts.
-- Optional tool-call and tool-output inclusion.
+- Added optional inclusion of recorded tool-call inputs and outputs in Markdown transcripts.
 - Optional unchanged raw JSONL copies.
 - Filterable local HTML index, Markdown index, manifest, and summary file.
 - Fallback titles derived from the first user message when no indexed title exists.

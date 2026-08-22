@@ -21,6 +21,10 @@ The required invariants are:
 
 Reportable security issues include source overwrite/deletion, path traversal, source/output separation bypasses, symlink/junction/hardlink/alias attacks, race conditions or cross-run mixing, unauthorized network or workspace-trust bypasses, data exfiltration, telemetry or unexpected uploads, false integrity claims, command injection, and cleanup of foreign files. No accepted-risk exception applies without the repository owner's explicit approval.
 
+### Opening exported files and folders
+
+The VS Code extension stores the latest export paths for convenience. Immediately before opening a file or folder, it revalidates the local path, expected file type, canonical target, containment within the recorded export location, and filesystem identity. This reduces path-replacement and link-alias risks, but cannot eliminate changes made after the final check and before VS Code or the operating system processes the target.
+
 ## Redaction limits
 
 Markdown applies best-effort masking for some token shapes and long base64-like values. It can miss names, paths, addresses, customer data, source code, proprietary text, and credentials. Raw JSONL is byte-preserving and unredacted. Raw files and manifests are not share-safe.

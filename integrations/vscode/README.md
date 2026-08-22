@@ -19,62 +19,54 @@ The VS Code extension scans both active and archived Codex session stores. Expor
 
 ## Installation
 
-Build or obtain the current `.vsix` candidate, then install it locally in VS Code Desktop:
+The extension is currently distributed as a `.vsix` file and is not yet available in the VS Code Marketplace.
+
+1. Download [`codex-project-chat-exporter-vscode-0.1.3.vsix`](https://github.com/Ann-Diana/codex-project-chat-exporter/releases/download/v0.2.0/codex-project-chat-exporter-vscode-0.1.3.vsix) from the GitHub release.
+2. Open VS Code Desktop.
+3. Open the Extensions view with `Ctrl+Shift+X`.
+4. Select `…` in the upper-right corner.
+5. Choose **Install from VSIX…**.
+6. Select the downloaded file and reload VS Code if prompted.
+
+Alternatively, install it from a terminal:
 
 ```powershell
-code --install-extension "<absolute-vsix-path>" --force
+code --install-extension "C:\path\to\codex-project-chat-exporter-vscode-0.1.3.vsix"
 ```
-
-If `code` is not on PATH, use VS Code's Extensions view and choose `Install from VSIX...`.
 
 ## Commands
 
-- `Codex Export: Export…` – choose **Current Workspace** or **All Sessions**, then **Complete export**, **Readable export**, or **Source snapshots**.
+- `Codex Export: Export…` – choose **Current Workspace** or **All Sessions**, then select an export profile.
 - `Codex Export: Open Latest Export`
 - `Codex Export: Open Export Folder`
 
-The extension keeps the older direct-command IDs registered for compatibility, but they are not shown in the Command Palette. Use **Export…** for normal exports.
+## Export profiles
+
+- **Complete export** creates Markdown reading views, indexes, a manifest, and Raw snapshots verified at export time.
+- **Readable export** creates Markdown reading views, indexes, and a manifest without new Raw snapshots.
+- **Source snapshots** creates Raw snapshots verified at export time, a reduced HTML index, and a manifest without Markdown transcripts.
 
 ## Settings
 
-- `codexProjectChatExporter.outputDirectory`: absolute export folder in VS Code User settings. Workspace and Workspace Folder values are rejected. UNC and Windows device paths are rejected; mapped network drives cannot be identified portably and are not claimed to be detected. If empty, the extension asks on first export and remembers the selected folder.
-- `codexProjectChatExporter.codexHome`: optional absolute Codex home folder in VS Code User settings. Workspace and Workspace Folder values are rejected. Empty uses `CODEX_HOME` or the default local `.codex` folder.
-- **Export…** asks for one of three profiles on every run:
-  - **Complete** creates `raw/` checked at export time, Markdown transcripts, `index.html`, `index.md`, `manifest.json`, and `README.txt`.
-  - **Readable** creates Markdown transcripts, both indexes, `manifest.json`, and `README.txt` without new Raw snapshots.
-  - **Source snapshots** creates `raw/` checked at export time, a reduced `index.html`, `manifest.json`, and `README.txt` without Markdown transcripts or `index.md`.
-- `codexProjectChatExporter.pathStyle`: defaults to `short` (`md/` and compact filenames); `readable` uses `markdown/` and longer timestamp/title-based filenames.
-- `codexProjectChatExporter.includeTools`: defaults to `false`; include tool call input/output in Markdown. Tool data can be sensitive.
-- `codexProjectChatExporter.diagnosticOutput`: defaults to `false`; enable only for a troubleshooting run that needs message-free, path-redacted phase timing in the output channel. Short IDs, sizes, phases, status, and timing values remain visible. Normal exports show only a concise runtime summary.
+- **Output Directory** – local folder for generated exports. If empty, the extension asks on the first export.
+- **Codex Home** – optional location of the local Codex data. If empty, the extension uses `CODEX_HOME` or the default `.codex` folder.
+- **Path Style** – choose compact or longer readable filenames.
+- **Include Tools** – include recorded tool-call inputs and outputs in Markdown. This data can be sensitive.
+- **Diagnostic Output** – add redacted timing details to the output channel for troubleshooting.
 
-The normal output channel records complete output-directory, HTML-index, and manifest paths. Treat it as local operational output, not as a share-safe report.
+Output Directory and Codex Home must be local absolute paths and must be configured as User settings. Network, device, Workspace, and Workspace Folder paths are not supported.
 
 ## Privacy
 
-The extension works only in a trusted local desktop window. **Current Workspace** needs at least one local `file:` workspace folder; **All Sessions** can run without an open folder. Export and open commands are blocked while the current window is untrusted. The extension adds no telemetry or built-in upload and makes no application-level HTTP, web, or API calls. It stores the chosen output folder, latest HTML index path, canonical paths, and available file-system identities in VS Code global state only after a successful export.
+All processing stays on the machine running the extension. The extension adds no telemetry or built-in upload and works only in trusted local VS Code Desktop windows.
 
-Open commands re-check the stored local path, type, canonical location, containment, and file-system identity immediately before handing it to VS Code. A changed, linked, or unverifiable target is refused and requires a new export. This is a point-in-time check; the extension cannot promise that the operating system target remains unchanged after the final check and during the subsequent host handoff.
+Exports can contain sensitive chats, local paths, runtime contexts, tool output, and attachment data or references. Raw JSONL and `manifest.json` are not share-safe by default. The output channel also shows local export paths.
 
-The application-scoped `outputDirectory` and `codexHome` settings reject Workspace and Workspace Folder values at runtime. UNC and Windows device paths are rejected. Avoid mapped network drives because they cannot be identified reliably in every configuration without platform-specific dependencies.
-
-The adapter rejects a second simultaneous export command, and the shared core rejects concurrent exports to the same destination.
-
-Generated exports can contain sensitive chats, absolute local paths, runtime contexts, tool output, and attachment data or references. Raw JSONL and `manifest.json` are not share-safe by default.
-
-The extension delegates classification, masking, snapshot integrity, and manifest generation to the shared exporter core. See the [FAQ](https://github.com/Ann-Diana/codex-project-chat-exporter/blob/main/FAQ.md) and [archive format version 1 specification](https://github.com/Ann-Diana/codex-project-chat-exporter/blob/main/docs/archive-format-v1.md).
-
-For included Raw files, `raw_copy_status`, `raw_verified_at`, and `raw_sha256` record the export-time check. Raw files remain mutable; any later use or future importer must hash the current file again and reject a mismatch.
+Raw hashes verify snapshots at export time only. Raw files remain mutable and must be hashed again before any later integrity-sensitive use. See the [FAQ](https://github.com/Ann-Diana/codex-project-chat-exporter/blob/main/FAQ.md), [security policy](https://github.com/Ann-Diana/codex-project-chat-exporter/blob/main/SECURITY.md), and [archive format specification](https://github.com/Ann-Diana/codex-project-chat-exporter/blob/main/docs/archive-format-v1.md) for details.
 
 ## Tested configuration
 
-The experimental extension has been tested with:
-
-- Visual Studio Code Desktop
-- Windows
-- local `file:` workspaces
-- local Codex session data on disk
-
-Export and open commands reject vscode.dev, github.dev, Remote SSH, WSL workspaces, Dev Containers, and other remote or web Extension Hosts. Current Workspace also rejects virtual or non-`file:` workspaces. The adapter does not contain a separate operating-system gate, so other local VS Code Desktop platforms are unverified rather than explicitly rejected. JetBrains, Cursor, and Windsurf are outside this extension's host scope.
+Tested with Visual Studio Code Desktop on Windows, local `file:` workspaces, and local Codex session data. Remote and web Extension Hosts are not supported. Other local desktop platforms have not been verified.
 
 ## Uninstallation
 
@@ -92,4 +84,4 @@ node .\integrations\vscode\tests\extension-adapter.test.mjs
 node .\integrations\vscode\scripts\build-vsix.mjs
 ```
 
-The automated tests use synthetic temporary data only. Adapter tests prove delegation to the shared core but do not replace installing and exercising the packaged VSIX in a real Extension Host. Follow [`PACKAGED_TEST_PLAN.md`](PACKAGED_TEST_PLAN.md) for the packaged-candidate check.
+The automated tests use synthetic data. Before release, install the built VSIX in VS Code and follow [`PACKAGED_TEST_PLAN.md`](PACKAGED_TEST_PLAN.md).

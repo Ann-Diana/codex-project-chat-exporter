@@ -4,12 +4,13 @@
 
 Export local active and archived Codex sessions into a portable, project-aware export folder for review, preservation, migration preparation, or privacy-reviewed project handoff.
 
-[Codex 0.148.0](https://github.com/openai/codex/releases/tag/rust-v0.148.0) added [`/export`](https://github.com/openai/codex/pull/37358) for the current TUI conversation, to the clipboard or a Markdown file. Codex Project Chat Exporter serves a different workflow: it bulk-exports detected local sessions for one project/work folder or across all projects–including archived sessions–with a static index, manifest, optional Raw snapshots verified at export time, and an optional VS Code interface. Use `/export` for one current TUI conversation; use this project for a project-aware local collection or VS Code workflow.
+[Codex 0.148.0](https://github.com/openai/codex/releases/tag/rust-v0.148.0) added [`/export`](https://github.com/openai/codex/pull/37358) for exporting the current TUI conversation to the clipboard or a Markdown file. Codex Project Chat Exporter serves a different workflow: it bulk-exports detected local sessions, including archived sessions, for one project or workspace or across all projects. It creates a static index and manifest, with optional Raw snapshots verified at export time. Use `/export` for the current TUI conversation; use this project to build a project-aware local collection through the CLI or the optional VS Code extension.
+
+Core behavior:
 
 - Sessions are grouped by their stored project/work directory.
-- Three profiles cover complete exports, reading views without Raw, and source snapshots verified at export time without transcripts.
 - Session content is processed on the machine running the exporter. The exporter includes no telemetry or built-in upload.
-- It does not import sessions back into Codex.
+- Exports are one-way: sessions cannot be imported back into Codex.
 
 > Unofficial project. Not affiliated with, endorsed by, or supported by OpenAI.
 
@@ -18,10 +19,10 @@ Export local active and archived Codex sessions into a portable, project-aware e
 - Active sessions from `~/.codex/sessions`.
 - Archived sessions from `~/.codex/archived_sessions`.
 - All detected sessions or only one matching project/work folder.
-- Classified Markdown reading views for direct user turns, assistant responses, subagent inputs, runtime contexts, and uncertain user-role records.
+- Markdown reading views distinguish direct user turns, assistant responses, subagent inputs, automatic runtime contexts, and unclassified user-role records. Canonical Raw events remain unchanged.
 - A filterable local HTML index and a machine-readable manifest.
 - Optional byte-preserving raw JSONL snapshots with an export-time SHA-256 verification.
-- Optional tool-call input and output in Markdown.
+- Recorded tool-call inputs and outputs can optionally be included in Markdown transcripts.
 - Short Windows-friendly paths by default, with a readable-path option.
 
 Codex Project Chat Exporter reads the project association stored in each session's `cwd`; the original project folder does not need to remain present.
