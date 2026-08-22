@@ -11,6 +11,7 @@ const STATE_OUTPUT_DIR = "codexProjectChatExporter.outputDirectory";
 const STATE_LATEST_HTML = "codexProjectChatExporter.latestHtmlIndexPath";
 const STATE_OUTPUT_TARGET = "codexProjectChatExporter.outputDirectoryTarget";
 const STATE_LATEST_HTML_TARGET = "codexProjectChatExporter.latestHtmlIndexTarget";
+const INCOMPLETE_MARKER_NAME = "EXPORT_INCOMPLETE.txt";
 const COMMANDS = {
   exportMenu: "codexArchive.export",
   exportCurrentWorkspace: "codexArchive.exportCurrentWorkspace",
@@ -276,6 +277,7 @@ function createExtensionAdapter(vscode, injected = {}) {
 
   async function captureCompletedExportTargets(result) {
     const output = await inspectOpenTarget(result.outputDirectory, "directory");
+    await assertCompleteExportDirectory(output);
     const index = await inspectOpenTarget(result.htmlIndexPath, "file", output);
     return { index, output };
   }
@@ -284,12 +286,31 @@ function createExtensionAdapter(vscode, injected = {}) {
     try {
       const verifiedOutput = expectedOutput ? await verifyOpenTarget(expectedOutput) : null;
       const verified = await verifyOpenTarget(record, verifiedOutput);
+      await assertCompleteExportDirectory(verifiedOutput || (verified.kind === "directory" ? verified : null));
       await openFile(verified.path);
       return true;
     } catch (error) {
+      if (error?.code === "INCOMPLETE_EXPORT") {
+        vscode.window.showWarningMessage(`The saved Codex export is incomplete because ${INCOMPLETE_MARKER_NAME} is present. Use a new empty export folder, or manually inspect and remove the incomplete export before opening it.`);
+        return false;
+      }
       vscode.window.showWarningMessage(`The saved Codex export target cannot be opened safely because it changed after export. Run a new export before opening it. ${safeErrorMessage(error)}`);
       return false;
     }
+  }
+
+  async function assertCompleteExportDirectory(output) {
+    if (!output || output.kind !== "directory") throw new Error("Verified export directory data is unavailable");
+    const markerPath = deps.path.join(output.canonicalPath, INCOMPLETE_MARKER_NAME);
+    try {
+      await deps.fsp.lstat(markerPath);
+    } catch (error) {
+      if (error?.code === "ENOENT") return;
+      throw error;
+    }
+    const error = new Error(`${INCOMPLETE_MARKER_NAME} is present`);
+    error.code = "INCOMPLETE_EXPORT";
+    throw error;
   }
 
   function refuseStaleOpenTarget(label) {

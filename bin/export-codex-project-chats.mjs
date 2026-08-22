@@ -24,6 +24,8 @@ const RAW_COPY_STATUS = Object.freeze({
   VERIFIED_AT_EXPORT: "VERIFIED_AT_EXPORT",
   NOT_INCLUDED: "NOT_INCLUDED",
 });
+const INCOMPLETE_MARKER_NAME = "EXPORT_INCOMPLETE.txt";
+const GENERATION_ROOT_FILES = Object.freeze(["manifest.json", "README.txt", "index.html", "index.md"]);
 const FUTURE_EXPORT_FORMATS = Object.freeze({ docx: false, pdf: false, attachments: false });
 const MIRRORED_USER_EVENT_MAX_DELAY_MS = 100;
 const USER_RECORD_KIND = Object.freeze({
@@ -103,6 +105,10 @@ function formatErrorWithHints(error) {
     lines.push("- The output folder is on a restricted or unreliable location.");
     lines.push("- Windows path length or security software interfered with file creation.");
     lines.push("- Try a short output path such as C:\\cx\\codex-export.");
+    lines.push("");
+  } else if (error?.code === "INCOMPLETE_EXPORT_EXISTS") {
+    lines.push("The output folder contains EXPORT_INCOMPLETE.txt and cannot be reused automatically.");
+    lines.push("Use a new empty output folder, or manually inspect and remove the incomplete export before retrying.");
     lines.push("");
   }
   lines.push("See FAQ.md in the tool folder for common fixes.");
@@ -400,15 +406,29 @@ async function runCommandInternal(context, { print, profiler, runState }) {
   await ensureSeparatedOutputDirectory(outputDir, sourceProtection);
   const exportLock = await acquireExportLock(outputDir, sourceProtection);
   try {
+  const projectDirs = new Map();
+  const tasks = selected.map((meta, selectedIndex) => {
+    const projectDir = pathStyle === "readable" ? readableProjectDir(projectDirs, meta.cwd) : shortProjectDir(projectDirs, meta.cwd);
+    const sessionCode = `s${String(selectedIndex + 1).padStart(4, "0")}`;
+    const sourceOriginalFilename = path.basename(meta.file);
+    const rawExportName = pathStyle === "readable" ? `${sessionCode}-${sourceOriginalFilename}` : `${sessionCode}.jsonl`;
+    const rawRel = path.join("raw", projectDir, rawExportName);
+    return { meta, projectDir, sessionCode, sourceOriginalFilename, rawExportName, rawRel, snapshot: null, parsedSnapshotMeta: null, metadataAlreadyParsed: needsCompleteInventory };
+  });
+  const plannedPaths = ["manifest.json", "README.txt"];
+  if (exportFormats.html) plannedPaths.push("index.html");
+  if (exportFormats.markdown) plannedPaths.push("index.md");
+  if (copyRaw) plannedPaths.push(...tasks.map((task) => task.rawRel));
+  const generation = await beginExportGeneration(outputDir, sourceProtection, { plannedPaths });
+
   if (exportFormats.markdown) await ensureSeparatedOutputDirectory(path.join(outputDir, markdownDirName), sourceProtection);
   if (copyRaw) await ensureSeparatedOutputDirectory(path.join(outputDir, "raw"), sourceProtection);
 
-  const projectDirs = new Map();
-  const tasks = [];
   const snapshotsStartedAt = performance.now();
   if (copyRaw) progressReporter({ phase: "snapshot", message: "Verifying source snapshots" });
-  for (let selectedIndex = 0; selectedIndex < selected.length; selectedIndex += 1) {
-    const meta = selected[selectedIndex];
+  for (let selectedIndex = 0; selectedIndex < tasks.length; selectedIndex += 1) {
+    const task = tasks[selectedIndex];
+    const { meta, projectDir, sessionCode, sourceOriginalFilename, rawExportName, rawRel } = task;
     const sessionStartedAt = performance.now();
     const diagnosticContext = {
       ordinal: selectedIndex + 1,
@@ -425,11 +445,6 @@ async function runCommandInternal(context, { print, profiler, runState }) {
       total: selected.length,
       sessionId: shortenSessionId(meta.id || meta.session_id || ""),
     });
-    const projectDir = pathStyle === "readable" ? readableProjectDir(projectDirs, meta.cwd) : shortProjectDir(projectDirs, meta.cwd);
-    const sessionCode = `s${String(selectedIndex + 1).padStart(4, "0")}`;
-    const sourceOriginalFilename = path.basename(meta.file);
-    const rawExportName = pathStyle === "readable" ? `${sessionCode}-${sourceOriginalFilename}` : `${sessionCode}.jsonl`;
-    const rawRel = path.join("raw", projectDir, rawExportName);
     let snapshot = null;
     if (copyRaw) {
       await ensureSeparatedOutputDirectory(path.join(outputDir, "raw", projectDir), sourceProtection);
@@ -461,19 +476,11 @@ async function runCommandInternal(context, { print, profiler, runState }) {
         diagnosticContext,
         routingSnapshot: meta.routingSnapshot,
         verifyPublishedSnapshot,
+        generation,
       });
     }
-    tasks.push({
-      meta,
-      projectDir,
-      sessionCode,
-      sourceOriginalFilename,
-      rawExportName,
-      rawRel,
-      snapshot,
-      parsedSnapshotMeta: snapshot?.verificationValue || null,
-      metadataAlreadyParsed: needsCompleteInventory,
-    });
+    task.snapshot = snapshot;
+    task.parsedSnapshotMeta = snapshot?.verificationValue || null;
     diagnosticReporter("session_end", { ...diagnosticContext, duration_ms: roundMs(performance.now() - sessionStartedAt), snapshot_attempts: snapshot?.attempts || 0 });
   }
   runtimeTimings.snapshots_ms = roundMs(performance.now() - snapshotsStartedAt);
@@ -481,24 +488,36 @@ async function runCommandInternal(context, { print, profiler, runState }) {
   if (exportFormats.markdown) progressReporter({ phase: "rendering", message: "Rendering reading views" });
   const processingStartedAt = performance.now();
   const rows = [];
-  for (const task of tasks) rows.push(await processExportTask(task, titleIndex, profiler, context, sourceProtection));
+  for (const task of tasks) rows.push(await processExportTask(task, titleIndex, profiler, context, sourceProtection, generation));
   runtimeTimings.processing_ms = roundMs(performance.now() - processingStartedAt);
 
   progressReporter({ phase: "writing", message: "Writing indexes and manifest" });
   const indexesManifestStartedAt = performance.now();
   diagnosticReporter("indexes_and_manifest_start");
-  await writeIndexFiles(outputDir, rows, profiler, context, sourceProtection);
-  diagnosticReporter("indexes_and_manifest_end");
+  const manifest = await writeIndexFiles(outputDir, rows, profiler, context, sourceProtection, generation);
   const summaryStart = performance.now();
   diagnosticReporter("summary_start");
-  await writeSummary(outputDir, rows, context, sourceProtection);
+  await writeSummary(outputDir, rows, context, sourceProtection, generation);
   profiler?.addPhase("other", performance.now() - summaryStart, 0, (await fsp.stat(path.join(outputDir, "README.txt"))).size);
   diagnosticReporter("summary_end", { duration_ms: roundMs(performance.now() - summaryStart) });
-  runtimeTimings.indexes_manifest_ms = roundMs(performance.now() - indexesManifestStartedAt);
-  const verificationStartedAt = performance.now();
+  await removeStalePreviousGenerationFiles(generation);
+  let verificationElapsedMs = 0;
+  const contentVerificationStartedAt = performance.now();
   diagnosticReporter("verification_start", { sessions: rows.length });
-  await verifyExport(outputDir, rows, profiler, context);
-  runtimeTimings.verification_ms = roundMs(performance.now() - verificationStartedAt);
+  await verifyExport(outputDir, rows, profiler, context, { includeManifest: false });
+  verificationElapsedMs += performance.now() - contentVerificationStartedAt;
+  const manifestStart = performance.now();
+  diagnosticReporter("manifest_start", { sessions: rows.length });
+  await writeSeparatedOutputFile(path.join(outputDir, "manifest.json"), sourceProtection, (handle) => handle.writeFile(manifest, "utf8"), generation);
+  profiler?.addPhase("manifest", performance.now() - manifestStart, 0, Buffer.byteLength(manifest));
+  diagnosticReporter("manifest_end", { duration_ms: roundMs(performance.now() - manifestStart), bytes_written: Buffer.byteLength(manifest) });
+  diagnosticReporter("indexes_and_manifest_end");
+  runtimeTimings.indexes_manifest_ms = roundMs(performance.now() - indexesManifestStartedAt);
+  const finalVerificationStartedAt = performance.now();
+  await verifyExport(outputDir, rows, profiler, context, { includeManifest: true, expectedManifest: manifest });
+  await completeExportGeneration(generation);
+  verificationElapsedMs += performance.now() - finalVerificationStartedAt;
+  runtimeTimings.verification_ms = roundMs(verificationElapsedMs);
   diagnosticReporter("verification_end", { duration_ms: runtimeTimings.verification_ms, sessions: rows.length });
   progressReporter({ phase: "complete", message: "Export complete" });
   diagnosticReporter("core_end", { duration_ms: roundMs(performance.now() - coreStartedAt), exported_sessions: rows.length });
@@ -712,7 +731,7 @@ async function readSessionMeta(file, { fallbackSessionId = "", fallbackTimestamp
   return meta;
 }
 
-async function processExportTask(task, titleIndex, profiler, context, sourceProtection) {
+async function processExportTask(task, titleIndex, profiler, context, sourceProtection, generation) {
   const { exportFormats, copyRaw, outputDir, redactMarkdown, pathStyle, markdownDirName } = context;
   const { meta, projectDir, sessionCode, sourceOriginalFilename, rawExportName, rawRel, snapshot, parsedSnapshotMeta, metadataAlreadyParsed } = task;
   let renderMeta = meta;
@@ -755,7 +774,7 @@ async function processExportTask(task, titleIndex, profiler, context, sourceProt
     markdownRel = path.join(markdownDirName, projectDir, `${baseName}.md`);
     await ensureSeparatedOutputDirectory(path.join(outputDir, markdownDirName, projectDir), sourceProtection);
     profiler?.recordAttachments(renderMeta.attachmentMetrics);
-    stats = await writeMarkdownTranscript(renderMeta, path.join(outputDir, markdownRel), copyRaw ? rawRel : "", profiler, meta, context, sourceProtection);
+    stats = await writeMarkdownTranscript(renderMeta, path.join(outputDir, markdownRel), copyRaw ? rawRel : "", profiler, meta, context, sourceProtection, generation);
   } else {
     const title = neutralSessionTitle(meta);
     renderMeta = { ...meta, title, displayTitle: title, titleSource: "neutral_unclassified_snapshot", indexedTitleStatus: "NOT_EVALUATED", sessionKind: SESSION_KIND.UNKNOWN };
@@ -1235,6 +1254,7 @@ async function copyStableRawSnapshot(sourcePath, destinationPath, options = {}) 
   const diagnosticContext = options.diagnosticContext || {};
   const sourceIdentity = await inspectSeparatedPath(sourcePath, { io, requireRegularFile: true, requireReliableIdentity: true });
   await assertSnapshotDestinationSeparated(sourceIdentity, destinationPath, io);
+  if (options.generation) await assertGenerationDestinationWritable(destinationPath, options.generation);
   await fsp.mkdir(path.dirname(destinationPath), { recursive: true });
   let lastReason = "source changed during export";
   let routingSnapshotReusable = isStableRoutingSnapshot(options.routingSnapshot);
@@ -1543,7 +1563,8 @@ function assertSeparatedFromSources(candidate, sourceProtection, options = {}) {
   }
 }
 
-async function writeSeparatedOutputFile(destinationPath, sourceProtection, writer) {
+async function writeSeparatedOutputFile(destinationPath, sourceProtection, writer, generation = null) {
+  if (generation) await assertGenerationDestinationWritable(destinationPath, generation);
   const destinationBefore = await assertSeparatedOutputPath(destinationPath, sourceProtection, { allowMissing: true, requireRegularFile: true, requireReliableIdentity: true });
   const temporaryPath = `${destinationPath}.partial-${process.pid}-${randomUUID()}`;
   await assertSeparatedOutputPath(temporaryPath, sourceProtection, { allowMissing: true });
@@ -1744,6 +1765,197 @@ function reliableFileIdentity(stat) {
   return `${stat.dev}:${stat.ino}`;
 }
 
+async function beginExportGeneration(outputRoot, sourceProtection, options = {}) {
+  const root = path.resolve(outputRoot);
+  const markerPath = path.join(root, INCOMPLETE_MARKER_NAME);
+  const existingMarker = await fsp.lstat(markerPath).then(() => true, (error) => {
+    if (error?.code === "ENOENT") return false;
+    throw error;
+  });
+  if (existingMarker) {
+    throw new ExportError("INCOMPLETE_EXPORT_EXISTS", `The output folder already contains ${INCOMPLETE_MARKER_NAME}. Use a new empty output folder, or manually inspect and remove the incomplete export.`);
+  }
+  const markerCandidate = await assertSeparatedOutputPath(markerPath, sourceProtection, { allowMissing: true, requireRegularFile: true, requireReliableIdentity: true });
+  if (markerCandidate.exists) {
+    throw new ExportError("INCOMPLETE_EXPORT_EXISTS", `The output folder already contains ${INCOMPLETE_MARKER_NAME}. Use a new empty output folder, or manually inspect and remove the incomplete export.`);
+  }
+
+  const previous = await inspectPreviousExportGeneration(root, sourceProtection);
+  const generation = {
+    root,
+    sourceProtection,
+    marker: null,
+    authorizedPreviousPaths: previous.authorizedPaths,
+    previousExistingFiles: previous.existingFiles,
+    currentPaths: new Set(),
+  };
+  for (const candidate of options.plannedPaths || []) await assertGenerationDestinationWritable(candidate, generation);
+
+  const temporaryPath = `${markerPath}.partial-${process.pid}-${randomUUID()}`;
+  await assertSeparatedOutputPath(temporaryPath, sourceProtection, { allowMissing: true });
+  let handle;
+  let temporaryOwned = null;
+  let markerPublished = false;
+  try {
+    handle = await fsp.open(temporaryPath, "wx");
+    const openedStat = await handle.stat({ bigint: true });
+    const openedIdentity = reliableFileIdentity(openedStat);
+    if (!openedStat.isFile() || !openedIdentity) throw new ExportError("UNSAFE_EXPORT_PATH", `Reliable file identity is unavailable for ${INCOMPLETE_MARKER_NAME}`);
+    temporaryOwned = { path: temporaryPath, identity: { identity: openedIdentity } };
+    await handle.writeFile([
+      "Codex Project Chat Export",
+      "Status: INCOMPLETE",
+      "",
+      "This export generation did not complete successfully.",
+      "Do not use manifest.json, index.html, or index.md while this marker exists.",
+      "Use a new empty output folder, or manually inspect and remove this incomplete export.",
+      "",
+    ].join("\n"), "utf8");
+    await handle.sync();
+    const writtenStat = await handle.stat({ bigint: true });
+    if (reliableFileIdentity(writtenStat) !== openedIdentity) throw new ExportError("UNSAFE_EXPORT_PATH", `The ${INCOMPLETE_MARKER_NAME} identity changed while it was written`);
+    await handle.close();
+    handle = null;
+    const temporary = await assertSeparatedOutputPath(temporaryPath, sourceProtection, { requireRegularFile: true, requireReliableIdentity: true });
+    if (temporary.identity !== openedIdentity) throw new ExportError("UNSAFE_EXPORT_PATH", `The temporary ${INCOMPLETE_MARKER_NAME} was replaced before publication`);
+    temporaryOwned = { path: temporaryPath, identity: temporary };
+    await fsp.link(temporaryPath, markerPath);
+    markerPublished = true;
+    const published = await assertSeparatedOutputPath(markerPath, sourceProtection, { requireRegularFile: true, requireReliableIdentity: true });
+    if (published.identity !== openedIdentity) throw new ExportError("UNSAFE_EXPORT_PATH", `The published ${INCOMPLETE_MARKER_NAME} does not match the run-owned marker`);
+    await removeOwnedTemporary(temporaryOwned, { lstat: fsp.lstat, realpath: fsp.realpath, rm: fsp.rm, stat: fsp.stat });
+    temporaryOwned = null;
+    generation.marker = { path: markerPath, identity: published };
+    return generation;
+  } catch (error) {
+    await handle?.close().catch(() => {});
+    if (temporaryOwned) await removeOwnedTemporary(temporaryOwned, { lstat: fsp.lstat, realpath: fsp.realpath, rm: fsp.rm, stat: fsp.stat });
+    if (error?.code === "EEXIST") throw new ExportError("INCOMPLETE_EXPORT_EXISTS", `The output folder already contains ${INCOMPLETE_MARKER_NAME}. Use a new empty output folder, or manually inspect and remove the incomplete export.`);
+    if (markerPublished) throw new ExportError(error?.code || "EXPORT_MARKER_FAILED", `${error?.message || error}. ${INCOMPLETE_MARKER_NAME} remains present and the export is incomplete.`);
+    throw error;
+  }
+}
+
+async function inspectPreviousExportGeneration(outputRoot, sourceProtection) {
+  const manifestPath = path.join(outputRoot, "manifest.json");
+  const manifestBefore = await assertSeparatedOutputPath(manifestPath, sourceProtection, { allowMissing: true, requireRegularFile: true, requireReliableIdentity: true });
+  if (!manifestBefore.exists) {
+    for (const name of GENERATION_ROOT_FILES.filter((value) => value !== "manifest.json")) {
+      const candidate = await assertSeparatedOutputPath(path.join(outputRoot, name), sourceProtection, { allowMissing: true, requireRegularFile: true, requireReliableIdentity: true });
+      if (candidate.exists) throw new ExportError("UNOWNED_EXPORT_FILE", `Refusing to overwrite ${name} because no valid previous manifest assigns it to an exporter generation`);
+    }
+    return { authorizedPaths: new Set(), existingFiles: new Map() };
+  }
+
+  let manifest;
+  try {
+    manifest = JSON.parse(await fsp.readFile(manifestPath, "utf8"));
+  } catch (error) {
+    throw new ExportError("INVALID_PREVIOUS_MANIFEST", `The previous manifest is not valid JSON: ${error?.message || error}`);
+  }
+  const manifestAfter = await assertSeparatedOutputPath(manifestPath, sourceProtection, { requireRegularFile: true, requireReliableIdentity: true });
+  if (!sameReliableFileIdentity(manifestBefore, manifestAfter) || manifestBefore.stat.size !== manifestAfter.stat.size || manifestBefore.stat.mtimeMs !== manifestAfter.stat.mtimeMs) {
+    throw new ExportError("INVALID_PREVIOUS_MANIFEST", "The previous manifest changed while it was being validated");
+  }
+
+  const authorizedPaths = collectPreviousGenerationPaths(manifest);
+  const existingFiles = new Map();
+  for (const relativePath of authorizedPaths.values()) {
+    const absolutePath = generationAbsolutePath(outputRoot, relativePath);
+    const candidate = await assertSeparatedOutputPath(absolutePath, sourceProtection, { allowMissing: true, requireRegularFile: true, requireReliableIdentity: true });
+    if (candidate.exists) existingFiles.set(generationPathKey(relativePath), { path: absolutePath, identity: candidate });
+  }
+  for (const name of GENERATION_ROOT_FILES) {
+    const candidate = await assertSeparatedOutputPath(path.join(outputRoot, name), sourceProtection, { allowMissing: true, requireRegularFile: true, requireReliableIdentity: true });
+    if (candidate.exists && !authorizedPaths.has(generationPathKey(name))) {
+      throw new ExportError("UNOWNED_EXPORT_FILE", `Refusing to overwrite ${name} because the previous manifest does not assign it to the exporter generation`);
+    }
+  }
+  return { authorizedPaths, existingFiles };
+}
+
+function collectPreviousGenerationPaths(manifest) {
+  if (!manifest || manifest.archive_format_version !== ARCHIVE_FORMAT_VERSION || !Array.isArray(manifest.sessions) || !manifest.formats || typeof manifest.formats !== "object") {
+    throw new ExportError("INVALID_PREVIOUS_MANIFEST", "The previous manifest does not match archive format version 1");
+  }
+  const authorized = new Map();
+  addAuthorizedGenerationPath(authorized, "manifest.json", "root");
+  addAuthorizedGenerationPath(authorized, "README.txt", "root");
+  if (manifest.formats.html === true) addAuthorizedGenerationPath(authorized, "index.html", "root");
+  if (manifest.formats.markdown === true) addAuthorizedGenerationPath(authorized, "index.md", "root");
+  for (const session of manifest.sessions) {
+    if (!session || typeof session !== "object") throw new ExportError("INVALID_PREVIOUS_MANIFEST", "The previous manifest contains an invalid session record");
+    if (session.raw_export_file) addAuthorizedGenerationPath(authorized, session.raw_export_file, "raw");
+    if (session.markdown_file) addAuthorizedGenerationPath(authorized, session.markdown_file, "markdown");
+  }
+  return authorized;
+}
+
+function addAuthorizedGenerationPath(authorized, value, kind) {
+  const relativePath = validatedGenerationRelativePath(value, kind);
+  const key = generationPathKey(relativePath);
+  if (authorized.has(key)) throw new ExportError("INVALID_PREVIOUS_MANIFEST", `The previous manifest assigns the same export path more than once: ${relativePath}`);
+  authorized.set(key, relativePath);
+}
+
+function validatedGenerationRelativePath(value, kind = "any") {
+  if (typeof value !== "string" || !value || value.includes("\0") || path.win32.isAbsolute(value) || path.posix.isAbsolute(value)) {
+    throw new ExportError("INVALID_PREVIOUS_MANIFEST", "The previous manifest contains an absolute or invalid export path");
+  }
+  const portable = value.replaceAll("\\", "/");
+  const segments = portable.split("/");
+  if (segments.some((segment) => !segment || segment === "." || segment === ".." || segment.includes(":"))) {
+    throw new ExportError("INVALID_PREVIOUS_MANIFEST", `The previous manifest contains a non-canonical export path: ${portable}`);
+  }
+  const normalized = segments.join("/");
+  const validRoot = GENERATION_ROOT_FILES.includes(normalized);
+  const validRaw = normalized.startsWith("raw/") && normalized.toLowerCase().endsWith(".jsonl");
+  const validMarkdown = (normalized.startsWith("md/") || normalized.startsWith("markdown/")) && normalized.toLowerCase().endsWith(".md");
+  if ((kind === "root" && !validRoot) || (kind === "raw" && !validRaw) || (kind === "markdown" && !validMarkdown) || (kind === "any" && !validRoot && !validRaw && !validMarkdown)) {
+    throw new ExportError("INVALID_PREVIOUS_MANIFEST", `The previous manifest contains an unexpected export path: ${normalized}`);
+  }
+  return normalized;
+}
+
+function generationPathKey(value) {
+  const normalized = String(value).replaceAll("\\", "/");
+  return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+}
+
+function generationAbsolutePath(outputRoot, relativePath) {
+  const validated = validatedGenerationRelativePath(relativePath);
+  const absolutePath = path.resolve(outputRoot, ...validated.split("/"));
+  if (!isPathInside(absolutePath, outputRoot) || sameCanonicalPath(absolutePath, outputRoot)) throw new ExportError("INVALID_PREVIOUS_MANIFEST", `Export path escapes the output folder: ${validated}`);
+  return absolutePath;
+}
+
+async function assertGenerationDestinationWritable(candidatePath, generation) {
+  const absolutePath = path.isAbsolute(candidatePath) ? path.resolve(candidatePath) : generationAbsolutePath(generation.root, candidatePath);
+  if (!isPathInside(absolutePath, generation.root) || sameCanonicalPath(absolutePath, generation.root)) throw new ExportError("UNSAFE_EXPORT_PATH", "Export generation path is outside the output folder");
+  const relativePath = validatedGenerationRelativePath(path.relative(generation.root, absolutePath));
+  const key = generationPathKey(relativePath);
+  const candidate = await inspectSeparatedPath(absolutePath, { allowMissing: true, requireRegularFile: true, requireReliableIdentity: true });
+  assertSeparatedFromSources(candidate, generation.sourceProtection);
+  if (candidate.exists && !generation.authorizedPreviousPaths.has(key)) {
+    throw new ExportError("UNOWNED_EXPORT_FILE", `Refusing to overwrite ${relativePath} because it is not assigned to the previous exporter generation`);
+  }
+  generation.currentPaths.add(key);
+  return candidate;
+}
+
+async function removeStalePreviousGenerationFiles(generation) {
+  for (const [key, owned] of generation.previousExistingFiles) {
+    if (generation.currentPaths.has(key)) continue;
+    await removeOwnedTemporary(owned, { lstat: fsp.lstat, realpath: fsp.realpath, rm: fsp.rm, stat: fsp.stat });
+  }
+}
+
+async function completeExportGeneration(generation) {
+  if (!generation?.marker) throw new ExportError("EXPORT_VERIFICATION_FAILED", "The export generation has no verified incomplete marker");
+  await removeOwnedTemporary(generation.marker, { lstat: fsp.lstat, realpath: fsp.realpath, rm: fsp.rm, stat: fsp.stat });
+  generation.marker = null;
+}
+
 function sameReliableFileIdentity(left, right) {
   return Boolean(left?.identity && right?.identity && left.identity === right.identity);
 }
@@ -1876,7 +2088,7 @@ function readableProjectDir(projectDirs, cwd) {
   return projectDirs.get(key);
 }
 
-async function writeMarkdownTranscript(meta, outputPath, rawRel, profiler = null, profileSession = meta, context, sourceProtection) {
+async function writeMarkdownTranscript(meta, outputPath, rawRel, profiler = null, profileSession = meta, context, sourceProtection, generation) {
   const { redactMarkdown, includeTools } = context;
   const renderStart = performance.now();
   let writeStart = renderStart;
@@ -1961,7 +2173,7 @@ async function writeMarkdownTranscript(meta, outputPath, rawRel, profiler = null
   profiler?.recordSession(profileSession, "markdown_render_ms", renderMs, meta.fileSize || 0, 0);
   writeStart = performance.now();
   await new Promise((resolve, reject) => { out.end(resolve); out.on("error", reject); });
-  });
+  }, generation);
   const writeMs = performance.now() - writeStart;
   const outputSize = (await fsp.stat(outputPath)).size;
   profiler?.addPhase("markdown_writing", writeMs, 0, outputSize);
@@ -2017,7 +2229,7 @@ function redactSecrets(text) {
   return result;
 }
 
-async function writeIndexFiles(dir, rows, profiler = null, context, sourceProtection) {
+async function writeIndexFiles(dir, rows, profiler = null, context, sourceProtection, generation) {
   const { diagnosticReporter, exportFormats, exportProfile, copyRaw, codexHome, sessionsDir, includeArchived, archivedSessionsDir, sessionIndexPath, pathStyle } = context;
   const generatedAt = new Date().toISOString();
   const indexRows = [...rows].sort((a, b) => (b.updated_at || b.started_at || "").localeCompare(a.updated_at || a.started_at || ""));
@@ -2030,22 +2242,18 @@ async function writeIndexFiles(dir, rows, profiler = null, context, sourceProtec
     for (const row of indexRows) md.push(includeRawColumn ? `| ${mdCell(row.project_name || row.project)} | ${mdCell(row.title || row.session_id)} | ${mdCell(row.storage)} | ${mdCell(formatDerivedTimestamp(row.started_at))} | ${mdLink(row.markdown_file)} | ${row.raw_export_file ? mdLink(row.raw_export_file) : ""} |` : `| ${mdCell(row.project_name || row.project)} | ${mdCell(row.title || row.session_id)} | ${mdCell(row.storage)} | ${mdCell(formatDerivedTimestamp(row.started_at))} | ${mdLink(row.markdown_file)} |`);
     md.push("");
     const markdownIndex = `${md.join("\n")}\n`;
-    await writeSeparatedOutputFile(path.join(dir, "index.md"), sourceProtection, (handle) => handle.writeFile(markdownIndex, "utf8"));
+    await writeSeparatedOutputFile(path.join(dir, "index.md"), sourceProtection, (handle) => handle.writeFile(markdownIndex, "utf8"), generation);
     indexBytes += Buffer.byteLength(markdownIndex);
   }
   if (exportFormats.html) {
     const htmlIndex = renderHtmlIndex(indexRows, generatedAt, { reducedMetadata: exportProfile === EXPORT_PROFILE.SOURCE_SNAPSHOTS });
-    await writeSeparatedOutputFile(path.join(dir, "index.html"), sourceProtection, (handle) => handle.writeFile(htmlIndex, "utf8"));
+    await writeSeparatedOutputFile(path.join(dir, "index.html"), sourceProtection, (handle) => handle.writeFile(htmlIndex, "utf8"), generation);
     indexBytes += Buffer.byteLength(htmlIndex);
   }
   profiler?.addPhase("indexes", performance.now() - indexStart, 0, indexBytes);
   diagnosticReporter("index_end", { duration_ms: roundMs(performance.now() - indexStart), bytes_written: indexBytes });
   const manifest = `${JSON.stringify({ archive_format_version: ARCHIVE_FORMAT_VERSION, canonical_representation: "raw_jsonl", canonical_representation_included: copyRaw, export_profile: exportProfile, formats: exportFormats, generated_at: generatedAt, codex_home: codexHome, sessions_dir: sessionsDir, archived_sessions_dir: includeArchived ? archivedSessionsDir : "", session_index: sessionIndexPath, path_style: pathStyle, sessions: rows }, null, 2)}\n`;
-  const manifestStart = performance.now();
-  diagnosticReporter("manifest_start", { sessions: rows.length });
-  await writeSeparatedOutputFile(path.join(dir, "manifest.json"), sourceProtection, (handle) => handle.writeFile(manifest, "utf8"));
-  profiler?.addPhase("manifest", performance.now() - manifestStart, 0, Buffer.byteLength(manifest));
-  diagnosticReporter("manifest_end", { duration_ms: roundMs(performance.now() - manifestStart), bytes_written: Buffer.byteLength(manifest) });
+  return manifest;
 }
 
 function createAttachmentMetrics() {
@@ -2357,7 +2565,7 @@ function roundMs(value) {
   return Math.round(Number(value || 0) * 1000) / 1000;
 }
 
-async function writeSummary(dir, rows, context, sourceProtection) {
+async function writeSummary(dir, rows, context, sourceProtection, generation) {
   const { codexHome, sessionsDir, includeArchived, archivedSessionsDir, exportProfile, pathStyle, exportFormats, markdownDirName, copyRaw } = context;
   const projects = new Map();
   for (const row of rows) projects.set(row.project || "unknown", (projects.get(row.project || "unknown") || 0) + 1);
@@ -2372,12 +2580,13 @@ async function writeSummary(dir, rows, context, sourceProtection) {
   if (exportFormats.html && exportProfile === EXPORT_PROFILE.SOURCE_SNAPSHOTS) lines.push("- index.html uses only project, storage, start time, session ID, and Raw links because this profile intentionally skips complete readable metadata.");
   else if (exportFormats.html) lines.push("- index.html can be filtered by project, title, date, model, or storage location.");
   lines.push("- Absolute source paths are local metadata and must be omitted from any share-safe derivative.");
-  await writeSeparatedOutputFile(path.join(dir, "README.txt"), sourceProtection, (handle) => handle.writeFile(`${lines.join("\n")}\n`, "utf8"));
+  await writeSeparatedOutputFile(path.join(dir, "README.txt"), sourceProtection, (handle) => handle.writeFile(`${lines.join("\n")}\n`, "utf8"), generation);
 }
 
-async function verifyExport(dir, rows, profiler = null, context) {
+async function verifyExport(dir, rows, profiler = null, context, options = {}) {
   const { exportFormats } = context;
-  const required = ["manifest.json", "README.txt"];
+  const required = ["README.txt"];
+  if (options.includeManifest) required.push("manifest.json");
   if (exportFormats.html) required.push("index.html");
   if (exportFormats.markdown) required.push("index.md");
   for (const name of required) {
@@ -2400,6 +2609,10 @@ async function verifyExport(dir, rows, profiler = null, context) {
       if (!row.source_original_filename || path.basename(row.source_relative_path) !== row.source_original_filename) throw new ExportError("EXPORT_VERIFICATION_FAILED", `Original source filename metadata is invalid: ${row.raw_export_file}`);
       if (row.source_snapshot_before_size_bytes !== row.source_snapshot_after_size_bytes || row.source_snapshot_before_mtime_ms !== row.source_snapshot_after_mtime_ms) throw new ExportError("EXPORT_VERIFICATION_FAILED", `Source changed while its raw snapshot was copied: ${row.raw_export_file}`);
     }
+  }
+  if (options.includeManifest) {
+    const publishedManifest = await fsp.readFile(path.join(dir, "manifest.json"), "utf8");
+    if (!options.expectedManifest || publishedManifest !== options.expectedManifest) throw new ExportError("EXPORT_VERIFICATION_FAILED", "Published manifest bytes differ from the verified in-memory generation");
   }
 }
 
@@ -2642,6 +2855,7 @@ function slug(value) { return String(value || "").normalize("NFKD").replace(/[^\
 function stampForName(date) { const valid = Number.isNaN(date.getTime()) ? new Date() : date; const pad = (n) => String(n).padStart(2, "0"); return `${valid.getFullYear()}${pad(valid.getMonth() + 1)}${pad(valid.getDate())}-${pad(valid.getHours())}${pad(valid.getMinutes())}${pad(valid.getSeconds())}`; }
 export {
   ARCHIVE_FORMAT_VERSION,
+  INCOMPLETE_MARKER_NAME,
   EXPORT_PROFILE,
   EXPORT_PROFILES,
   ExportError,
@@ -2650,6 +2864,8 @@ export {
   USER_RECORD_KIND,
   classifyRuntimeContextTypes,
   classifySessionKind,
+  beginExportGeneration,
+  completeExportGeneration,
   copyStableRawSnapshot,
   createProgressReporter,
   createSessionEventClassifier,

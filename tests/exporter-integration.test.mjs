@@ -4,10 +4,10 @@ import fsSync from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
-import { exportArchive, readSessionRoutingMeta, sha256File } from "../bin/export-codex-project-chats.mjs";
+import { beginExportGeneration, completeExportGeneration, exportArchive, INCOMPLETE_MARKER_NAME, readSessionRoutingMeta, sha256File } from "../bin/export-codex-project-chats.mjs";
 
 const execFileAsync = promisify(execFile);
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -573,6 +573,16 @@ for (const profile of ["complete", "readable", "source-snapshots"]) {
   }
 }
 
+async function listFiles(candidate) {
+  const files = [];
+  for (const entry of await fs.readdir(candidate, { withFileTypes: true })) {
+    const child = path.join(candidate, entry.name);
+    if (entry.isDirectory()) files.push(...await listFiles(child));
+    else files.push(child);
+  }
+  return files;
+}
+
 assert.ok(html.includes(dangerousTitle), "HTML output must preserve the title independently of Markdown escaping");
 assert.ok(html.includes("beta\rbare\nline\r\nend"), "HTML output must preserve project metadata independently of Markdown escaping");
 
@@ -635,6 +645,173 @@ for (const session of manifest.sessions) {
     "raw JSONL copies must remain byte-for-byte equivalent",
   );
 }
+
+const generationHome = path.join(temp, "generation-home");
+const generationSessions = path.join(generationHome, "sessions", "2026", "08", "22");
+const generationSource = path.join(generationSessions, "rollout-generation.jsonl");
+const generationOutput = path.join(temp, "generation-output");
+const generationRaw = Buffer.from(jsonl([
+  { type: "session_meta", timestamp: "2026-08-22T12:00:00.000Z", payload: { id: "generation-session", cwd: "C:\\Projects\\generation", timestamp: "2026-08-22T12:00:00.000Z", source: "vscode", thread_source: "user" } },
+  { type: "response_item", timestamp: "2026-08-22T12:00:01.000Z", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "Verify generation transactions." }] } },
+]));
+await fs.mkdir(generationSessions, { recursive: true });
+await fs.writeFile(generationSource, generationRaw);
+const generationDiagnostics = [];
+const firstGeneration = await exportArchive({ codexHome: generationHome, scope: "all", outputDirectory: generationOutput, exportProfile: "complete", onDiagnostic: (event) => generationDiagnostics.push(event) });
+assert.equal(await pathExists(path.join(generationOutput, INCOMPLETE_MARKER_NAME)), false, "a successful first export must remove its incomplete marker");
+assert.equal(generationDiagnostics.filter((event) => event.event === "export_hash_start").length, 1, "the stable one-session export must perform exactly one published Raw hash pass");
+const firstGenerationManifest = await fs.readFile(firstGeneration.manifestPath, "utf8");
+const repeatedGeneration = await exportArchive({ codexHome: generationHome, scope: "all", outputDirectory: generationOutput, exportProfile: "complete" });
+assert.equal(await pathExists(path.join(generationOutput, INCOMPLETE_MARKER_NAME)), false, "a successful repetition export must remove its incomplete marker");
+assert.deepEqual(await fs.readFile(path.join(generationOutput, JSON.parse(await fs.readFile(repeatedGeneration.manifestPath, "utf8")).sessions[0].raw_export_file)), generationRaw, "a repetition export must keep Raw bytes byte-identical");
+assert.notEqual(await fs.readFile(repeatedGeneration.manifestPath, "utf8"), "", "a repetition export must publish a non-empty final manifest");
+assert.notEqual(firstGenerationManifest, "", "the first generation manifest must be complete before repetition");
+
+const readableGeneration = await exportArchive({ codexHome: generationHome, scope: "all", outputDirectory: generationOutput, exportProfile: "readable" });
+assert.equal(await pathExists(path.join(generationOutput, INCOMPLETE_MARKER_NAME)), false);
+assert.equal(await pathExists(path.join(generationOutput, "raw")), true, "the exporter may retain an empty Raw directory without retaining stale generation files");
+assert.deepEqual(await listFiles(path.join(generationOutput, "raw")), [], "manifest-owned Raw files omitted by the new profile must be removed exactly, not recursively guessed");
+assert.equal(JSON.parse(await fs.readFile(readableGeneration.manifestPath, "utf8")).canonical_representation_included, false);
+
+const emptyProtection = Object.freeze({ rootCanonicalPaths: new Set(), fileCanonicalPaths: new Set(), fileIdentities: new Set() });
+const afterMarkerOutput = path.join(temp, "generation-after-marker");
+await fs.mkdir(afterMarkerOutput, { recursive: true });
+await beginExportGeneration(afterMarkerOutput, emptyProtection, { plannedPaths: ["manifest.json", "README.txt"] });
+assert.equal(await pathExists(path.join(afterMarkerOutput, INCOMPLETE_MARKER_NAME)), true, "an error after marker publication and before Raw publication must leave the marker");
+
+const afterRawOutput = path.join(temp, "generation-after-raw");
+await fs.mkdir(afterRawOutput, { recursive: true });
+await beginExportGeneration(afterRawOutput, emptyProtection, { plannedPaths: ["manifest.json", "README.txt", "raw/p001/s0001.jsonl"] });
+await fs.mkdir(path.join(afterRawOutput, "raw", "p001"), { recursive: true });
+await fs.writeFile(path.join(afterRawOutput, "raw", "p001", "s0001.jsonl"), generationRaw);
+assert.equal(await pathExists(path.join(afterRawOutput, INCOMPLETE_MARKER_NAME)), true, "an error after Raw publication must leave the generation invalid");
+
+const afterManifestOutput = path.join(temp, "generation-after-manifest");
+await fs.mkdir(afterManifestOutput, { recursive: true });
+await beginExportGeneration(afterManifestOutput, emptyProtection, { plannedPaths: ["manifest.json", "README.txt"] });
+await fs.writeFile(path.join(afterManifestOutput, "manifest.json"), "{}\n", "utf8");
+assert.equal(await pathExists(path.join(afterManifestOutput, INCOMPLETE_MARKER_NAME)), true, "a published manifest is not a commit while the marker remains");
+
+const completedMarkerOutput = path.join(temp, "generation-complete-helper");
+await fs.mkdir(completedMarkerOutput, { recursive: true });
+const completedGeneration = await beginExportGeneration(completedMarkerOutput, emptyProtection, { plannedPaths: ["manifest.json", "README.txt"] });
+await completeExportGeneration(completedGeneration);
+assert.equal(await pathExists(path.join(completedMarkerOutput, INCOMPLETE_MARKER_NAME)), false, "only the identity-bound completion step removes the marker");
+
+const replacedMarkerOutput = path.join(temp, "generation-replaced-marker");
+await fs.mkdir(replacedMarkerOutput, { recursive: true });
+const replacedMarkerGeneration = await beginExportGeneration(replacedMarkerOutput, emptyProtection, { plannedPaths: ["manifest.json", "README.txt"] });
+const movedMarker = path.join(replacedMarkerOutput, "moved-marker.txt");
+await fs.rename(path.join(replacedMarkerOutput, INCOMPLETE_MARKER_NAME), movedMarker);
+await fs.writeFile(path.join(replacedMarkerOutput, INCOMPLETE_MARKER_NAME), "foreign replacement", "utf8");
+await assert.rejects(() => completeExportGeneration(replacedMarkerGeneration), (error) => error?.code === "UNSAFE_EXPORT_PATH");
+assert.equal(await fs.readFile(path.join(replacedMarkerOutput, INCOMPLETE_MARKER_NAME), "utf8"), "foreign replacement", "an identity-mismatched marker must not be removed");
+
+const existingMarkerOutput = path.join(temp, "generation-existing-marker");
+await fs.mkdir(existingMarkerOutput, { recursive: true });
+await fs.writeFile(path.join(existingMarkerOutput, INCOMPLETE_MARKER_NAME), "existing incomplete export", "utf8");
+await assert.rejects(() => exportArchive({ codexHome: generationHome, scope: "all", outputDirectory: existingMarkerOutput, exportProfile: "complete" }), (error) => error?.code === "INCOMPLETE_EXPORT_EXISTS" && /new empty output folder/i.test(error.message));
+
+const foreignOutput = path.join(temp, "generation-foreign-file");
+await fs.mkdir(foreignOutput, { recursive: true });
+await fs.writeFile(path.join(foreignOutput, "index.html"), "foreign index", "utf8");
+await assert.rejects(() => exportArchive({ codexHome: generationHome, scope: "all", outputDirectory: foreignOutput, exportProfile: "complete" }), (error) => error?.code === "UNOWNED_EXPORT_FILE");
+assert.equal(await fs.readFile(path.join(foreignOutput, "index.html"), "utf8"), "foreign index", "a foreign same-named file must remain unchanged");
+assert.equal(await pathExists(path.join(foreignOutput, INCOMPLETE_MARKER_NAME)), false, "preflight failures must occur before marker publication");
+
+const beforeRawFailureOutput = path.join(temp, "generation-before-raw-failure");
+await fs.mkdir(beforeRawFailureOutput, { recursive: true });
+await fs.writeFile(path.join(beforeRawFailureOutput, "raw"), "foreign path blocker", "utf8");
+await assert.rejects(() => exportArchive({ codexHome: generationHome, scope: "all", outputDirectory: beforeRawFailureOutput, exportProfile: "complete" }));
+assert.equal(await pathExists(path.join(beforeRawFailureOutput, INCOMPLETE_MARKER_NAME)), true, "a real export failure after marker publication but before Raw publication must leave the marker");
+assert.equal(await fs.readFile(path.join(beforeRawFailureOutput, "raw"), "utf8"), "foreign path blocker", "the exporter must not delete the foreign blocker");
+assert.equal(await pathExists(path.join(beforeRawFailureOutput, "manifest.json")), false);
+
+const partialHome = path.join(temp, "generation-partial-home");
+const partialSessions = path.join(partialHome, "sessions", "2026", "08", "22");
+const partialOutput = path.join(temp, "generation-partial-output");
+const partialSourceA = path.join(partialSessions, "rollout-a.jsonl");
+const partialSourceB = path.join(partialSessions, "rollout-b.jsonl");
+const partialMovedB = `${partialSourceB}.moved`;
+const partialRawA = Buffer.from(jsonl([{ type: "session_meta", timestamp: "2026-08-22T13:00:00.000Z", payload: { id: "partial-a", cwd: "C:\\Projects\\partial", timestamp: "2026-08-22T13:00:00.000Z" } }]));
+const partialRawB = Buffer.from(jsonl([{ type: "session_meta", timestamp: "2026-08-22T13:01:00.000Z", payload: { id: "partial-b", cwd: "C:\\Projects\\partial", timestamp: "2026-08-22T13:01:00.000Z" } }]));
+await fs.mkdir(partialSessions, { recursive: true });
+await fs.writeFile(partialSourceA, partialRawA);
+await fs.writeFile(partialSourceB, partialRawB);
+let movedSecondSource = false;
+await assert.rejects(() => exportArchive({
+  codexHome: partialHome,
+  scope: "all",
+  outputDirectory: partialOutput,
+  exportProfile: "source-snapshots",
+  onDiagnostic(event) {
+    if (!movedSecondSource && event.event === "session_end" && event.ordinal === 1) {
+      fsSync.renameSync(partialSourceB, partialMovedB);
+      movedSecondSource = true;
+    }
+  },
+}));
+assert.equal(movedSecondSource, true);
+assert.equal(await pathExists(path.join(partialOutput, INCOMPLETE_MARKER_NAME)), true, "a failure after one published Raw file must keep the marker");
+assert.equal((await listFiles(path.join(partialOutput, "raw"))).length, 1, "the synthetic failure must occur after exactly one Raw publication");
+assert.deepEqual(await fs.readFile(partialSourceA), partialRawA, "the exporter must not change the first source");
+await fs.rename(partialMovedB, partialSourceB);
+assert.deepEqual(await fs.readFile(partialSourceB), partialRawB, "the externally moved second source remains byte-identical");
+
+const postManifestOutput = path.join(temp, "generation-post-manifest-failure");
+const displacedOwnedMarker = path.join(postManifestOutput, "displaced-run-marker.txt");
+let replacedMarkerAfterManifest = false;
+await assert.rejects(() => exportArchive({
+  codexHome: generationHome,
+  scope: "all",
+  outputDirectory: postManifestOutput,
+  exportProfile: "complete",
+  onDiagnostic(event) {
+    if (!replacedMarkerAfterManifest && event.event === "manifest_end") {
+      fsSync.renameSync(path.join(postManifestOutput, INCOMPLETE_MARKER_NAME), displacedOwnedMarker);
+      fsSync.writeFileSync(path.join(postManifestOutput, INCOMPLETE_MARKER_NAME), "foreign replacement after manifest", "utf8");
+      replacedMarkerAfterManifest = true;
+    }
+  },
+}), (error) => error?.code === "UNSAFE_EXPORT_PATH");
+assert.equal(replacedMarkerAfterManifest, true);
+assert.equal(await pathExists(path.join(postManifestOutput, "manifest.json")), true, "the synthetic fault must occur after manifest publication");
+assert.equal(await fs.readFile(path.join(postManifestOutput, INCOMPLETE_MARKER_NAME), "utf8"), "foreign replacement after manifest", "a foreign marker replacement must remain untouched");
+assert.equal(await pathExists(displacedOwnedMarker), true, "the exporter must not search for or delete the displaced run-owned marker");
+
+for (const [name, maliciousPath] of [
+  ["traversal", "raw/../private.jsonl"],
+  ["absolute", path.resolve(temp, "outside.jsonl")],
+  ["unexpected", "documents/private.txt"],
+]) {
+  const maliciousOutput = path.join(temp, `generation-malicious-${name}`);
+  await fs.mkdir(maliciousOutput, { recursive: true });
+  const maliciousManifest = { archive_format_version: 1, formats: { raw: true, markdown: false, html: true }, sessions: [{ raw_export_file: maliciousPath, markdown_file: "" }] };
+  await fs.writeFile(path.join(maliciousOutput, "manifest.json"), `${JSON.stringify(maliciousManifest)}\n`, "utf8");
+  await assert.rejects(() => beginExportGeneration(maliciousOutput, emptyProtection, { plannedPaths: ["manifest.json", "README.txt"] }), (error) => error?.code === "INVALID_PREVIOUS_MANIFEST");
+  assert.equal(await pathExists(path.join(maliciousOutput, INCOMPLETE_MARKER_NAME)), false, `the ${name} manifest must fail before marker publication`);
+}
+
+const markerText = await fs.readFile(path.join(afterMarkerOutput, INCOMPLETE_MARKER_NAME), "utf8");
+assert.doesNotMatch(markerText, /generation-home|generation-after-marker|Codex-Exporter-Test|Users[\\/]|Verify generation transactions/i, "the marker must not contain session content or local paths");
+assert.match(markerText, /Status: INCOMPLETE/);
+
+const hardAbortOutput = path.join(temp, "generation-hard-abort");
+await fs.mkdir(hardAbortOutput, { recursive: true });
+const hardAbortScript = [
+  `import fs from "node:fs/promises";`,
+  `import path from "node:path";`,
+  `import { beginExportGeneration } from ${JSON.stringify(pathToFileURL(script).href)};`,
+  `const output = ${JSON.stringify(hardAbortOutput)};`,
+  `const protection = { rootCanonicalPaths: new Set(), fileCanonicalPaths: new Set(), fileIdentities: new Set() };`,
+  `await beginExportGeneration(output, protection, { plannedPaths: ["manifest.json", "README.txt", "raw/p001/s0001.jsonl"] });`,
+  `await fs.mkdir(path.join(output, "raw", "p001"), { recursive: true });`,
+  `await fs.writeFile(path.join(output, "raw", "p001", "s0001.jsonl"), "synthetic raw\\n", "utf8");`,
+  `process.exit(23);`,
+].join("\n");
+await assert.rejects(() => execFileAsync(process.execPath, ["--input-type=module", "--eval", hardAbortScript], { cwd: temp }), (error) => error?.code === 23);
+assert.equal(await pathExists(path.join(hardAbortOutput, INCOMPLETE_MARKER_NAME)), true, "a hard process exit after publication must leave the incomplete marker");
+assert.equal(await pathExists(path.join(hardAbortOutput, "manifest.json")), false, "a hard process exit before commit must not create a valid-looking manifest");
 
 const mutableRawPath = path.join(outputDir, activeSession.raw_export_file);
 const recordedRawHash = activeSession.raw_sha256;

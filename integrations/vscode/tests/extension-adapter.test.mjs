@@ -613,6 +613,43 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
 }
 
 {
+  const incompleteOutput = path.join(temp, "open-incomplete-output");
+  const fake = createFakeVscode({ openDialogResult: [{ fsPath: incompleteOutput }] });
+  const context = createContext(temp);
+  const adapter = createExtensionAdapter(fake.vscode, { loadExporter: async () => exporter });
+  await adapter.activate(context);
+  await adapter.exportAllSessions(context, "readable");
+  await fsp.writeFile(path.join(incompleteOutput, "EXPORT_INCOMPLETE.txt"), "Status: INCOMPLETE\n", "utf8");
+  assert.equal(await adapter.openLatestArchive(context), false, "Open Latest Export must reject a generation with an incomplete marker");
+  assert.match(fake.messages.at(-1).message, /EXPORT_INCOMPLETE\.txt is present/);
+  assert.equal(await adapter.openExportFolder(context), false, "Open Export Folder must reject a generation with an incomplete marker");
+  assert.match(fake.messages.at(-1).message, /new empty export folder/i);
+  assert.equal(fake.opened.length, 0, "no target from an incomplete generation may be opened");
+}
+
+{
+  const incompleteResultOutput = path.join(temp, "incomplete-result-output");
+  const incompleteExporter = {
+    async exportArchive(options) {
+      await fsp.mkdir(options.outputDirectory, { recursive: true });
+      const htmlIndexPath = path.join(options.outputDirectory, "index.html");
+      const manifestPath = path.join(options.outputDirectory, "manifest.json");
+      await fsp.writeFile(htmlIndexPath, "<html></html>", "utf8");
+      await fsp.writeFile(manifestPath, "{}\n", "utf8");
+      await fsp.writeFile(path.join(options.outputDirectory, "EXPORT_INCOMPLETE.txt"), "Status: INCOMPLETE\n", "utf8");
+      return { outputDirectory: options.outputDirectory, htmlIndexPath, manifestPath, exportedProjectCount: 1, exportedSessionCount: 1, warnings: [] };
+    },
+  };
+  const fake = createFakeVscode({ openDialogResult: [{ fsPath: incompleteResultOutput }] });
+  const context = createContext(temp);
+  const adapter = createExtensionAdapter(fake.vscode, { loadExporter: async () => incompleteExporter });
+  await adapter.activate(context);
+  await assert.rejects(() => adapter.exportAllSessions(context, "readable"), /EXPORT_INCOMPLETE\.txt is present/);
+  assert.equal(context.globalState.get(STATE_OUTPUT_DIR, ""), "", "an incomplete result must not become the latest export folder");
+  assert.equal(context.globalState.get(STATE_LATEST_HTML, ""), "", "an incomplete result must not become the latest HTML index");
+}
+
+{
   const fake = createFakeVscode({});
   const context = createContext(temp);
   const adapter = createExtensionAdapter(fake.vscode, { loadExporter: async () => exporter });
