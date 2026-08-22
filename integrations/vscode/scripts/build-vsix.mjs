@@ -37,12 +37,14 @@ export async function buildVsix(options = {}) {
 
   try {
     await fs.mkdir(path.join(stage, "extension", "src"), { recursive: true });
+    await fs.mkdir(path.join(stage, "extension", "images"), { recursive: true });
     await fs.mkdir(path.join(stage, "extension", "vendor", "codex-project-chat-exporter", "bin"), { recursive: true });
 
     await copyVerifiedFile(path.join(extensionRoot, "package.json"), path.join(stage, "extension", "package.json"));
     await copyVerifiedFile(path.join(extensionRoot, "README.md"), path.join(stage, "extension", "README.md"));
     await copyVerifiedFile(path.join(extensionRoot, "PACKAGED_TEST_PLAN.md"), path.join(stage, "extension", "PACKAGED_TEST_PLAN.md"));
     await copyVerifiedFile(path.join(extensionRoot, "LICENSE"), path.join(stage, "extension", "LICENSE"));
+    await copyVerifiedFile(path.join(extensionRoot, "images", "icon.png"), path.join(stage, "extension", "images", "icon.png"));
     await copyVerifiedFile(path.join(extensionRoot, "src", "extension.cjs"), path.join(stage, "extension", "src", "extension.cjs"));
     await copyVerifiedFile(path.join(extensionRoot, "src", "vscode-adapter.cjs"), path.join(stage, "extension", "src", "vscode-adapter.cjs"));
     const packagedCore = path.join(stage, "extension", "vendor", "codex-project-chat-exporter", "bin", "export-codex-project-chats.mjs");
@@ -57,6 +59,7 @@ export async function buildVsix(options = {}) {
   <Default Extension="txt" ContentType="text/plain"/>
   <Default Extension="cjs" ContentType="application/javascript"/>
   <Default Extension="mjs" ContentType="application/javascript"/>
+  <Default Extension="png" ContentType="image/png"/>
   <Default Extension="vsixmanifest" ContentType="text/xml"/>
   <Default Extension="xml" ContentType="text/xml"/>
 </Types>
@@ -87,6 +90,7 @@ export async function buildVsix(options = {}) {
     <Asset Type="Microsoft.VisualStudio.Code.Manifest" Path="extension/package.json" Addressable="true"/>
     <Asset Type="Microsoft.VisualStudio.Services.Content.Details" Path="extension/README.md" Addressable="true"/>
     <Asset Type="Microsoft.VisualStudio.Services.Content.License" Path="extension/LICENSE" Addressable="true"/>
+    <Asset Type="Microsoft.VisualStudio.Services.Icons.Default" Path="extension/images/icon.png" Addressable="true"/>
   </Assets>
 </PackageManifest>
 `, "utf8");

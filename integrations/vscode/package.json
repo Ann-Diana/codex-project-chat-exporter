@@ -30,6 +30,7 @@
     "project-aware"
   ],
   "main": "./src/extension.cjs",
+  "icon": "images/icon.png",
   "extensionKind": [
     "ui"
   ],
