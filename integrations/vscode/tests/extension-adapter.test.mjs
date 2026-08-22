@@ -144,6 +144,7 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
   assert.equal(extensionPackage.contributes.configuration.properties["codexProjectChatExporter.diagnosticOutput"].default, false);
   assert.equal(extensionPackage.contributes.configuration.properties["codexProjectChatExporter.outputDirectory"].scope, "application");
   assert.equal(extensionPackage.contributes.configuration.properties["codexProjectChatExporter.codexHome"].scope, "application");
+  assert.equal(extensionPackage.contributes.configuration.properties["codexProjectChatExporter.includeTools"].scope, "application");
   assert.equal(formatExportSummary(1, 1), "1 session across 1 project");
   assert.equal(formatExportSummary(2, 1), "2 sessions across 1 project");
   assert.equal(formatExportSummary(100, 20), "100 sessions across 20 projects");
@@ -192,7 +193,6 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
       archiveWriter: async ({ stage, archivePath }) => {
         attemptedArchivePath = archivePath;
         attemptedStage = stage;
-        await fsp.writeFile(archivePath, "partial", "utf8");
         throw new Error("Synthetic archive failure");
       },
     }),
@@ -201,6 +201,73 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
   assert.equal(await fsp.stat(attemptedStage).then(() => true, () => false), false, "failed builds must remove their stage directory");
   assert.equal(await fsp.stat(attemptedArchivePath).then(() => true, () => false), false, "failed builds must remove their temporary archive path");
   assert.deepEqual(await fsp.readdir(distDir), [], "failed builds must leave no run-owned stage or partial artifacts");
+  await fsp.rm(buildTemp, { recursive: true, force: true });
+}
+
+{
+  const buildTemp = await fsp.mkdtemp(path.join(os.tmpdir(), "codex-vsix-build-create-new-"));
+  const distDir = path.join(buildTemp, "dist");
+  const foreignBytes = Buffer.from("foreign temporary archive");
+  let occupiedArchivePath;
+  await assert.rejects(
+    () => buildVsix({
+      distDir,
+      beforeArchiveWrite: async ({ archivePath }) => {
+        occupiedArchivePath = archivePath;
+        await fsp.writeFile(archivePath, foreignBytes, { flag: "wx" });
+      },
+    }),
+    /already exists|existiert bereits|CreateNew|because it already exists/i,
+  );
+  assert.deepEqual(await fsp.readFile(occupiedArchivePath), foreignBytes, "the actual archive writer must not truncate or replace a foreign temporary file");
+  const remaining = await fsp.readdir(distDir);
+  assert.deepEqual(remaining, [path.basename(occupiedArchivePath)], "failed exclusive archive creation must leave only the unowned foreign file for manual review");
+  await fsp.rm(buildTemp, { recursive: true, force: true });
+}
+
+{
+  const buildTemp = await fsp.mkdtemp(path.join(os.tmpdir(), "codex-vsix-stage-foreign-"));
+  const distDir = path.join(buildTemp, "dist");
+  let foreignStageFile;
+  let archiveWriterCalls = 0;
+  await assert.rejects(
+    () => buildVsix({
+      distDir,
+      beforeArchiveWrite: async ({ stage }) => {
+        foreignStageFile = path.join(stage, "extension", "foreign.txt");
+        await fsp.writeFile(foreignStageFile, "foreign stage content", { flag: "wx" });
+      },
+      archiveWriter: async () => { archiveWriterCalls += 1; },
+    }),
+    /not empty|not empty|ENOTEMPTY/i,
+  );
+  assert.equal(archiveWriterCalls, 0, "unexpected stage contents must fail closed before the archive writer mutates its destination");
+  assert.equal(await fsp.readFile(foreignStageFile, "utf8"), "foreign stage content", "nonrecursive cleanup must not delete unexpected stage content");
+  await fsp.rm(buildTemp, { recursive: true, force: true });
+}
+
+{
+  const buildTemp = await fsp.mkdtemp(path.join(os.tmpdir(), "codex-vsix-stage-replaced-"));
+  const distDir = path.join(buildTemp, "dist");
+  let replacedStageFile;
+  let movedOwnedFile;
+  let archiveWriterCalls = 0;
+  await assert.rejects(
+    () => buildVsix({
+      distDir,
+      beforeArchiveWrite: async ({ stage }) => {
+        replacedStageFile = path.join(stage, "extension", "package.json");
+        movedOwnedFile = path.join(stage, "extension", "package-owned-moved.json");
+        await fsp.rename(replacedStageFile, movedOwnedFile);
+        await fsp.writeFile(replacedStageFile, "foreign replacement", { flag: "wx" });
+      },
+      archiveWriter: async () => { archiveWriterCalls += 1; },
+    }),
+    /identity changed/i,
+  );
+  assert.equal(archiveWriterCalls, 0, "a replaced stage file must fail closed before archive creation");
+  assert.equal(await fsp.readFile(replacedStageFile, "utf8"), "foreign replacement", "cleanup must preserve a foreign replacement at an owned stage path");
+  assert.equal((await fsp.stat(movedOwnedFile)).isFile(), true, "cleanup must not search for or delete a moved run-owned stage file");
   await fsp.rm(buildTemp, { recursive: true, force: true });
 }
 

@@ -24,35 +24,45 @@ export async function buildVsix(options = {}) {
     throw new Error(`Unexpected dist artifacts must be reviewed manually before packaging: ${unexpectedArtifacts.map((entry) => path.basename(entry)).join(", ")}`);
   }
   const stage = await fs.mkdtemp(path.join(distDir, `.stage-${vsixBase}-`));
-  const stageOwned = await inspectOwnedBuildPath(stage, distDir, "directory");
+  const stageRootOwned = await inspectOwnedBuildPath(stage, distDir, "directory");
+  const stageOwned = {
+    root: stageRootOwned,
+    directories: [],
+    files: [],
+    byPath: new Map([[buildPathKey(stage), stageRootOwned]]),
+  };
   const archivePath = path.join(distDir, `${vsixBase}.vsix.partial-${randomUUID()}`);
-  const archiveHandle = await fs.open(archivePath, "wx");
-  const archiveStat = await archiveHandle.stat({ bigint: true });
-  await archiveHandle.close();
-  const archiveOwned = { path: archivePath, identity: reliableBuildIdentity(archiveStat), kind: "file" };
-  if (!archiveOwned.identity) throw new Error(`Reliable file identity is unavailable for build artifact: ${archivePath}`);
-  let archiveCurrent = archiveOwned;
+  await assertPathAbsent(archivePath, "VSIX temporary archive path");
+  let archiveCurrent = null;
   let previousCandidate = null;
   let publishedCandidate = null;
+  let stageCleanupAttempted = false;
 
   try {
-    await fs.mkdir(path.join(stage, "extension", "src"), { recursive: true });
-    await fs.mkdir(path.join(stage, "extension", "images"), { recursive: true });
-    await fs.mkdir(path.join(stage, "extension", "vendor", "codex-project-chat-exporter", "bin"), { recursive: true });
+    for (const relative of [
+      "extension",
+      "extension/src",
+      "extension/images",
+      "extension/vendor",
+      "extension/vendor/codex-project-chat-exporter",
+      "extension/vendor/codex-project-chat-exporter/bin",
+    ]) {
+      await createOwnedStageDirectory(stageOwned, stage, relative);
+    }
 
-    await copyVerifiedFile(path.join(extensionRoot, "package.json"), path.join(stage, "extension", "package.json"));
-    await copyVerifiedFile(path.join(extensionRoot, "README.md"), path.join(stage, "extension", "README.md"));
-    await copyVerifiedFile(path.join(extensionRoot, "PACKAGED_TEST_PLAN.md"), path.join(stage, "extension", "PACKAGED_TEST_PLAN.md"));
-    await copyVerifiedFile(path.join(extensionRoot, "LICENSE"), path.join(stage, "extension", "LICENSE"));
-    await copyVerifiedFile(path.join(extensionRoot, "images", "icon.png"), path.join(stage, "extension", "images", "icon.png"));
-    await copyVerifiedFile(path.join(extensionRoot, "src", "extension.cjs"), path.join(stage, "extension", "src", "extension.cjs"));
-    await copyVerifiedFile(path.join(extensionRoot, "src", "vscode-adapter.cjs"), path.join(stage, "extension", "src", "vscode-adapter.cjs"));
+    await copyVerifiedFile(path.join(extensionRoot, "package.json"), path.join(stage, "extension", "package.json"), stageOwned, stage);
+    await copyVerifiedFile(path.join(extensionRoot, "README.md"), path.join(stage, "extension", "README.md"), stageOwned, stage);
+    await copyVerifiedFile(path.join(extensionRoot, "PACKAGED_TEST_PLAN.md"), path.join(stage, "extension", "PACKAGED_TEST_PLAN.md"), stageOwned, stage);
+    await copyVerifiedFile(path.join(extensionRoot, "LICENSE"), path.join(stage, "extension", "LICENSE"), stageOwned, stage);
+    await copyVerifiedFile(path.join(extensionRoot, "images", "icon.png"), path.join(stage, "extension", "images", "icon.png"), stageOwned, stage);
+    await copyVerifiedFile(path.join(extensionRoot, "src", "extension.cjs"), path.join(stage, "extension", "src", "extension.cjs"), stageOwned, stage);
+    await copyVerifiedFile(path.join(extensionRoot, "src", "vscode-adapter.cjs"), path.join(stage, "extension", "src", "vscode-adapter.cjs"), stageOwned, stage);
     const packagedCore = path.join(stage, "extension", "vendor", "codex-project-chat-exporter", "bin", "export-codex-project-chats.mjs");
-    const packagedCoreSha256 = await copyVerifiedFile(path.join(repoRoot, "bin", "export-codex-project-chats.mjs"), packagedCore);
-    await copyVerifiedFile(path.join(repoRoot, "LICENSE"), path.join(stage, "extension", "vendor", "codex-project-chat-exporter", "LICENSE"));
-    await fs.writeFile(path.join(stage, "extension", "vendor", "codex-project-chat-exporter", "integrity.json"), `${JSON.stringify({ format: 1, files: { "bin/export-codex-project-chats.mjs": packagedCoreSha256 } }, null, 2)}\n`, "utf8");
+    const packagedCoreSha256 = await copyVerifiedFile(path.join(repoRoot, "bin", "export-codex-project-chats.mjs"), packagedCore, stageOwned, stage);
+    await copyVerifiedFile(path.join(repoRoot, "LICENSE"), path.join(stage, "extension", "vendor", "codex-project-chat-exporter", "LICENSE"), stageOwned, stage);
+    await writeOwnedStageFile(stageOwned, stage, path.join(stage, "extension", "vendor", "codex-project-chat-exporter", "integrity.json"), `${JSON.stringify({ format: 1, files: { "bin/export-codex-project-chats.mjs": packagedCoreSha256 } }, null, 2)}\n`);
 
-    await fs.writeFile(path.join(stage, "[Content_Types].xml"), `<?xml version="1.0" encoding="utf-8"?>
+    await writeOwnedStageFile(stageOwned, stage, path.join(stage, "[Content_Types].xml"), `<?xml version="1.0" encoding="utf-8"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
   <Default Extension="json" ContentType="application/json"/>
   <Default Extension="md" ContentType="text/markdown"/>
@@ -63,9 +73,9 @@ export async function buildVsix(options = {}) {
   <Default Extension="vsixmanifest" ContentType="text/xml"/>
   <Default Extension="xml" ContentType="text/xml"/>
 </Types>
-`, "utf8");
+`);
 
-    await fs.writeFile(path.join(stage, "extension.vsixmanifest"), `<?xml version="1.0" encoding="utf-8"?>
+    await writeOwnedStageFile(stageOwned, stage, path.join(stage, "extension.vsixmanifest"), `<?xml version="1.0" encoding="utf-8"?>
 <PackageManifest Version="2.0.0" xmlns="http://schemas.microsoft.com/developer/vsx-schema/2011">
   <Metadata>
     <Identity Language="en-US" Id="${escapeXml(packageJson.name)}" Version="${escapeXml(packageJson.version)}" Publisher="${escapeXml(packageJson.publisher)}"/>
@@ -93,18 +103,22 @@ export async function buildVsix(options = {}) {
     <Asset Type="Microsoft.VisualStudio.Services.Icons.Default" Path="extension/images/icon.png" Addressable="true"/>
   </Assets>
 </PackageManifest>
-`, "utf8");
+`);
 
+    if (options.beforeArchiveWrite) await options.beforeArchiveWrite({ stage, archivePath });
+    await verifyOwnedStageForArchive(stageOwned, stage, distDir);
     await archiveWriter({ stage, archivePath });
     archiveCurrent = await inspectOwnedBuildPath(archivePath, distDir, "file");
-    if (archiveCurrent.identity !== archiveOwned.identity) throw new Error("Temporary VSIX identity changed while packaging");
+    const archiveIdentity = archiveCurrent.identity;
     previousCandidate = await moveExactCandidateAside(vsixPath, distDir);
     await fs.rename(archivePath, vsixPath);
     publishedCandidate = await inspectOwnedBuildPath(vsixPath, distDir, "file");
-    if (publishedCandidate.identity !== archiveOwned.identity) throw new Error("Published VSIX does not match the run-owned temporary archive");
+    if (publishedCandidate.identity !== archiveIdentity) throw new Error("Published VSIX does not match the run-owned temporary archive");
     archiveCurrent = null;
     await removeOwnedBuildPath(previousCandidate, distDir);
     previousCandidate = null;
+    stageCleanupAttempted = true;
+    await removeOwnedStage(stageOwned, stage, distDir);
     return { archivePath, distDir, removedCandidates: [], stage, unexpectedArtifacts, vsixPath };
   } catch (error) {
     if (publishedCandidate) {
@@ -118,17 +132,120 @@ export async function buildVsix(options = {}) {
     throw error;
   } finally {
     if (archiveCurrent) await removeOwnedBuildPath(archiveCurrent, distDir);
-    await removeOwnedBuildPath(stageOwned, distDir);
+    if (!stageCleanupAttempted) {
+      stageCleanupAttempted = true;
+      await removeOwnedStage(stageOwned, stage, distDir);
+    }
   }
 }
 
-async function copyVerifiedFile(source, destination) {
-  await fs.copyFile(source, destination);
-  const [sourceBytes, destinationBytes] = await Promise.all([fs.readFile(source), fs.readFile(destination)]);
+async function copyVerifiedFile(source, destination, stageOwned, stage) {
+  const sourceBytes = await fs.readFile(source);
+  await writeOwnedStageFile(stageOwned, stage, destination, sourceBytes);
+  const destinationBytes = await fs.readFile(destination);
   if (!sourceBytes.equals(destinationBytes)) {
     throw new Error(`Packaged source copy differs from its source: ${path.basename(source)}`);
   }
   return createHash("sha256").update(sourceBytes).digest("hex");
+}
+
+async function createOwnedStageDirectory(stageOwned, stage, relativePath) {
+  const candidate = path.resolve(stage, relativePath);
+  assertPathInside(stage, candidate);
+  await verifyOwnedStageParent(stageOwned, stage, candidate);
+  await assertPathAbsent(candidate, "VSIX stage directory");
+  await fs.mkdir(candidate);
+  const owned = await inspectOwnedStagePath(candidate, stage, "directory");
+  stageOwned.directories.push(owned);
+  stageOwned.byPath.set(buildPathKey(candidate), owned);
+}
+
+async function writeOwnedStageFile(stageOwned, stage, destination, bytes) {
+  const candidate = path.resolve(destination);
+  assertPathInside(stage, candidate);
+  await verifyOwnedStageParent(stageOwned, stage, candidate);
+  let handle;
+  let owned;
+  try {
+    handle = await fs.open(candidate, "wx");
+    const initialStat = await handle.stat({ bigint: true });
+    const identity = reliableBuildIdentity(initialStat);
+    if (!initialStat.isFile() || !identity) throw new Error(`Reliable regular-file identity is unavailable for VSIX stage file: ${candidate}`);
+    owned = { path: candidate, identity, kind: "file" };
+    stageOwned.files.push(owned);
+    stageOwned.byPath.set(buildPathKey(candidate), owned);
+    await handle.writeFile(bytes);
+    const finalStat = await handle.stat({ bigint: true });
+    if (!finalStat.isFile() || reliableBuildIdentity(finalStat) !== identity) throw new Error(`VSIX stage file identity changed while writing: ${candidate}`);
+  } finally {
+    await handle?.close();
+  }
+  const current = await inspectOwnedStagePath(candidate, stage, "file");
+  if (current.identity !== owned.identity) throw new Error(`VSIX stage file changed after writing: ${candidate}`);
+}
+
+async function verifyOwnedStageParent(stageOwned, stage, candidate) {
+  const parent = path.dirname(candidate);
+  const expected = stageOwned.byPath.get(buildPathKey(parent));
+  if (!expected) throw new Error(`VSIX stage parent was not created by this build: ${parent}`);
+  const current = parent === path.resolve(stage)
+    ? await inspectOwnedBuildPath(parent, path.dirname(parent), "directory")
+    : await inspectOwnedStagePath(parent, stage, "directory");
+  if (current.identity !== expected.identity) throw new Error(`VSIX stage parent identity changed before mutation: ${parent}`);
+}
+
+async function inspectOwnedStagePath(candidate, stage, kind) {
+  assertPathInside(stage, candidate);
+  const stat = await fs.lstat(candidate, { bigint: true });
+  if (stat.isSymbolicLink()) throw new Error(`Refusing a symbolic-link VSIX stage artifact: ${candidate}`);
+  if (kind === "file" && !stat.isFile()) throw new Error(`Expected a regular VSIX stage file: ${candidate}`);
+  if (kind === "directory" && !stat.isDirectory()) throw new Error(`Expected a VSIX stage directory: ${candidate}`);
+  const canonical = await fs.realpath(candidate);
+  if (buildPathKey(canonical) !== buildPathKey(candidate)) throw new Error(`VSIX stage artifact resolves through an alias: ${candidate}`);
+  const identity = reliableBuildIdentity(stat);
+  if (!identity) throw new Error(`Reliable identity is unavailable for VSIX stage artifact: ${candidate}`);
+  return { path: candidate, identity, kind };
+}
+
+async function verifyOwnedStageForArchive(stageOwned, stage, distDir) {
+  const currentRoot = await inspectOwnedBuildPath(stage, distDir, "directory");
+  if (currentRoot.identity !== stageOwned.root.identity) throw new Error(`VSIX stage root identity changed before archive creation: ${stage}`);
+  const expected = new Map([
+    ...stageOwned.directories.map((owned) => [buildPathKey(owned.path), owned]),
+    ...stageOwned.files.map((owned) => [buildPathKey(owned.path), owned]),
+  ]);
+  const discovered = [];
+  async function visit(directory) {
+    for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
+      const candidate = path.join(directory, entry.name);
+      const owned = expected.get(buildPathKey(candidate));
+      if (!owned) throw new Error(`Unexpected VSIX stage content must be reviewed manually: ${candidate}`);
+      const current = await inspectOwnedStagePath(candidate, stage, owned.kind);
+      if (current.identity !== owned.identity) throw new Error(`VSIX stage artifact identity changed before archive creation: ${candidate}`);
+      discovered.push(buildPathKey(candidate));
+      if (owned.kind === "directory") await visit(candidate);
+    }
+  }
+  await visit(stage);
+  if (discovered.length !== expected.size || discovered.some((key) => !expected.has(key))) {
+    throw new Error("VSIX stage contents no longer match the run-owned build ledger");
+  }
+}
+
+async function removeOwnedStage(stageOwned, stage, distDir) {
+  for (const owned of [...stageOwned.files].reverse()) {
+    const current = await inspectOwnedStagePath(owned.path, stage, "file");
+    if (current.identity !== owned.identity) throw new Error(`Refusing to remove a VSIX stage file whose identity changed: ${owned.path}`);
+    await fs.unlink(owned.path);
+  }
+  for (const owned of [...stageOwned.directories].reverse()) {
+    const current = await inspectOwnedStagePath(owned.path, stage, "directory");
+    if (current.identity !== owned.identity) throw new Error(`Refusing to remove a VSIX stage directory whose identity changed: ${owned.path}`);
+    await fs.rmdir(owned.path);
+  }
+  const currentRoot = await inspectOwnedBuildPath(stage, distDir, "directory");
+  if (currentRoot.identity !== stageOwned.root.identity) throw new Error(`Refusing to remove a VSIX stage root whose identity changed: ${stage}`);
+  await fs.rmdir(stage);
 }
 
 async function listUnexpectedDistArtifacts(distDir, allowedCandidate) {
@@ -186,38 +303,7 @@ async function removeOwnedBuildPath(owned, distDir) {
     await fs.unlink(owned.path);
     return;
   }
-  await removeOwnedDirectoryTree(owned.path, owned.identity, distDir);
-}
-
-async function removeOwnedDirectoryTree(directory, expectedIdentity, distDir) {
-  const current = await inspectOwnedBuildPath(directory, distDir, "directory");
-  if (current.identity !== expectedIdentity) throw new Error(`Refusing to remove a build directory whose identity changed: ${directory}`);
-  await removeDirectoryContents(directory, directory);
-  const final = await fs.lstat(directory, { bigint: true });
-  if (final.isSymbolicLink() || reliableBuildIdentity(final) !== expectedIdentity) throw new Error(`Build directory changed before removal: ${directory}`);
-  await fs.rmdir(directory);
-}
-
-async function removeDirectoryContents(directory, root) {
-  for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
-    const candidate = path.join(directory, entry.name);
-    const relative = path.relative(root, candidate);
-    if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) throw new Error(`Build cleanup escaped its run-owned stage: ${candidate}`);
-    const stat = await fs.lstat(candidate, { bigint: true });
-    if (stat.isSymbolicLink()) throw new Error(`Refusing to follow a symbolic link during build cleanup: ${candidate}`);
-    if (stat.isDirectory()) {
-      const identity = reliableBuildIdentity(stat);
-      if (!identity) throw new Error(`Reliable directory identity is unavailable during build cleanup: ${candidate}`);
-      await removeDirectoryContents(candidate, root);
-      const final = await fs.lstat(candidate, { bigint: true });
-      if (final.isSymbolicLink() || reliableBuildIdentity(final) !== identity) throw new Error(`Build directory changed during cleanup: ${candidate}`);
-      await fs.rmdir(candidate);
-    } else if (stat.isFile()) {
-      await fs.unlink(candidate);
-    } else {
-      throw new Error(`Refusing to remove an unexpected build artifact type: ${candidate}`);
-    }
-  }
+  await fs.rmdir(owned.path);
 }
 
 function reliableBuildIdentity(stat) {
@@ -245,6 +331,18 @@ function assertDirectChild(parent, candidate) {
   }
 }
 
+function assertPathInside(parent, candidate) {
+  const relative = path.relative(path.resolve(parent), path.resolve(candidate));
+  if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) {
+    throw new Error(`VSIX stage artifact is outside the controlled stage: ${candidate}`);
+  }
+}
+
+function buildPathKey(candidate) {
+  const resolved = path.resolve(candidate);
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
 function escapeXml(value) {
   return String(value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
@@ -256,7 +354,7 @@ function powershellLiteral(value) {
 function createZipCommand(sourceDirectory, destinationFile) {
   const source = powershellLiteral(sourceDirectory);
   const destination = powershellLiteral(destinationFile);
-  return `Add-Type -AssemblyName System.IO.Compression; $source=${source}; $stream=[System.IO.File]::Open(${destination}, [System.IO.FileMode]::Create, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None); $archive=[System.IO.Compression.ZipArchive]::new($stream, [System.IO.Compression.ZipArchiveMode]::Create, $false); try { Get-ChildItem -LiteralPath $source -File -Recurse | Sort-Object FullName | ForEach-Object { $relative=$_.FullName.Substring($source.Length).TrimStart([System.IO.Path]::DirectorySeparatorChar).Replace([System.IO.Path]::DirectorySeparatorChar, [char]'/'); $entry=$archive.CreateEntry($relative, [System.IO.Compression.CompressionLevel]::Optimal); $input=[System.IO.File]::OpenRead($_.FullName); $output=$entry.Open(); try { $input.CopyTo($output) } finally { $output.Dispose(); $input.Dispose() } } } finally { $archive.Dispose(); $stream.Dispose() }`;
+  return `Add-Type -AssemblyName System.IO.Compression; $source=${source}; $stream=[System.IO.File]::Open(${destination}, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None); $archive=[System.IO.Compression.ZipArchive]::new($stream, [System.IO.Compression.ZipArchiveMode]::Create, $false); try { Get-ChildItem -LiteralPath $source -File -Recurse | Sort-Object FullName | ForEach-Object { $relative=$_.FullName.Substring($source.Length).TrimStart([System.IO.Path]::DirectorySeparatorChar).Replace([System.IO.Path]::DirectorySeparatorChar, [char]'/'); $entry=$archive.CreateEntry($relative, [System.IO.Compression.CompressionLevel]::Optimal); $input=[System.IO.File]::OpenRead($_.FullName); $output=$entry.Open(); try { $input.CopyTo($output) } finally { $output.Dispose(); $input.Dispose() } } } finally { $archive.Dispose(); $stream.Dispose() }`;
 }
 
 async function writeZipArchive({ stage, archivePath }) {
