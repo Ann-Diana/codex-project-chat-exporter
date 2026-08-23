@@ -500,7 +500,6 @@ async function runCommandInternal(context, { print, profiler, runState }) {
   await writeSummary(outputDir, rows, context, sourceProtection, generation);
   profiler?.addPhase("other", performance.now() - summaryStart, 0, (await fsp.stat(path.join(outputDir, "README.txt"))).size);
   diagnosticReporter("summary_end", { duration_ms: roundMs(performance.now() - summaryStart) });
-  await removeStalePreviousGenerationFiles(generation);
   let verificationElapsedMs = 0;
   const contentVerificationStartedAt = performance.now();
   diagnosticReporter("verification_start", { sessions: rows.length });
@@ -1248,13 +1247,13 @@ async function readLatestTimestamp(file, fallback = "") {
 }
 
 async function copyStableRawSnapshot(sourcePath, destinationPath, options = {}) {
-  const io = { copyOpenedFile, hashFile: sha256File, lstat: fsp.lstat, open: fsp.open, realpath: fsp.realpath, rename: fsp.rename, rm: fsp.rm, stat: fsp.stat, statIdentity: (file) => fsp.stat(file, { bigint: true }), ...options.io };
+  const io = { copyOpenedFile, hashFile: sha256File, link: fsp.link, lstat: fsp.lstat, open: fsp.open, realpath: fsp.realpath, rename: fsp.rename, rm: fsp.rm, stat: fsp.stat, statIdentity: (file) => fsp.stat(file, { bigint: true }), ...options.io };
   const maxAttempts = Math.max(1, options.maxAttempts || 3);
   const diagnostic = typeof options.diagnostic === "function" ? options.diagnostic : () => {};
   const diagnosticContext = options.diagnosticContext || {};
   const sourceIdentity = await inspectSeparatedPath(sourcePath, { io, requireRegularFile: true, requireReliableIdentity: true });
   await assertSnapshotDestinationSeparated(sourceIdentity, destinationPath, io);
-  if (options.generation) await assertGenerationDestinationWritable(destinationPath, options.generation);
+  const generationDestination = options.generation ? await assertGenerationDestinationWritable(destinationPath, options.generation) : null;
   await fsp.mkdir(path.dirname(destinationPath), { recursive: true });
   let lastReason = "source changed during export";
   let routingSnapshotReusable = isStableRoutingSnapshot(options.routingSnapshot);
@@ -1348,10 +1347,67 @@ async function copyStableRawSnapshot(sourcePath, destinationPath, options = {}) 
           throw new ExportError("UNSAFE_EXPORT_PATH", `Raw temporary file was replaced before publication: ${path.basename(temporaryPath)}`);
         }
         assertDistinctPathIdentity(sourceIdentity, publicationCandidate, "Raw temporary file aliases its source session file");
-        previousDestination = await moveExistingDestinationAside(sourceIdentity, destinationPath, io);
-        await io.rename(temporaryPath, destinationPath);
+        if (options.generation) {
+          const currentDestination = await inspectSeparatedPath(destinationPath, { allowMissing: true, io, rejectAliases: true, requireRegularFile: true, requireReliableIdentity: true });
+          if (generationDestination.exists !== currentDestination.exists || (generationDestination.exists && !sameReliableFileIdentity(generationDestination, currentDestination))) {
+            throw new ExportError("UNSAFE_EXPORT_PATH", `Raw destination changed before reuse verification: ${path.basename(destinationPath)}`);
+          }
+          if (currentDestination.exists) {
+            assertDistinctPathIdentity(sourceIdentity, currentDestination, "Existing Raw destination aliases its source session file");
+            const exportedBeforeVerification = await timedSnapshotStat(destinationPath, "published_before_verification", attempt);
+            if (exportedBeforeVerification.identity !== currentDestination.identity) {
+              throw new ExportError("UNSAFE_EXPORT_PATH", `Existing Raw destination changed before verification: ${path.basename(destinationPath)}`);
+            }
+            const exportHashStart = performance.now();
+            const exportHashStage = options.verifyPublishedSnapshot ? "snapshot_parse" : "snapshot";
+            diagnostic("export_hash_start", { ...diagnosticContext, attempt, stage: exportHashStage });
+            const verification = options.verifyPublishedSnapshot
+              ? await options.verifyPublishedSnapshot(destinationPath)
+              : { sha256: await io.hashFile(destinationPath), sizeBytes: exportedBeforeVerification.size, stable: true, value: null };
+            const exportHashMs = performance.now() - exportHashStart;
+            diagnostic("export_hash_end", { ...diagnosticContext, attempt, stage: exportHashStage, duration_ms: roundMs(exportHashMs), bytes: verification.sizeBytes ?? exportedBeforeVerification.size });
+            if (!options.verifyPublishedSnapshot) {
+              options.profiler?.addPhase("export_hashing", exportHashMs, exportedBeforeVerification.size, 0);
+              options.profiler?.recordSession(options.profileSession, "snapshot_hash_ms", exportHashMs, exportedBeforeVerification.size, 0);
+            }
+            const exportedAfterVerification = await timedSnapshotStat(destinationPath, "published_after_verification", attempt);
+            if (exportedAfterVerification.identity !== currentDestination.identity) {
+              throw new ExportError("UNSAFE_EXPORT_PATH", `Existing Raw destination changed during verification: ${path.basename(destinationPath)}`);
+            }
+            const exportedStable = verification.stable !== false && sameFileVersion(exportedBeforeVerification, exportedAfterVerification);
+            if (!exportedStable || verification.sizeBytes !== before.size || verification.sha256 !== sourceSha256) {
+              throw new ExportError("EXPORT_DESTINATION_COLLISION", `Refusing to replace an existing Raw file whose bytes do not match the stable source: ${path.basename(destinationPath)}`);
+            }
+            await removeOwnedTemporary(temporaryOwned, io);
+            temporaryOwned = null;
+            const previousSession = previousRawSession(options.generation, destinationPath);
+            const verifiedAt = previousSession?.raw_sha256 === verification.sha256 && isCanonicalIsoTimestamp(previousSession.raw_verified_at)
+              ? previousSession.raw_verified_at
+              : new Date().toISOString();
+            diagnostic("snapshot_attempt_end", { ...diagnosticContext, attempt, status: "STABLE", duration_ms: roundMs(performance.now() - attemptStartedAt) });
+            return {
+              sha256: verification.sha256,
+              sizeBytes: exportedAfterVerification.size,
+              sourceAfterMtimeMs: afterCopy.mtimeMs,
+              sourceAfterSizeBytes: afterCopy.size,
+              sourceBeforeMtimeMs: before.mtimeMs,
+              sourceBeforeSizeBytes: before.size,
+              attempts: attempt,
+              sourceHashBasis,
+              verificationValue: verification.value || null,
+              copyStatus: RAW_COPY_STATUS.VERIFIED_AT_EXPORT,
+              verifiedAt,
+            };
+          }
+        }
         const runOwnedIdentity = temporaryOwned.identity;
-        temporaryOwned = null;
+        if (options.generation) {
+          await io.link(temporaryPath, destinationPath);
+        } else {
+          previousDestination = await moveExistingDestinationAside(sourceIdentity, destinationPath, io);
+          await io.rename(temporaryPath, destinationPath);
+          temporaryOwned = null;
+        }
         publishedIdentity = await inspectSeparatedPath(destinationPath, { io, requireRegularFile: true, requireReliableIdentity: true });
         if (!sameReliableFileIdentity(runOwnedIdentity, publishedIdentity)) {
           destinationCompromised = true;
@@ -1359,6 +1415,10 @@ async function copyStableRawSnapshot(sourcePath, destinationPath, options = {}) 
           throw new ExportError("UNSAFE_EXPORT_PATH", `Published Raw destination was replaced during publication: ${path.basename(destinationPath)}`);
         }
         assertDistinctPathIdentity(sourceIdentity, publishedIdentity, "Published Raw destination aliases its source session file");
+        if (options.generation) {
+          await removeOwnedTemporary(temporaryOwned, io);
+          temporaryOwned = null;
+        }
         published = true;
         const exportedBeforeVerification = await timedSnapshotStat(destinationPath, "published_before_verification", attempt);
         if (exportedBeforeVerification.identity !== publishedIdentity.identity) {
@@ -1564,7 +1624,7 @@ function assertSeparatedFromSources(candidate, sourceProtection, options = {}) {
 }
 
 async function writeSeparatedOutputFile(destinationPath, sourceProtection, writer, generation = null) {
-  if (generation) await assertGenerationDestinationWritable(destinationPath, generation);
+  const generationDestination = generation ? await assertGenerationDestinationWritable(destinationPath, generation) : null;
   const destinationBefore = await assertSeparatedOutputPath(destinationPath, sourceProtection, { allowMissing: true, requireRegularFile: true, requireReliableIdentity: true });
   const temporaryPath = `${destinationPath}.partial-${process.pid}-${randomUUID()}`;
   await assertSeparatedOutputPath(temporaryPath, sourceProtection, { allowMissing: true });
@@ -1591,7 +1651,17 @@ async function writeSeparatedOutputFile(destinationPath, sourceProtection, write
     if (destinationBefore.exists !== currentDestination.exists || (destinationBefore.exists && !sameReliableFileIdentity(destinationBefore, currentDestination))) {
       throw new ExportError("UNSAFE_EXPORT_PATH", `Export destination changed before publication: ${path.basename(destinationPath)}`);
     }
-    previousDestination = await moveExistingOutputAside(destinationPath, currentDestination, sourceProtection);
+    if (generation && currentDestination.exists) {
+      if (!generationDestination.exists || !sameReliableFileIdentity(generationDestination, currentDestination)) {
+        throw new ExportError("UNSAFE_EXPORT_PATH", `Export destination changed before reuse verification: ${path.basename(destinationPath)}`);
+      }
+      const identical = await filesHaveIdenticalVerifiedBytes(temporaryPath, temporary, destinationPath, currentDestination, sourceProtection);
+      if (!identical) throw new ExportError("EXPORT_DESTINATION_COLLISION", `Refusing to replace an existing export file whose bytes differ: ${path.basename(destinationPath)}`);
+      await removeOwnedTemporary(temporaryOwned, { lstat: fsp.lstat, realpath: fsp.realpath, rm: fsp.rm, stat: fsp.stat });
+      temporaryOwned = null;
+      return;
+    }
+    if (!generation) previousDestination = await moveExistingOutputAside(destinationPath, currentDestination, sourceProtection);
     await fsp.link(temporaryPath, destinationPath);
     publishedIdentity = await assertSeparatedOutputPath(destinationPath, sourceProtection, { requireRegularFile: true, requireReliableIdentity: true });
     if (publishedIdentity.identity !== openedIdentity) throw new ExportError("UNSAFE_EXPORT_PATH", `Published export file does not match its temporary file: ${path.basename(destinationPath)}`);
@@ -1771,6 +1841,23 @@ function reliableFileIdentity(stat) {
   return `${stat.dev}:${stat.ino}`;
 }
 
+async function filesHaveIdenticalVerifiedBytes(leftPath, leftIdentity, rightPath, rightIdentity, sourceProtection) {
+  const leftBefore = await assertSeparatedOutputPath(leftPath, sourceProtection, { requireRegularFile: true, requireReliableIdentity: true });
+  const rightBefore = await assertSeparatedOutputPath(rightPath, sourceProtection, { requireRegularFile: true, requireReliableIdentity: true });
+  if (!sameReliableFileIdentity(leftIdentity, leftBefore) || !sameReliableFileIdentity(rightIdentity, rightBefore)) {
+    throw new ExportError("UNSAFE_EXPORT_PATH", "An export file changed before byte comparison");
+  }
+  if (leftBefore.stat.size !== rightBefore.stat.size) return false;
+  const [leftHash, rightHash] = await Promise.all([sha256File(leftPath), sha256File(rightPath)]);
+  const leftAfter = await assertSeparatedOutputPath(leftPath, sourceProtection, { requireRegularFile: true, requireReliableIdentity: true });
+  const rightAfter = await assertSeparatedOutputPath(rightPath, sourceProtection, { requireRegularFile: true, requireReliableIdentity: true });
+  if (!sameReliableFileIdentity(leftBefore, leftAfter) || !sameReliableFileIdentity(rightBefore, rightAfter)
+    || !sameFileVersion(leftBefore.stat, leftAfter.stat) || !sameFileVersion(rightBefore.stat, rightAfter.stat)) {
+    throw new ExportError("UNSAFE_EXPORT_PATH", "An export file changed during byte comparison");
+  }
+  return leftHash === rightHash;
+}
+
 async function beginExportGeneration(outputRoot, sourceProtection, options = {}) {
   const root = path.resolve(outputRoot);
   const markerPath = path.join(root, INCOMPLETE_MARKER_NAME);
@@ -1791,9 +1878,9 @@ async function beginExportGeneration(outputRoot, sourceProtection, options = {})
     root,
     sourceProtection,
     marker: null,
-    authorizedPreviousPaths: previous.authorizedPaths,
-    previousExistingFiles: previous.existingFiles,
-    currentPaths: new Set(),
+    describedPreviousPaths: previous.describedPaths,
+    generatedAt: previous.generatedAt,
+    previousRawSessions: previous.rawSessions,
   };
   for (const candidate of options.plannedPaths || []) await assertGenerationDestinationWritable(candidate, generation);
 
@@ -1850,7 +1937,7 @@ async function inspectPreviousExportGeneration(outputRoot, sourceProtection) {
       const candidate = await assertSeparatedOutputPath(path.join(outputRoot, name), sourceProtection, { allowMissing: true, requireRegularFile: true, requireReliableIdentity: true });
       if (candidate.exists) throw new ExportError("UNOWNED_EXPORT_FILE", `Refusing to overwrite ${name} because no valid previous manifest assigns it to an exporter generation`);
     }
-    return { authorizedPaths: new Set(), existingFiles: new Map() };
+    return { describedPaths: new Map(), generatedAt: new Date().toISOString(), rawSessions: new Map() };
   }
 
   let manifest;
@@ -1864,20 +1951,23 @@ async function inspectPreviousExportGeneration(outputRoot, sourceProtection) {
     throw new ExportError("INVALID_PREVIOUS_MANIFEST", "The previous manifest changed while it was being validated");
   }
 
-  const authorizedPaths = collectPreviousGenerationPaths(manifest);
-  const existingFiles = new Map();
-  for (const relativePath of authorizedPaths.values()) {
-    const absolutePath = generationAbsolutePath(outputRoot, relativePath);
-    const candidate = await assertSeparatedOutputPath(absolutePath, sourceProtection, { allowMissing: true, requireRegularFile: true, requireReliableIdentity: true });
-    if (candidate.exists) existingFiles.set(generationPathKey(relativePath), { path: absolutePath, identity: candidate });
-  }
+  const describedPaths = collectPreviousGenerationPaths(manifest);
   for (const name of GENERATION_ROOT_FILES) {
     const candidate = await assertSeparatedOutputPath(path.join(outputRoot, name), sourceProtection, { allowMissing: true, requireRegularFile: true, requireReliableIdentity: true });
-    if (candidate.exists && !authorizedPaths.has(generationPathKey(name))) {
-      throw new ExportError("UNOWNED_EXPORT_FILE", `Refusing to overwrite ${name} because the previous manifest does not assign it to the exporter generation`);
+    if (candidate.exists && !describedPaths.has(generationPathKey(name))) {
+      throw new ExportError("UNOWNED_EXPORT_FILE", `Refusing to reuse ${name} because the previous manifest does not describe it`);
     }
   }
-  return { authorizedPaths, existingFiles };
+  const rawSessions = new Map();
+  for (const session of manifest.sessions) {
+    if (!session.raw_export_file) continue;
+    rawSessions.set(generationPathKey(validatedGenerationRelativePath(session.raw_export_file, "raw")), session);
+  }
+  return {
+    describedPaths,
+    generatedAt: isCanonicalIsoTimestamp(manifest.generated_at) ? manifest.generated_at : new Date().toISOString(),
+    rawSessions,
+  };
 }
 
 function collectPreviousGenerationPaths(manifest) {
@@ -1942,18 +2032,16 @@ async function assertGenerationDestinationWritable(candidatePath, generation) {
   const key = generationPathKey(relativePath);
   const candidate = await inspectSeparatedPath(absolutePath, { allowMissing: true, rejectAliases: true, requireRegularFile: true, requireReliableIdentity: true });
   assertSeparatedFromSources(candidate, generation.sourceProtection);
-  if (candidate.exists && !generation.authorizedPreviousPaths.has(key)) {
-    throw new ExportError("UNOWNED_EXPORT_FILE", `Refusing to overwrite ${relativePath} because it is not assigned to the previous exporter generation`);
+  if (candidate.exists && !generation.describedPreviousPaths.has(key)) {
+    throw new ExportError("UNOWNED_EXPORT_FILE", `Refusing to reuse ${relativePath} because the previous manifest does not describe it`);
   }
-  generation.currentPaths.add(key);
   return candidate;
 }
 
-async function removeStalePreviousGenerationFiles(generation) {
-  for (const [key, owned] of generation.previousExistingFiles) {
-    if (generation.currentPaths.has(key)) continue;
-    await removeOwnedTemporary(owned, { lstat: fsp.lstat, realpath: fsp.realpath, rm: fsp.rm, stat: fsp.stat });
-  }
+function previousRawSession(generation, destinationPath) {
+  if (!generation?.previousRawSessions) return null;
+  const relativePath = validatedGenerationRelativePath(path.relative(generation.root, destinationPath), "raw");
+  return generation.previousRawSessions.get(generationPathKey(relativePath)) || null;
 }
 
 async function completeExportGeneration(generation) {
@@ -2237,7 +2325,7 @@ function redactSecrets(text) {
 
 async function writeIndexFiles(dir, rows, profiler = null, context, sourceProtection, generation) {
   const { diagnosticReporter, exportFormats, exportProfile, copyRaw, codexHome, sessionsDir, includeArchived, archivedSessionsDir, sessionIndexPath, pathStyle } = context;
-  const generatedAt = new Date().toISOString();
+  const generatedAt = generation?.generatedAt || new Date().toISOString();
   const indexRows = [...rows].sort((a, b) => (b.updated_at || b.started_at || "").localeCompare(a.updated_at || a.started_at || ""));
   const includeRawColumn = indexRows.some((row) => Boolean(row.raw_export_file));
   const indexStart = performance.now();
@@ -2577,7 +2665,7 @@ async function writeSummary(dir, rows, context, sourceProtection, generation) {
   for (const row of rows) projects.set(row.project || "unknown", (projects.get(row.project || "unknown") || 0) + 1);
   const activeCount = rows.filter((row) => row.storage === "active").length;
   const archivedCount = rows.filter((row) => row.storage === "archived").length;
-  const lines = ["Codex Project Chat Export", "=========================", "", `Generated: ${new Date().toISOString()}`, `Codex home: ${codexHome}`, `Sessions dir: ${sessionsDir}`, `Archived sessions dir: ${includeArchived ? archivedSessionsDir : "disabled"}`, `Export profile: ${exportProfile}`, `Path style: ${pathStyle}`, `Sessions exported: ${rows.length}`, `Active sessions: ${activeCount}`, `Archived sessions: ${archivedCount}`, "", "Projects:", ...Array.from(projects.entries()).map(([project, count]) => `- ${project}: ${count}`), "", "Notes:"];
+  const lines = ["Codex Project Chat Export", "=========================", "", `Generated: ${generation?.generatedAt || new Date().toISOString()}`, `Codex home: ${codexHome}`, `Sessions dir: ${sessionsDir}`, `Archived sessions dir: ${includeArchived ? archivedSessionsDir : "disabled"}`, `Export profile: ${exportProfile}`, `Path style: ${pathStyle}`, `Sessions exported: ${rows.length}`, `Active sessions: ${activeCount}`, `Archived sessions: ${archivedCount}`, "", "Projects:", ...Array.from(projects.entries()).map(([project, count]) => `- ${project}: ${count}`), "", "Notes:"];
   if (exportFormats.markdown) lines.push(`- ${markdownDirName}/ contains classified, derived reading views.`);
   else lines.push("- This profile intentionally does not create human-readable session transcripts or classify session events.");
   if (copyRaw) lines.push("- raw/ contains canonical byte-preserving session JSONL snapshots.");

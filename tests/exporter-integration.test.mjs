@@ -7,7 +7,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
-import { beginExportGeneration, completeExportGeneration, exportArchive, INCOMPLETE_MARKER_NAME, readSessionRoutingMeta, sha256File } from "../bin/export-codex-project-chats.mjs";
+import { beginExportGeneration, completeExportGeneration, copyStableRawSnapshot, exportArchive, INCOMPLETE_MARKER_NAME, readSessionRoutingMeta, sha256File } from "../bin/export-codex-project-chats.mjs";
 
 const execFileAsync = promisify(execFile);
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -732,17 +732,94 @@ const firstGeneration = await exportArchive({ codexHome: generationHome, scope: 
 assert.equal(await pathExists(path.join(generationOutput, INCOMPLETE_MARKER_NAME)), false, "a successful first export must remove its incomplete marker");
 assert.equal(generationDiagnostics.filter((event) => event.event === "export_hash_start").length, 1, "the stable one-session export must perform exactly one published Raw hash pass");
 const firstGenerationManifest = await fs.readFile(firstGeneration.manifestPath, "utf8");
-const repeatedGeneration = await exportArchive({ codexHome: generationHome, scope: "all", outputDirectory: generationOutput, exportProfile: "complete" });
+const firstGenerationRecord = JSON.parse(firstGenerationManifest);
+const repeatedGenerationDiagnostics = [];
+const repeatedGeneration = await exportArchive({ codexHome: generationHome, scope: "all", outputDirectory: generationOutput, exportProfile: "complete", onDiagnostic: (event) => repeatedGenerationDiagnostics.push(event) });
 assert.equal(await pathExists(path.join(generationOutput, INCOMPLETE_MARKER_NAME)), false, "a successful repetition export must remove its incomplete marker");
 assert.deepEqual(await fs.readFile(path.join(generationOutput, JSON.parse(await fs.readFile(repeatedGeneration.manifestPath, "utf8")).sessions[0].raw_export_file)), generationRaw, "a repetition export must keep Raw bytes byte-identical");
-assert.notEqual(await fs.readFile(repeatedGeneration.manifestPath, "utf8"), "", "a repetition export must publish a non-empty final manifest");
+assert.equal(await fs.readFile(repeatedGeneration.manifestPath, "utf8"), firstGenerationManifest, "an unchanged repetition must reuse verified identical files without replacing the previous generation");
+assert.equal(repeatedGenerationDiagnostics.filter((event) => event.event === "export_hash_start").length, 1, "an unchanged repetition must still verify the published Raw path exactly once");
 assert.notEqual(firstGenerationManifest, "", "the first generation manifest must be complete before repetition");
 
-const readableGeneration = await exportArchive({ codexHome: generationHome, scope: "all", outputDirectory: generationOutput, exportProfile: "readable" });
-assert.equal(await pathExists(path.join(generationOutput, INCOMPLETE_MARKER_NAME)), false);
-assert.equal(await pathExists(path.join(generationOutput, "raw")), true, "the exporter may retain an empty Raw directory without retaining stale generation files");
-assert.deepEqual(await listFiles(path.join(generationOutput, "raw")), [], "manifest-owned Raw files omitted by the new profile must be removed exactly, not recursively guessed");
-assert.equal(JSON.parse(await fs.readFile(readableGeneration.manifestPath, "utf8")).canonical_representation_included, false);
+const repeatedRawPath = path.join(generationOutput, firstGenerationRecord.sessions[0].raw_export_file);
+const repeatedRawBeforeProfileChange = await fs.readFile(repeatedRawPath);
+await assert.rejects(
+  () => exportArchive({ codexHome: generationHome, scope: "all", outputDirectory: generationOutput, exportProfile: "readable" }),
+  (error) => error?.code === "EXPORT_DESTINATION_COLLISION",
+);
+assert.equal(await pathExists(path.join(generationOutput, INCOMPLETE_MARKER_NAME)), true, "a profile-changing repetition must remain visibly incomplete when existing files differ");
+assert.deepEqual(await fs.readFile(repeatedRawPath), repeatedRawBeforeProfileChange, "a failed profile-changing repetition must not remove previous Raw files");
+assert.equal(await fs.readFile(repeatedGeneration.manifestPath, "utf8"), firstGenerationManifest, "a failed repetition must not replace the previous manifest");
+
+async function writePreviousManifest(output, mutate = () => {}) {
+  const manifest = structuredClone(firstGenerationRecord);
+  mutate(manifest);
+  await fs.mkdir(output, { recursive: true });
+  await fs.writeFile(path.join(output, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+  return manifest;
+}
+
+const forgedRawOutput = path.join(temp, "generation-forged-raw");
+const forgedRawManifest = await writePreviousManifest(forgedRawOutput);
+const forgedRawPath = path.join(forgedRawOutput, forgedRawManifest.sessions[0].raw_export_file);
+const forgedRawBytes = Buffer.from("foreign raw bytes\n");
+await fs.mkdir(path.dirname(forgedRawPath), { recursive: true });
+await fs.writeFile(forgedRawPath, forgedRawBytes);
+await assert.rejects(
+  () => exportArchive({ codexHome: generationHome, scope: "all", outputDirectory: forgedRawOutput, exportProfile: "complete" }),
+  (error) => error?.code === "EXPORT_DESTINATION_COLLISION",
+);
+assert.deepEqual(await fs.readFile(forgedRawPath), forgedRawBytes, "a forged manifest must not authorize replacing or deleting a foreign Raw file");
+assert.deepEqual(await fs.readFile(generationSource), generationRaw, "a forged Raw manifest must not change the source session");
+assert.equal(await pathExists(path.join(forgedRawOutput, INCOMPLETE_MARKER_NAME)), true, "a forged Raw collision must leave the generation incomplete");
+assert.equal((await listFiles(forgedRawOutput)).some((file) => /\.(?:partial|previous|failed)-/.test(path.basename(file))), false, "a failed Raw collision must clean only its current-run temporary files");
+
+const forgedMarkdownOutput = path.join(temp, "generation-forged-markdown");
+const forgedMarkdownManifest = await writePreviousManifest(forgedMarkdownOutput, (manifest) => {
+  manifest.canonical_representation_included = false;
+  manifest.export_profile = "readable";
+  manifest.formats.raw = false;
+  manifest.sessions[0].raw_export_file = "";
+  manifest.sessions[0].raw_export_name = "";
+});
+const forgedMarkdownPath = path.join(forgedMarkdownOutput, forgedMarkdownManifest.sessions[0].markdown_file);
+const forgedMarkdownBytes = Buffer.from("foreign markdown bytes\n");
+await fs.mkdir(path.dirname(forgedMarkdownPath), { recursive: true });
+await fs.writeFile(forgedMarkdownPath, forgedMarkdownBytes);
+await assert.rejects(
+  () => exportArchive({ codexHome: generationHome, scope: "all", outputDirectory: forgedMarkdownOutput, exportProfile: "readable" }),
+  (error) => error?.code === "EXPORT_DESTINATION_COLLISION",
+);
+assert.deepEqual(await fs.readFile(forgedMarkdownPath), forgedMarkdownBytes, "a forged manifest must not authorize replacing or deleting a foreign Markdown file");
+assert.deepEqual(await fs.readFile(generationSource), generationRaw, "a forged Markdown manifest must not change the source session");
+
+const forgedStaleOutput = path.join(temp, "generation-forged-stale");
+const staleRawRelative = "raw/foreign/customer-private.jsonl";
+const staleMarkdownRelative = "markdown/foreign/customer-private.md";
+await writePreviousManifest(forgedStaleOutput, (manifest) => {
+  manifest.sessions.push({ raw_export_file: staleRawRelative, markdown_file: staleMarkdownRelative });
+});
+const staleRawPath = path.join(forgedStaleOutput, staleRawRelative);
+const staleMarkdownPath = path.join(forgedStaleOutput, staleMarkdownRelative);
+await fs.mkdir(path.dirname(staleRawPath), { recursive: true });
+await fs.mkdir(path.dirname(staleMarkdownPath), { recursive: true });
+await fs.writeFile(staleRawPath, "foreign stale raw\n", "utf8");
+await fs.writeFile(staleMarkdownPath, "foreign stale markdown\n", "utf8");
+await assert.rejects(() => exportArchive({ codexHome: generationHome, scope: "all", outputDirectory: forgedStaleOutput, exportProfile: "complete" }));
+assert.equal(await fs.readFile(staleRawPath, "utf8"), "foreign stale raw\n", "a formally valid foreign Raw path in a prior manifest must not be deleted as stale");
+assert.equal(await fs.readFile(staleMarkdownPath, "utf8"), "foreign stale markdown\n", "a formally valid foreign Markdown path in a prior manifest must not be deleted as stale");
+
+const exporterLikeOutput = path.join(temp, "generation-exporter-like-foreign");
+await writePreviousManifest(exporterLikeOutput, (manifest) => { manifest.sessions = []; });
+const exporterLikePath = path.join(exporterLikeOutput, firstGenerationRecord.sessions[0].raw_export_file);
+await fs.mkdir(path.dirname(exporterLikePath), { recursive: true });
+await fs.writeFile(exporterLikePath, "foreign exporter-like file\n", "utf8");
+await assert.rejects(
+  () => exportArchive({ codexHome: generationHome, scope: "all", outputDirectory: exporterLikeOutput, exportProfile: "complete" }),
+  (error) => error?.code === "UNOWNED_EXPORT_FILE",
+);
+assert.equal(await fs.readFile(exporterLikePath, "utf8"), "foreign exporter-like file\n", "an exporter-like filename is not evidence of current-run ownership");
+assert.equal(await pathExists(path.join(exporterLikeOutput, INCOMPLETE_MARKER_NAME)), false, "an undescribed collision must fail before marker publication");
 
 const emptyProtection = Object.freeze({ rootCanonicalPaths: new Set(), fileCanonicalPaths: new Set(), fileIdentities: new Set() });
 const afterMarkerOutput = path.join(temp, "generation-after-marker");
@@ -756,6 +833,28 @@ await beginExportGeneration(afterRawOutput, emptyProtection, { plannedPaths: ["m
 await fs.mkdir(path.join(afterRawOutput, "raw", "p001"), { recursive: true });
 await fs.writeFile(path.join(afterRawOutput, "raw", "p001", "s0001.jsonl"), generationRaw);
 assert.equal(await pathExists(path.join(afterRawOutput, INCOMPLETE_MARKER_NAME)), true, "an error after Raw publication must leave the generation invalid");
+
+const publicationRaceOutput = path.join(temp, "generation-publication-race");
+const publicationRaceDestination = path.join(publicationRaceOutput, "raw", "p001", "s0001.jsonl");
+await fs.mkdir(publicationRaceOutput, { recursive: true });
+const publicationRaceGeneration = await beginExportGeneration(publicationRaceOutput, emptyProtection, { plannedPaths: ["manifest.json", "README.txt", "raw/p001/s0001.jsonl"] });
+let injectedPublicationCollision = false;
+await assert.rejects(() => copyStableRawSnapshot(generationSource, publicationRaceDestination, {
+  generation: publicationRaceGeneration,
+  maxAttempts: 1,
+  io: {
+    async link(temporaryPath, destinationPath) {
+      injectedPublicationCollision = true;
+      await fs.writeFile(destinationPath, "foreign publication-race file\n", "utf8");
+      return fs.link(temporaryPath, destinationPath);
+    },
+  },
+}));
+assert.equal(injectedPublicationCollision, true, "the synthetic race must place a foreign file immediately before exclusive publication");
+assert.equal(await fs.readFile(publicationRaceDestination, "utf8"), "foreign publication-race file\n", "exclusive publication must not replace or clean up the foreign collision");
+assert.deepEqual(await fs.readFile(generationSource), generationRaw, "an exclusive publication collision must leave the source byte-identical");
+assert.equal(await pathExists(path.join(publicationRaceOutput, INCOMPLETE_MARKER_NAME)), true, "a publication collision must leave the generation incomplete");
+assert.equal((await listFiles(publicationRaceOutput)).some((file) => /\.partial-/.test(path.basename(file))), false, "the failed publication must remove only its current-run temporary file");
 
 const afterManifestOutput = path.join(temp, "generation-after-manifest");
 await fs.mkdir(afterManifestOutput, { recursive: true });

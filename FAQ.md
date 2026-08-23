@@ -115,7 +115,7 @@ They do not reliably remove paths, names, email addresses, IP addresses, custome
 
 ## Why is an empty `raw/` folder still present after using `--no-raw`?
 
-A successful repetition export removes only files that a structurally valid previous manifest assigns to the previous exporter generation. It does not recursively delete directories or unknown files, so an empty `raw/` directory can remain. If a run fails after generation changes begin, `EXPORT_INCOMPLETE.txt` remains and invalidates the manifest and indexes until the folder is manually reviewed or replaced with a new empty destination.
+A previous manifest describes archive membership but is not trusted as proof that files may be deleted or replaced. An unchanged repetition can reuse byte-identical verified files; differing pre-existing files cause the new generation to fail closed, and files no longer needed by the new export remain untouched. If a run fails after generation changes begin, `EXPORT_INCOMPLETE.txt` remains and invalidates the manifest and indexes until the folder is manually reviewed or replaced with a new empty destination.
 
 ## Which export profile should I use?
 

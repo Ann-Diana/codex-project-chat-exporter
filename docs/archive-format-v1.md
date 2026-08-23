@@ -24,6 +24,8 @@ The exporter creates the marker before changing files from an existing generatio
 
 A verifier or future importer must check for `EXPORT_INCOMPLETE.txt` before reading `manifest.json` and must reject the export when the marker exists. The marker contains only a fixed status explanation and no session content or local paths.
 
+The manifest describes archive membership and source mapping. It is not an authenticated ownership record and never authorizes destructive filesystem cleanup. Files from older exports or unknown files in a reused output folder can remain; a differing pre-existing file at a required path causes the new generation to fail closed.
+
 ## Manifest header
 
 `manifest.json` uses:
