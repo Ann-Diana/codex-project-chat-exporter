@@ -20,7 +20,7 @@ Use this checklist for the uniquely named final candidate prepared during the la
 7. Confirm that progress advances through phases and shows at least one `Processing session X of Y` message.
 8. Confirm that the output channel records complete output-folder, HTML-index, and manifest paths.
 9. With `codexProjectChatExporter.diagnosticOutput` disabled, confirm one concise runtime summary and no `[DIAG]` stream. If enabled for one troubleshooting run, confirm message-free, path-redacted events may include short IDs, sizes, phases, status, and timing values.
-10. Confirm that `outputDirectory` and `codexHome` are application-scoped settings, Workspace values are rejected, and UNC/device output paths are rejected. Mapped network drives remain a documented detection limit.
+10. Confirm that `outputDirectory` and `codexHome` are machine-scoped settings, Workspace values are rejected, and UNC/device output paths are rejected. Mapped network drives remain a documented detection limit.
 
 ## Check all profiles and cancellation
 

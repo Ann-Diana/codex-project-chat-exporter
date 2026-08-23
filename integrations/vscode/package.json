@@ -68,13 +68,13 @@
         "codexProjectChatExporter.outputDirectory": {
           "type": "string",
           "default": "",
-          "scope": "application",
+          "scope": "machine",
           "description": "Absolute local folder where Codex exports are written. If empty, the extension asks on first export and remembers the selected folder."
         },
         "codexProjectChatExporter.codexHome": {
           "type": "string",
           "default": "",
-          "scope": "application",
+          "scope": "machine",
           "description": "Optional absolute local Codex home folder. Leave empty to use CODEX_HOME or the default local .codex folder."
         },
         "codexProjectChatExporter.pathStyle": {

@@ -158,9 +158,16 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
   assert.equal("codexProjectChatExporter.exportProfile" in extensionPackage.contributes.configuration.properties, false);
   assert.equal(extensionPackage.version, "0.1.3", "the final pre-push candidate must install as a distinguishable extension version");
   assert.equal(extensionPackage.contributes.configuration.properties["codexProjectChatExporter.diagnosticOutput"].default, false);
-  assert.equal(extensionPackage.contributes.configuration.properties["codexProjectChatExporter.outputDirectory"].scope, "application");
-  assert.equal(extensionPackage.contributes.configuration.properties["codexProjectChatExporter.codexHome"].scope, "application");
+  assert.equal(extensionPackage.contributes.configuration.properties["codexProjectChatExporter.outputDirectory"].scope, "machine");
+  assert.equal(extensionPackage.contributes.configuration.properties["codexProjectChatExporter.codexHome"].scope, "machine");
   assert.equal(extensionPackage.contributes.configuration.properties["codexProjectChatExporter.includeTools"].scope, "application");
+  assert.deepEqual(Object.fromEntries(Object.entries(extensionPackage.contributes.configuration.properties).map(([key, value]) => [key, value.default])), {
+    "codexProjectChatExporter.outputDirectory": "",
+    "codexProjectChatExporter.codexHome": "",
+    "codexProjectChatExporter.pathStyle": "short",
+    "codexProjectChatExporter.includeTools": false,
+    "codexProjectChatExporter.diagnosticOutput": false,
+  }, "all five setting defaults must remain stable");
   assert.equal(formatExportSummary(1, 1), "1 session across 1 project");
   assert.equal(formatExportSummary(2, 1), "2 sessions across 1 project");
   assert.equal(formatExportSummary(100, 20), "100 sessions across 20 projects");
