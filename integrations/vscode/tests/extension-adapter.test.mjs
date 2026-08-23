@@ -209,6 +209,7 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
   const distDir = path.join(buildTemp, "dist");
   const foreignBytes = Buffer.from("foreign temporary archive");
   let occupiedArchivePath;
+  let archiveWriterCalls = 0;
   await assert.rejects(
     () => buildVsix({
       distDir,
@@ -216,9 +217,14 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
         occupiedArchivePath = archivePath;
         await fsp.writeFile(archivePath, foreignBytes, { flag: "wx" });
       },
+      archiveWriter: async ({ archivePath }) => {
+        archiveWriterCalls += 1;
+        await fsp.writeFile(archivePath, "synthetic archive", { flag: "wx" });
+      },
     }),
-    /already exists|existiert bereits|CreateNew|because it already exists/i,
+    (error) => error?.code === "EEXIST",
   );
+  assert.equal(archiveWriterCalls, 1, "the injected archive writer must attempt exclusive creation exactly once");
   assert.deepEqual(await fsp.readFile(occupiedArchivePath), foreignBytes, "the actual archive writer must not truncate or replace a foreign temporary file");
   const remaining = await fsp.readdir(distDir);
   assert.deepEqual(remaining, [path.basename(occupiedArchivePath)], "failed exclusive archive creation must leave only the unowned foreign file for manual review");
