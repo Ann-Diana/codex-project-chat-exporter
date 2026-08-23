@@ -114,6 +114,8 @@ When included, raw JSONL is the canonical byte-preserving representation. `raw_c
 
 ## Privacy
 
+> **Paranoid by design.** A small exporter with an unusually serious threat model.
+
 - The application sends no telemetry, performs no built-in upload, and makes no application-level HTTP, web, or API calls.
 - Configured filesystem paths can still point to network-backed storage. Mapped network drives cannot be identified reliably in every configuration.
 - Markdown masking covers only some common token-shaped secrets and long base64-like values; it is best effort, not complete redaction.
