@@ -1535,18 +1535,18 @@ async function createSourceProtection(files, locations) {
 }
 
 async function ensureSeparatedOutputDirectory(directoryPath, sourceProtection, options = {}) {
-  const candidate = await inspectSeparatedPath(directoryPath, { allowMissing: true });
+  const candidate = await inspectSeparatedPath(directoryPath, { allowMissing: true, rejectAliases: true });
   assertSeparatedFromSources(candidate, sourceProtection, options);
   await fsp.mkdir(directoryPath, { recursive: true });
-  const created = await inspectSeparatedPath(directoryPath, { requireDirectory: true });
+  const created = await inspectSeparatedPath(directoryPath, { rejectAliases: true, requireDirectory: true });
   assertSeparatedFromSources(created, sourceProtection, options);
   return created;
 }
 
 async function assertSeparatedOutputPath(candidatePath, sourceProtection, options = {}) {
-  const parent = await inspectSeparatedPath(path.dirname(candidatePath), { requireDirectory: true });
+  const parent = await inspectSeparatedPath(path.dirname(candidatePath), { rejectAliases: true, requireDirectory: true });
   assertSeparatedFromSources(parent, sourceProtection, { rejectSourceDescendants: false });
-  const candidate = await inspectSeparatedPath(candidatePath, { allowMissing: options.allowMissing === true, requireRegularFile: options.requireRegularFile === true, requireReliableIdentity: options.requireReliableIdentity === true });
+  const candidate = await inspectSeparatedPath(candidatePath, { allowMissing: options.allowMissing === true, rejectAliases: true, requireRegularFile: options.requireRegularFile === true, requireReliableIdentity: options.requireReliableIdentity === true });
   assertSeparatedFromSources(candidate, sourceProtection);
   return candidate;
 }
@@ -1627,14 +1627,14 @@ async function moveExistingOutputAside(destinationPath, destination, sourceProte
 }
 
 async function assertPerformanceProfileSeparated(profilePath, outputRoot, sourceProtection) {
-  const profile = await inspectSeparatedPath(profilePath, { allowMissing: true });
+  const profile = await inspectSeparatedPath(profilePath, { allowMissing: true, rejectAliases: true });
   assertSeparatedFromSources(profile, sourceProtection);
-  const output = await inspectSeparatedPath(outputRoot, { allowMissing: true });
+  const output = await inspectSeparatedPath(outputRoot, { allowMissing: true, rejectAliases: true });
   if (pathsOverlap(profile.canonicalPath, output.canonicalPath)) throw new ExportError("UNSAFE_EXPORT_PATH", "The performance profile must be stored outside the export output folder");
 }
 
 async function assertSeparatedExportRoot(candidateOutputRoot, sourceRoots) {
-  const output = await inspectSeparatedPath(candidateOutputRoot, { allowMissing: true });
+  const output = await inspectSeparatedPath(candidateOutputRoot, { allowMissing: true, rejectAliases: true });
   for (const sourceRoot of sourceRoots) {
     const source = await inspectSeparatedPath(sourceRoot, { requireDirectory: true });
     if (pathsOverlap(output.canonicalPath, source.canonicalPath)) {
@@ -1644,13 +1644,13 @@ async function assertSeparatedExportRoot(candidateOutputRoot, sourceRoots) {
 }
 
 async function assertSnapshotDestinationSeparated(sourceIdentity, destinationPath, io) {
-  const destination = await inspectSeparatedPath(destinationPath, { allowMissing: true, io });
+  const destination = await inspectSeparatedPath(destinationPath, { allowMissing: true, io, rejectAliases: true });
   assertDistinctPathIdentity(sourceIdentity, destination, "Raw destination aliases its source session file");
 }
 
 async function assertSnapshotTemporarySeparated(sourceIdentity, destinationPath, temporaryPath, io) {
-  const destination = await inspectSeparatedPath(destinationPath, { allowMissing: true, io });
-  const temporary = await inspectSeparatedPath(temporaryPath, { allowMissing: true, io });
+  const destination = await inspectSeparatedPath(destinationPath, { allowMissing: true, io, rejectAliases: true });
+  const temporary = await inspectSeparatedPath(temporaryPath, { allowMissing: true, io, rejectAliases: true });
   if (temporary.exists) throw new ExportError("UNSAFE_EXPORT_PATH", `Refusing to reuse an existing raw snapshot temporary file: ${path.basename(temporaryPath)}`);
   assertDistinctPathIdentity(sourceIdentity, destination, "Raw destination aliases its source session file");
   assertDistinctPathIdentity(sourceIdentity, temporary, "Raw temporary path aliases its source session file");
@@ -1658,14 +1658,14 @@ async function assertSnapshotTemporarySeparated(sourceIdentity, destinationPath,
 }
 
 async function moveExistingDestinationAside(sourceIdentity, destinationPath, io) {
-  const destination = await inspectSeparatedPath(destinationPath, { allowMissing: true, io, requireRegularFile: true, requireReliableIdentity: true });
+  const destination = await inspectSeparatedPath(destinationPath, { allowMissing: true, io, rejectAliases: true, requireRegularFile: true, requireReliableIdentity: true });
   if (!destination.exists) return null;
   assertDistinctPathIdentity(sourceIdentity, destination, "Existing Raw destination aliases its source session file");
   const backupPath = `${destinationPath}.previous-${process.pid}-${randomUUID()}`;
-  const backup = await inspectSeparatedPath(backupPath, { allowMissing: true, io });
+  const backup = await inspectSeparatedPath(backupPath, { allowMissing: true, io, rejectAliases: true });
   if (backup.exists) throw new ExportError("UNSAFE_EXPORT_PATH", `Refusing to reuse an existing raw snapshot backup file: ${path.basename(backupPath)}`);
   await io.rename(destinationPath, backupPath);
-  const moved = await inspectSeparatedPath(backupPath, { io, requireRegularFile: true, requireReliableIdentity: true });
+  const moved = await inspectSeparatedPath(backupPath, { io, rejectAliases: true, requireRegularFile: true, requireReliableIdentity: true });
   if (!sameReliableFileIdentity(destination, moved)) {
     await restoreUnexpectedMove(destinationPath, backupPath, moved, io);
     throw new ExportError("UNSAFE_EXPORT_PATH", "Existing Raw destination identity changed while it was moved aside");
@@ -1675,13 +1675,13 @@ async function moveExistingDestinationAside(sourceIdentity, destinationPath, io)
 
 async function rollbackPublishedDestination(destinationPath, publishedIdentity, previousDestination, io) {
   if (!publishedIdentity) throw new ExportError("UNSAFE_EXPORT_PATH", "Published Raw destination identity was not established");
-  const current = await inspectSeparatedPath(destinationPath, { io, requireRegularFile: true, requireReliableIdentity: true });
+  const current = await inspectSeparatedPath(destinationPath, { io, rejectAliases: true, requireRegularFile: true, requireReliableIdentity: true });
   if (!sameReliableFileIdentity(publishedIdentity, current)) throw new ExportError("UNSAFE_EXPORT_PATH", "Published Raw destination was replaced before rollback");
   const failedPath = `${destinationPath}.failed-${process.pid}-${randomUUID()}`;
-  const failedCandidate = await inspectSeparatedPath(failedPath, { allowMissing: true, io });
+  const failedCandidate = await inspectSeparatedPath(failedPath, { allowMissing: true, io, rejectAliases: true });
   if (failedCandidate.exists) throw new ExportError("UNSAFE_EXPORT_PATH", `Refusing to reuse an existing failed snapshot path: ${path.basename(failedPath)}`);
   await io.rename(destinationPath, failedPath);
-  const failedIdentity = await inspectSeparatedPath(failedPath, { io, requireRegularFile: true, requireReliableIdentity: true });
+  const failedIdentity = await inspectSeparatedPath(failedPath, { io, rejectAliases: true, requireRegularFile: true, requireReliableIdentity: true });
   if (!sameReliableFileIdentity(publishedIdentity, failedIdentity)) {
     await restoreUnexpectedMove(destinationPath, failedPath, failedIdentity, io);
     throw new ExportError("UNSAFE_EXPORT_PATH", "Published Raw destination identity changed during rollback");
@@ -1691,24 +1691,24 @@ async function rollbackPublishedDestination(destinationPath, publishedIdentity, 
 }
 
 async function restorePreviousDestination(destinationPath, previousDestination, io) {
-  const destination = await inspectSeparatedPath(destinationPath, { allowMissing: true, io });
+  const destination = await inspectSeparatedPath(destinationPath, { allowMissing: true, io, rejectAliases: true });
   if (destination.exists) throw new ExportError("UNSAFE_EXPORT_PATH", "Refusing to overwrite a destination while restoring the previous Raw snapshot");
-  const previous = await inspectSeparatedPath(previousDestination.path, { io, requireRegularFile: true, requireReliableIdentity: true });
+  const previous = await inspectSeparatedPath(previousDestination.path, { io, rejectAliases: true, requireRegularFile: true, requireReliableIdentity: true });
   if (!sameReliableFileIdentity(previousDestination.identity, previous)) throw new ExportError("UNSAFE_EXPORT_PATH", "Previous Raw destination identity changed before restoration");
   await io.rename(previousDestination.path, destinationPath);
 }
 
 async function restoreUnexpectedMove(destinationPath, movedPath, movedIdentity, io) {
-  const destination = await inspectSeparatedPath(destinationPath, { allowMissing: true, io });
+  const destination = await inspectSeparatedPath(destinationPath, { allowMissing: true, io, rejectAliases: true });
   if (destination.exists) throw new ExportError("UNSAFE_EXPORT_PATH", "Could not restore a moved file because the destination was replaced");
-  const moved = await inspectSeparatedPath(movedPath, { io, requireRegularFile: true, requireReliableIdentity: true });
+  const moved = await inspectSeparatedPath(movedPath, { io, rejectAliases: true, requireRegularFile: true, requireReliableIdentity: true });
   if (!sameReliableFileIdentity(movedIdentity, moved)) throw new ExportError("UNSAFE_EXPORT_PATH", "Could not restore a moved file because its identity changed");
   await io.rename(movedPath, destinationPath);
 }
 
 async function removeOwnedTemporary(owned, io) {
   if (!owned) return;
-  const current = await inspectSeparatedPath(owned.path, { io, requireRegularFile: true, requireReliableIdentity: true });
+  const current = await inspectSeparatedPath(owned.path, { io, rejectAliases: true, requireRegularFile: true, requireReliableIdentity: true });
   if (!sameReliableFileIdentity(owned.identity, current)) throw new ExportError("UNSAFE_EXPORT_PATH", `Refusing to remove a temporary file whose identity changed: ${path.basename(owned.path)}`);
   await io.rm(owned.path);
 }
@@ -1725,6 +1725,9 @@ async function inspectSeparatedPath(candidatePath, options = {}) {
   if (lstat) {
     if (lstat.isSymbolicLink()) throw new ExportError("UNSAFE_EXPORT_PATH", `Symbolic-link or junction path is not accepted for snapshot publication: ${path.basename(candidatePath)}`);
     const canonicalPath = await io.realpath(absolutePath);
+    if (options.rejectAliases && !sameCanonicalPath(canonicalPath, absolutePath)) {
+      throw new ExportError("UNSAFE_EXPORT_PATH", `Output path resolves through a symbolic-link, junction, or alias component: ${path.basename(candidatePath)}`);
+    }
     const [stat, identityStat] = await Promise.all([io.stat(canonicalPath), io.statIdentity(canonicalPath)]);
     if (options.requireRegularFile && !stat.isFile()) throw new ExportError("UNSAFE_EXPORT_PATH", `Expected a regular file while checking path separation: ${path.basename(candidatePath)}`);
     if (options.requireDirectory && !stat.isDirectory()) throw new ExportError("UNSAFE_EXPORT_PATH", `Expected a directory while checking path separation: ${path.basename(candidatePath)}`);
@@ -1733,6 +1736,9 @@ async function inspectSeparatedPath(candidatePath, options = {}) {
     return { absolutePath, canonicalPath, exists: true, identity, stat };
   }
   const canonicalPath = await canonicalizeMissingPath(absolutePath, io);
+  if (options.rejectAliases && !sameCanonicalPath(canonicalPath, absolutePath)) {
+    throw new ExportError("UNSAFE_EXPORT_PATH", `Output path resolves through a symbolic-link, junction, or alias component: ${path.basename(candidatePath)}`);
+  }
   return { absolutePath, canonicalPath, exists: false, identity: null, stat: null };
 }
 
@@ -1934,7 +1940,7 @@ async function assertGenerationDestinationWritable(candidatePath, generation) {
   if (!isPathInside(absolutePath, generation.root) || sameCanonicalPath(absolutePath, generation.root)) throw new ExportError("UNSAFE_EXPORT_PATH", "Export generation path is outside the output folder");
   const relativePath = validatedGenerationRelativePath(path.relative(generation.root, absolutePath));
   const key = generationPathKey(relativePath);
-  const candidate = await inspectSeparatedPath(absolutePath, { allowMissing: true, requireRegularFile: true, requireReliableIdentity: true });
+  const candidate = await inspectSeparatedPath(absolutePath, { allowMissing: true, rejectAliases: true, requireRegularFile: true, requireReliableIdentity: true });
   assertSeparatedFromSources(candidate, generation.sourceProtection);
   if (candidate.exists && !generation.authorizedPreviousPaths.has(key)) {
     throw new ExportError("UNOWNED_EXPORT_FILE", `Refusing to overwrite ${relativePath} because it is not assigned to the previous exporter generation`);

@@ -225,6 +225,77 @@ assert.equal(apiProfile.status, "COMPLETED");
 
 const protectedSource = path.join(activeDir, "rollout-active.jsonl");
 const protectedSourceHash = await sha256File(protectedSource);
+const normalLocalOutput = path.join(temp, "normal-local-output");
+await exportArchive({ codexHome, scope: "all", outputDirectory: normalLocalOutput, exportProfile: "readable" });
+assert.equal(await pathExists(path.join(normalLocalOutput, "manifest.json")), true, "a normal local output path must remain supported");
+
+async function assertAliasedOutputRejected({ aliasPath, outputPath, realOutputPath, type }) {
+  try {
+    await fs.symlink(path.dirname(realOutputPath), aliasPath, type);
+  } catch (error) {
+    if (["EPERM", "EACCES", "ENOSYS", "EINVAL"].includes(error?.code)) return false;
+    throw error;
+  }
+  await assert.rejects(
+    () => exportArchive({ codexHome, scope: "all", outputDirectory: outputPath, exportProfile: "readable" }),
+    (error) => error?.code === "UNSAFE_EXPORT_PATH" && /symbolic-link|junction|alias/i.test(error.message),
+  );
+  assert.equal(await pathExists(path.join(realOutputPath, "manifest.json")), false, "an aliased output path must not publish outside the lexically selected path");
+  assert.equal(await pathExists(path.join(realOutputPath, INCOMPLETE_MARKER_NAME)), false, "an alias rejection must occur before generation mutation or cleanup");
+  return true;
+}
+
+const symlinkRealParent = path.join(temp, "output-symlink-real");
+const symlinkRealOutput = path.join(symlinkRealParent, "existing-output");
+const symlinkAliasParent = path.join(temp, "output-symlink-alias");
+await fs.mkdir(symlinkRealOutput, { recursive: true });
+await assertAliasedOutputRejected({ aliasPath: symlinkAliasParent, outputPath: path.join(symlinkAliasParent, "existing-output"), realOutputPath: symlinkRealOutput, type: "dir" });
+
+if (process.platform === "win32") {
+  const junctionRealParent = path.join(temp, "output-junction-real");
+  const junctionRealOutput = path.join(junctionRealParent, "existing-output");
+  const junctionAliasParent = path.join(temp, "output-junction-alias");
+  await fs.mkdir(junctionRealOutput, { recursive: true });
+  assert.equal(await assertAliasedOutputRejected({ aliasPath: junctionAliasParent, outputPath: path.join(junctionAliasParent, "existing-output"), realOutputPath: junctionRealOutput, type: "junction" }), true, "Windows junction rejection must be exercised when junctions are available");
+}
+
+const missingAliasRealParent = path.join(temp, "output-missing-alias-real");
+const missingAliasParent = path.join(temp, "output-missing-alias");
+const missingAliasRealOutput = path.join(missingAliasRealParent, "not-created");
+await fs.mkdir(missingAliasRealParent, { recursive: true });
+await assertAliasedOutputRejected({ aliasPath: missingAliasParent, outputPath: path.join(missingAliasParent, "not-created"), realOutputPath: missingAliasRealOutput, type: process.platform === "win32" ? "junction" : "dir" });
+assert.equal(await pathExists(missingAliasRealOutput), false, "a missing target under an alias ancestor must not be created");
+
+const directAliasRealOutput = path.join(temp, "output-direct-alias-real");
+const directAliasOutput = path.join(temp, "output-direct-alias");
+await fs.mkdir(directAliasRealOutput, { recursive: true });
+try {
+  await fs.symlink(directAliasRealOutput, directAliasOutput, process.platform === "win32" ? "junction" : "dir");
+  await assert.rejects(
+    () => exportArchive({ codexHome, scope: "all", outputDirectory: directAliasOutput, exportProfile: "readable" }),
+    (error) => error?.code === "UNSAFE_EXPORT_PATH" && /symbolic-link|junction|alias/i.test(error.message),
+  );
+  assert.deepEqual(await fs.readdir(directAliasRealOutput), [], "a direct output alias must be rejected without mutating its target");
+} catch (error) {
+  if (!["EPERM", "EACCES", "ENOSYS", "EINVAL"].includes(error?.code)) throw error;
+}
+
+const nestedAliasOutput = path.join(temp, "output-nested-alias");
+const nestedAliasTarget = path.join(temp, "output-nested-alias-target");
+await fs.mkdir(nestedAliasOutput, { recursive: true });
+await fs.mkdir(nestedAliasTarget, { recursive: true });
+try {
+  await fs.symlink(nestedAliasTarget, path.join(nestedAliasOutput, "raw"), process.platform === "win32" ? "junction" : "dir");
+  await assert.rejects(
+    () => exportArchive({ codexHome, scope: "all", outputDirectory: nestedAliasOutput, exportProfile: "complete" }),
+    (error) => error?.code === "UNSAFE_EXPORT_PATH" && /symbolic-link|junction|alias/i.test(error.message),
+  );
+  assert.deepEqual(await fs.readdir(nestedAliasTarget), [], "a nested output alias must not receive export files");
+  assert.equal(await pathExists(path.join(nestedAliasOutput, INCOMPLETE_MARKER_NAME)), false, "a nested alias must be rejected before generation mutation");
+} catch (error) {
+  if (!["EPERM", "EACCES", "ENOSYS", "EINVAL"].includes(error?.code)) throw error;
+}
+
 const manifestAliasOutput = path.join(temp, "manifest-alias-output");
 await fs.mkdir(manifestAliasOutput, { recursive: true });
 await fs.link(protectedSource, path.join(manifestAliasOutput, "manifest.json"));
