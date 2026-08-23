@@ -77,6 +77,22 @@ function folder(fsPath, scheme = "file") {
   return { uri: { scheme, fsPath } };
 }
 
+function testFileIdentity(stat) {
+  return `${stat.dev}:${stat.ino}`;
+}
+
+function testFileEvidence(stat) {
+  return {
+    type: stat.isFile() ? "file" : stat.isDirectory() ? "directory" : "other",
+    dev: String(stat.dev),
+    ino: String(stat.ino),
+    size: String(stat.size),
+    mtime_ns: String(stat.mtimeNs),
+    ctime_ns: String(stat.ctimeNs),
+    birthtime_ns: String(stat.birthtimeNs),
+  };
+}
+
 const temp = await fsp.realpath(await fsp.mkdtemp(path.join(os.tmpdir(), "codex-vscode-test-")));
 const sourceFile = path.join(temp, "source.jsonl");
 await fsp.writeFile(sourceFile, "synthetic source", "utf8");
@@ -715,8 +731,25 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
   await adapter.activate(context);
   await adapter.exportAllSessions(context, "readable");
   const indexPath = path.join(replacedIndexOutput, "index.html");
-  await fsp.unlink(indexPath);
-  await fsp.writeFile(indexPath, "replacement with a new identity", "utf8");
+  const originalIndexPath = path.join(replacedIndexOutput, "index-original.html");
+  const storedIndex = context.globalState.get(STATE_LATEST_HTML_TARGET);
+  const originalCanonicalPath = await fsp.realpath(indexPath);
+  const originalStat = await fsp.stat(indexPath, { bigint: true });
+  assert.equal(storedIndex.canonicalPath, originalCanonicalPath, "the stored canonical index path must describe the original file");
+  assert.equal(storedIndex.identity, testFileIdentity(originalStat), "the stored identity must match the original index file");
+  await fsp.rename(indexPath, originalIndexPath);
+  await fsp.writeFile(indexPath, Buffer.alloc(Number(originalStat.size), 0x78));
+  const replacementCanonicalPath = await fsp.realpath(indexPath);
+  const replacementStat = await fsp.stat(indexPath, { bigint: true });
+  assert.equal(replacementCanonicalPath, originalCanonicalPath, "the replacement must occupy the same canonical index path");
+  assert.equal(replacementStat.isFile(), true, "the replacement must be a regular file");
+  assert.equal(replacementStat.size, originalStat.size, "the replacement must have the same size as the original index");
+  assert.notEqual(
+    testFileIdentity(replacementStat),
+    testFileIdentity(originalStat),
+    `the fixture must create a distinct filesystem identity: ${JSON.stringify({ original: testFileEvidence(originalStat), replacement: testFileEvidence(replacementStat) })}`,
+  );
+  console.log(`index replacement identity evidence: ${JSON.stringify({ canonical_path: "same exported index path", stored_identity: storedIndex.identity, original: testFileEvidence(originalStat), replacement: testFileEvidence(replacementStat) })}`);
   assert.equal(await adapter.openLatestArchive(context), false, "a replaced index file must be rejected even at the same path");
   assert.equal(await adapter.openExportFolder(context), true, "an unchanged verified output directory remains openable independently of a replaced index");
 }
