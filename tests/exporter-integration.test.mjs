@@ -14,7 +14,7 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."
 const retiredContinuingIntegrityField = ["raw", "integrity", "verified"].join("_");
 const retiredImportReadinessField = ["import", "ready"].join("_");
 const script = path.join(repoRoot, "bin", "export-codex-project-chats.mjs");
-const temp = await fs.mkdtemp(path.join(os.tmpdir(), "codex-exporter-test-"));
+const temp = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "codex-exporter-test-")));
 const codexHome = path.join(temp, ".codex");
 const activeDir = path.join(codexHome, "sessions", "2026", "07", "20");
 const archivedDir = path.join(codexHome, "archived_sessions");
@@ -890,12 +890,41 @@ assert.equal(await fs.readFile(path.join(foreignOutput, "index.html"), "utf8"), 
 assert.equal(await pathExists(path.join(foreignOutput, INCOMPLETE_MARKER_NAME)), false, "preflight failures must occur before marker publication");
 
 const beforeRawFailureOutput = path.join(temp, "generation-before-raw-failure");
-await fs.mkdir(beforeRawFailureOutput, { recursive: true });
-await fs.writeFile(path.join(beforeRawFailureOutput, "raw"), "foreign path blocker", "utf8");
-await assert.rejects(() => exportArchive({ codexHome: generationHome, scope: "all", outputDirectory: beforeRawFailureOutput, exportProfile: "complete" }));
-assert.equal(await pathExists(path.join(beforeRawFailureOutput, INCOMPLETE_MARKER_NAME)), true, "a real export failure after marker publication but before Raw publication must leave the marker");
-assert.equal(await fs.readFile(path.join(beforeRawFailureOutput, "raw"), "utf8"), "foreign path blocker", "the exporter must not delete the foreign blocker");
+const beforeRawFailurePath = path.join(beforeRawFailureOutput, firstGenerationRecord.sessions[0].raw_export_file);
+await fs.mkdir(path.dirname(beforeRawFailurePath), { recursive: true });
+await fs.writeFile(beforeRawFailurePath, "foreign path blocker", "utf8");
+await assert.rejects(
+  () => exportArchive({ codexHome: generationHome, scope: "all", outputDirectory: beforeRawFailureOutput, exportProfile: "complete" }),
+  (error) => error?.code === "UNOWNED_EXPORT_FILE",
+);
+assert.equal(await pathExists(path.join(beforeRawFailureOutput, INCOMPLETE_MARKER_NAME)), false, "a Raw collision rejected before the first mutation must not publish an incomplete marker");
+assert.equal(await fs.readFile(beforeRawFailurePath, "utf8"), "foreign path blocker", "a preflight rejection must not alter the foreign Raw collision");
 assert.equal(await pathExists(path.join(beforeRawFailureOutput, "manifest.json")), false);
+
+const afterMarkerRawFailureOutput = path.join(temp, "generation-after-marker-raw-failure");
+const afterMarkerBlockerPath = path.join(afterMarkerRawFailureOutput, path.dirname(firstGenerationRecord.sessions[0].raw_export_file));
+await fs.mkdir(afterMarkerRawFailureOutput, { recursive: true });
+let afterMarkerBlockerCreated = false;
+await assert.rejects(
+  () => exportArchive({
+    codexHome: generationHome,
+    scope: "all",
+    outputDirectory: afterMarkerRawFailureOutput,
+    exportProfile: "complete",
+    progressThrottleMs: 0,
+    onProgress(event) {
+      if (event.phase !== "snapshot" || afterMarkerBlockerCreated) return;
+      fsSync.writeFileSync(afterMarkerBlockerPath, "foreign path blocker", "utf8");
+      afterMarkerBlockerCreated = true;
+    },
+  }),
+  (error) => error?.code === "EEXIST",
+);
+assert.equal(afterMarkerBlockerCreated, true, "the synthetic failure must be injected only after marker publication");
+assert.equal(await pathExists(path.join(afterMarkerRawFailureOutput, INCOMPLETE_MARKER_NAME)), true, "a real export failure after marker publication but before Raw publication must leave the marker");
+assert.equal(await fs.readFile(afterMarkerBlockerPath, "utf8"), "foreign path blocker", "the exporter must not delete the post-marker foreign blocker");
+assert.deepEqual(await fs.readFile(generationSource), generationRaw, "the post-marker failure must leave the source byte-identical");
+assert.equal(await pathExists(path.join(afterMarkerRawFailureOutput, "manifest.json")), false);
 
 const partialHome = path.join(temp, "generation-partial-home");
 const partialSessions = path.join(partialHome, "sessions", "2026", "08", "22");

@@ -267,10 +267,11 @@ async function fileIdentity(file) {
   assert.throws(() => validatedSourceRelativePath("C:\\outside\\rollout.jsonl", root), /outside its declared/);
 }
 
-const temp = await fs.mkdtemp(path.join(os.tmpdir(), "codex-exporter-classifier-"));
+const temp = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "codex-exporter-classifier-")));
 try {
-  const source = path.join(temp, "source.jsonl");
-  const destination = path.join(temp, "raw", "snapshot.jsonl");
+  const source = path.join(temp, "source", "source.jsonl");
+  const destination = path.join(temp, "output", "raw", "snapshot.jsonl");
+  await fs.mkdir(path.dirname(source), { recursive: true });
   await fs.writeFile(source, `${JSON.stringify(sessionMeta())}\n`, "utf8");
   const snapshot = await copyStableRawSnapshot(source, destination);
   assert.equal(snapshot.attempts, 1);

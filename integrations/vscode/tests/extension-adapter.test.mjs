@@ -77,7 +77,7 @@ function folder(fsPath, scheme = "file") {
   return { uri: { scheme, fsPath } };
 }
 
-const temp = await fsp.mkdtemp(path.join(os.tmpdir(), "codex-vscode-test-"));
+const temp = await fsp.realpath(await fsp.mkdtemp(path.join(os.tmpdir(), "codex-vscode-test-")));
 const sourceFile = path.join(temp, "source.jsonl");
 await fsp.writeFile(sourceFile, "synthetic source", "utf8");
 const before = await fsp.readFile(sourceFile, "utf8");
@@ -151,7 +151,7 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
 }
 
 {
-  const buildTemp = await fsp.mkdtemp(path.join(os.tmpdir(), "codex-vsix-build-foreign-"));
+  const buildTemp = await fsp.realpath(await fsp.mkdtemp(path.join(os.tmpdir(), "codex-vsix-build-foreign-")));
   const distDir = path.join(buildTemp, "dist");
   const foreignCandidate = path.join(distDir, "codex-project-chat-exporter-vscode-0.0.0.vsix");
   await fsp.mkdir(distDir, { recursive: true });
@@ -163,7 +163,7 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
 }
 
 {
-  const buildTemp = await fsp.mkdtemp(path.join(os.tmpdir(), "codex-vsix-build-success-"));
+  const buildTemp = await fsp.realpath(await fsp.mkdtemp(path.join(os.tmpdir(), "codex-vsix-build-success-")));
   const distDir = path.join(buildTemp, "dist");
   const currentCandidate = path.join(distDir, "codex-project-chat-exporter-vscode-0.1.3.vsix");
   await fsp.mkdir(distDir, { recursive: true });
@@ -182,7 +182,7 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
 }
 
 {
-  const buildTemp = await fsp.mkdtemp(path.join(os.tmpdir(), "codex-vsix-build-failure-"));
+  const buildTemp = await fsp.realpath(await fsp.mkdtemp(path.join(os.tmpdir(), "codex-vsix-build-failure-")));
   const distDir = path.join(buildTemp, "dist");
   await fsp.mkdir(distDir, { recursive: true });
   let attemptedArchivePath;
@@ -205,7 +205,7 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
 }
 
 {
-  const buildTemp = await fsp.mkdtemp(path.join(os.tmpdir(), "codex-vsix-build-create-new-"));
+  const buildTemp = await fsp.realpath(await fsp.mkdtemp(path.join(os.tmpdir(), "codex-vsix-build-create-new-")));
   const distDir = path.join(buildTemp, "dist");
   const foreignBytes = Buffer.from("foreign temporary archive");
   let occupiedArchivePath;
@@ -226,7 +226,7 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
 }
 
 {
-  const buildTemp = await fsp.mkdtemp(path.join(os.tmpdir(), "codex-vsix-stage-foreign-"));
+  const buildTemp = await fsp.realpath(await fsp.mkdtemp(path.join(os.tmpdir(), "codex-vsix-stage-foreign-")));
   const distDir = path.join(buildTemp, "dist");
   let foreignStageFile;
   let archiveWriterCalls = 0;
@@ -247,7 +247,7 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
 }
 
 {
-  const buildTemp = await fsp.mkdtemp(path.join(os.tmpdir(), "codex-vsix-stage-replaced-"));
+  const buildTemp = await fsp.realpath(await fsp.mkdtemp(path.join(os.tmpdir(), "codex-vsix-stage-replaced-")));
   const distDir = path.join(buildTemp, "dist");
   let replacedStageFile;
   let movedOwnedFile;
