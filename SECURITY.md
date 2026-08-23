@@ -1,44 +1,49 @@
 # Security Policy
 
-Codex Project Chat Exporter processes private local session history. Generated archives should be treated as sensitive project data.
+This policy covers the export core, CLI, Windows launcher, experimental VS Code extension, and generated export files. Codex Project Chat Exporter processes private active and archived local Codex sessions and is not a data-loss-prevention product.
 
-## Security model
+## Security boundary
 
-The exporter is read-only with respect to Codex data:
+Sensitive inputs and outputs include configured source, output, and performance-profile paths; existing destination contents; Raw JSONL, manifests, Markdown, HTML, tool data, attachments, and local paths. No import command or validated restore roundtrip exists.
 
-- it reads local Codex session files
-- it writes to a separate export folder
-- it does not modify Codex sessions, indexes, profiles, or projects
-- it makes no network requests
+Treat JSONL content, stored project paths, user-configured paths, existing destination files, symlinks, junctions, hardlinks, path aliases, and concurrent export runs as potentially untrusted.
 
-The exporter is not a security boundary or a data-loss-prevention product.
+The required invariants are:
+
+- source sessions are never overwritten, changed, moved, or deleted;
+- source and output remain separate across canonical paths and supported link/alias checks;
+- temporary files are unique to and verifiably owned by the current run;
+- cleanup removes only files proven to belong to that run;
+- invocation contexts never mix, and concurrent exports to one destination are rejected;
+- source changes cause a retry or fail-closed error;
+- `raw_sha256` and `raw_verified_at` describe verification only at export time;
+- published Raw files remain mutable, so later use or a future importer must hash them again and reject a mismatch.
+
+Reportable security issues include source overwrite/deletion, path traversal, source/output separation bypasses, symlink/junction/hardlink/alias attacks, race conditions or cross-run mixing, unauthorized network or workspace-trust bypasses, data exfiltration, telemetry or unexpected uploads, false integrity claims, command injection, and cleanup of foreign files. No accepted-risk exception applies without the repository owner's explicit approval.
+
+### Opening exported files and folders
+
+The VS Code extension stores the latest export paths for convenience. Immediately before opening a file or folder, it revalidates the local path, expected file type, canonical target, containment within the recorded export location, and filesystem identity. This reduces path-replacement and link-alias risks, but cannot eliminate changes made after the final check and before VS Code or the operating system processes the target.
+
+### Local filesystem trust boundary
+
+The exporter checks for accidental source/output overlap and for link or alias structures that are already present when a path is inspected. It should not be run with elevated or administrator privileges. Output folders must be private, local, and not writable by other users.
+
+Active filesystem races by another process running under the same user account are outside the guaranteed protection boundary. Additional before/after path checks reduce accidental misuse but cannot remove that operating-system timing boundary.
 
 ## Redaction limits
 
-Markdown output applies best-effort patterns for several common token shapes and long base64-like values. The patterns are intentionally limited and can produce both false negatives and false positives.
-
-Redaction does not reliably remove:
-
-- names and email addresses
-- file paths and project names
-- IP addresses and internal hostnames
-- customer or business data
-- source code and proprietary text
-- every API key, password, credential, or secret format
-
-Raw JSONL copies are unchanged.
+Markdown applies best-effort masking for some token shapes and long base64-like values. It can miss names, paths, addresses, customer data, source code, proprietary text, and credentials. Raw JSONL is byte-preserving and unredacted. Raw files and manifests are not share-safe.
 
 ## Safe use
 
-- Write exports to a local or encrypted storage location.
-- Keep generated archives outside the public repository.
-- Use `--no-raw` when unchanged source logs are not required.
-- Review `md/`, `index.html`, `index.md`, `manifest.json`, `README.txt`, and `raw/` before sharing.
-- Use a new or empty output folder to avoid retaining files from an earlier export.
-- Do not attach real session logs to public bug reports.
+- Prefer a new empty destination on known local or encrypted storage; mapped network drives are not reliably identifiable in every configuration.
+- Use the `readable` profile when Markdown and HTML reading views are sufficient and Raw JSONL snapshots are not required. This reduces copied data but does not make the export share-safe.
+- Keep Raw and manifest files private and review every generated file before sharing.
+- Keep exports outside public repositories and never attach real session logs to public reports.
+- Treat an output folder containing `EXPORT_INCOMPLETE.txt` as an incomplete generation. Do not use its manifest or indexes; choose a new empty destination, or inspect and remove the incomplete export manually.
+- If `.codex-export.lock` remains after a crash, first prove no export is running, inspect its PID and start time, and remove only that confirmed stale lock file.
 
 ## Reporting a vulnerability
 
-Use GitHub's private vulnerability reporting feature under the repository's **Security** tab when available.
-
-If private reporting is not enabled, open a public issue containing only a minimal, non-sensitive description and ask the maintainer for a private contact route. Do not include session files, credentials, customer data, or exploitable details in a public issue.
+Use GitHub's private vulnerability reporting under the repository's **Security** tab when available. Otherwise open only a minimal non-sensitive public issue requesting a private contact route; never include session files, credentials, customer data, or exploit details.

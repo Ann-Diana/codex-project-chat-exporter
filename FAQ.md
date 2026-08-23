@@ -56,13 +56,21 @@ If an archived JSONL file exists but is still absent, choose launcher option:
 [5] Diagnose active and archived session detection
 ```
 
-The diagnostic output shows the exact archive folder, the number of JSONL files found, and files with incomplete metadata. The exporter also recovers IDs from normal rollout filenames so that an archived file is not silently discarded merely because its `session_meta` record is missing or malformed.
+The diagnostic output shows the exact archived-session folder, the number of JSONL files found, and files with incomplete metadata. The exporter also recovers IDs from normal rollout filenames so that an archived file is not silently discarded merely because its `session_meta` record is missing or malformed.
 
 Duplicate active and archived copies with the same session ID are shown once. The active copy takes precedence because both files represent the same Codex session. Different IDs are never deduplicated merely because their titles are identical.
 
 ## Does the exporter upload anything?
 
-No. It reads local files and writes a local output folder. It does not call OpenAI APIs or send telemetry.
+No built-in uploader, telemetry, or application-level HTTP, web, or API client is used. The exporter reads source files and writes to the configured filesystem destination.
+
+A configured path can still reside on network-backed storage. The VS Code extension rejects UNC and Windows device paths, but mapped network drives cannot be identified reliably in every configuration. Choose a known local destination when locality matters.
+
+## How does this differ from Codex's native `/export`?
+
+[Codex 0.148.0](https://github.com/openai/codex/releases/tag/rust-v0.148.0) added [`/export`](https://github.com/openai/codex/pull/37358) for exporting the current TUI conversation to the clipboard or a Markdown file. It is the better fit when one current TUI conversation is the intended result.
+
+Codex Project Chat Exporter instead bulk-exports detected local sessions for one project/work folder or across all projects, including archived sessions. It creates a static index, manifest, and optional Raw snapshots verified at export time. Its optional VS Code extension provides the corresponding **Current Workspace** and **All Sessions** workflows. It does not try to improve upon the native export's transcript fidelity.
 
 ## Does it export both active and archived sessions?
 
@@ -85,32 +93,47 @@ The exporter uses the working directory (`cwd`) stored in the session metadata. 
 
 ## Where do titles come from?
 
-The exporter first checks `session_index.jsonl`. When no title is available there, it derives a short fallback from the first user message.
+The exporter checks `session_index.jsonl`, but does not automatically trust an indexed title that appears to have been derived from a technical context record. It validates the title against classified session events, otherwise derives a display title from the first confirmed direct user turn or uses a neutral deterministic fallback.
 
-Derived titles are only archive labels. They do not modify Codex.
+Derived titles are only export labels. They do not modify Codex.
 
-## What is the difference between `md/` and `raw/`?
+## What is the difference between the Markdown view and `raw/`?
 
-`md/` contains readable transcripts with user and assistant messages. Tool details are omitted unless `--include-tools` is used.
+`md/` in short-path exports, or `markdown/` in readable-path exports, contains classified reading views. Confirmed direct user turns, subagent inputs, assistant messages, runtime contexts, and uncertain user-role records are labelled separately. Tool details are omitted unless `--include-tools` is used.
 
-`raw/` contains unchanged copies of the original JSONL session files. They preserve more information but may contain sensitive data.
+When enabled, `raw/` contains byte-identical JSONL snapshots checked against stable source hashes during export and is the canonical lossless representation. Markdown and HTML are derived views, and classification never changes raw events. Raw filenames may be collision-safe export names; `manifest.json` preserves the portable source mapping and verification metadata.
 
-## Does Markdown redaction make the files safe to share?
+`raw_verified_at` records when the `VERIFIED_AT_EXPORT` hash check completed. It does not assert continuing integrity: Raw files remain mutable afterward, so compare their current hash with `raw_sha256` to detect changes. Any future importer must repeat that check and reject mismatches. This is not permanent tamper resistance, sealing, or import readiness.
+
+Both raw files and the manifest can contain sensitive local data. See the [archive format version 1 specification](docs/archive-format-v1.md) for snapshot fields, event pairing, attachment identity, fail-safe classification, and import limits.
+
+## Does Markdown secret masking make the files safe to share?
 
 No. The redaction patterns catch only some common token-shaped secrets and long base64-like values.
 
 They do not reliably remove paths, names, email addresses, IP addresses, customer data, source code, proprietary information, or every credential format.
 
-## Why is `raw/` still present after using `--no-raw`?
+## Why is an empty `raw/` folder still present after using `--no-raw`?
 
-The exporter does not clean an existing output folder. A `raw/` directory from an earlier run remains untouched.
+A previous manifest describes archive membership but is not trusted as proof that files may be deleted or replaced. An unchanged repetition can reuse byte-identical verified files; differing pre-existing files cause the new generation to fail closed, and files no longer needed by the new export remain untouched. If a run fails after generation changes begin, `EXPORT_INCOMPLETE.txt` remains and invalidates the manifest and indexes until the folder is manually reviewed or replaced with a new empty destination.
 
-Use a new folder or remove the previous output first:
+## Which export profile should I use?
 
-```powershell
-Remove-Item C:\cx\codex-export-md -Recurse -Force
-node .\bin\export-codex-project-chats.mjs --all --no-raw --out C:\cx\codex-export-md
-```
+- **Complete** (`complete`) is the default and creates `raw/` checked at export time, Markdown transcripts, `index.html`, `index.md`, `manifest.json`, and `README.txt`.
+- **Readable** (`readable`) creates Markdown transcripts, both indexes, `manifest.json`, and `README.txt` without new Raw snapshots.
+- **Source snapshots** (`source-snapshots`) creates `raw/` checked at export time, a reduced `index.html`, `manifest.json`, and `README.txt` without Markdown transcripts or `index.md`. The reduced index uses project, storage, start time, session ID, and Raw links rather than unavailable title or model metadata.
+
+Use **Readable** when the goal is reading or searching transcripts without creating new Raw snapshots. **Complete** and **Source snapshots** can be substantially larger and slower because they copy Raw JSONL and verify it with SHA-256.
+
+An explicit CLI `--profile` wins over the legacy switch. Without an explicit profile, CLI `--no-raw` is only a compatibility shorthand for `readable`. The VS Code extension asks for the profile on every export.
+
+## How can I diagnose a slow export without logging chat content?
+
+Add `--performance-profile <absolute-json-file>` to a CLI export only when diagnosing performance. It performs additional analysis, can substantially slow the export, and is not intended for normal exports. The privacy-reduced JSON profile records phase times, byte counts, shortened session IDs, sampled RSS, attachment counts/volumes, and snapshot retries, but no message text, full source/output/attachment paths, URLs, or attachment payloads. It distinguishes data URLs, signature-confirmed unprefixed PNG/JPEG Base64, local references, remote references, and unknown forms. Shortened IDs and operational metadata can still be sensitive, so review the file before sharing it.
+
+The optional VS Code diagnostic output follows the same message-free, path-redacted model and is disabled by default. The normal VS Code output channel is different: it records complete output, HTML-index, and manifest paths for usability and can therefore contain sensitive local paths.
+
+Processing is scoped one session at a time, but JSONL parsing still materializes one complete line. A single unusually large line, especially one containing an embedded image, can therefore determine peak memory. The current optimization deliberately avoids forced global garbage collection and a riskier full streaming-parser rewrite.
 
 ## Why does the exporter refuse an output folder?
 
@@ -123,6 +146,10 @@ node .\bin\export-codex-project-chats.mjs --all --out C:\cx\codex-export
 ```
 
 For deliberate local testing only, use `--allow-output-in-tool-dir`.
+
+The exporter also rejects a destination that overlaps a source directly or through a supported alias/link check. A per-folder `.codex-export.lock` prevents two exports from writing to the same destination concurrently.
+
+If a lock remains after a crash, do not delete the output folder or perform recursive cleanup. First ensure no export process is running, inspect the PID and start time stored in `.codex-export.lock`, and remove only that confirmed stale lock file.
 
 ## PowerShell says `node` was not found. What now?
 
@@ -141,25 +168,25 @@ codex-project-chat-exporter\
 
 ## Why are output filenames short?
 
-Short paths are more reliable when archives are copied, nested, zipped, and unzipped on Windows. `manifest.json` maps the short names back to the original sessions.
+Short paths are more reliable when exports are copied, nested, zipped, and unzipped on Windows. `manifest.json` maps the short names back to the original sessions.
 
 Use `--readable-paths` when longer names are preferable.
 
 ## Is `index.html` a full-text search engine?
 
-No. It filters the exported session list by metadata such as project, title, date, model, and active/archived status.
+No. Complete and Readable filter the exported session list by metadata such as project, title, date, model, and active/archived status. Source snapshots intentionally omits title, model, and Markdown columns and filters only its reduced metadata.
 
 Search transcript content in the exported Markdown files with your editor, operating-system search, `rg`, or another dedicated session-search tool.
 
 ## Are image attachments exported?
 
-No. Version 0.1.0 exports textual user and assistant message content. It does not extract embedded images or copy attachment files.
+The reading views export textual direct-user, assistant, subagent, runtime-context, and unclassified user-role records. They do not extract embedded images or copy attachment files. When raw export is enabled, the canonical JSONL snapshot still preserves whatever attachment data or references existed in the source events.
 
 ## Can this restore sessions into Codex on another computer?
 
-Not automatically. The raw files are useful for preservation and future tooling, but Codex does not provide a documented public import interface for rebuilding its complete UI state, indexes, and project associations.
+No import is implemented. Raw snapshots verified at export time and their portable manifest metadata prepare source material for possible future tooling, but no Codex roundtrip has been validated and Codex does not provide a documented public import interface for rebuilding its complete UI state, indexes, and project associations. A future importer must first compare each current Raw hash with `raw_sha256`.
 
-Treat this as archive and migration preparation, not as a guaranteed one-click restore mechanism.
+Treat this as local preservation and migration preparation, not as a guaranteed one-click restore mechanism. See the [format specification](docs/archive-format-v1.md#import-boundary) for the exact boundary.
 
 ## Does it export normal ChatGPT chats or cloud-only Codex tasks?
 

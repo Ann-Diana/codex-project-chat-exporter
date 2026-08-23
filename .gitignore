@@ -1,0 +1,24 @@
+node_modules/
+npm-debug.log*
+.DS_Store
+Thumbs.db
+
+# Local handoff notes are not part of the public release.
+/PROJECT_NOTES.md
+
+# Generated export folders may contain private data.
+/cx-*/
+/codex-chat-export-*/
+/codex-export-*/
+/exports/
+/raw/
+
+# Local release archives may contain private data.
+*.zip
+*.7z
+*.tar
+*.tar.gz
+
+# Local VS Code extension package candidates.
+*.vsix
+/integrations/vscode/dist/

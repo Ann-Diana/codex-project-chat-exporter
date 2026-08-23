@@ -2,18 +2,65 @@ import assert from "node:assert/strict";
 import path from "node:path";
 
 import {
+  EXPORT_PROFILE,
   ExportError,
   REDACTION_PATTERNS,
+  classifyAttachmentReference,
+  createProgressReporter,
   deriveTitle,
   extractCwdFromText,
   extractSessionIdFromFilename,
   formatErrorWithHints,
   isPathInside,
+  inspectUnprefixedEmbeddedImage,
   markdownFence,
   portableBasename,
+  readTopLevelJsonEventType,
   redactSecrets,
+  resolveExportProfile,
   slug,
 } from "../bin/export-codex-project-chats.mjs";
+
+assert.equal(resolveExportProfile(undefined, false), EXPORT_PROFILE.COMPLETE);
+assert.equal(resolveExportProfile(undefined, true), EXPORT_PROFILE.READABLE);
+assert.equal(resolveExportProfile("source-snapshots", true), EXPORT_PROFILE.SOURCE_SNAPSHOTS, "explicit profiles must win over the legacy no-raw switch");
+assert.throws(() => resolveExportProfile("future-pdf", false), /Unsupported export profile/);
+
+const pngBase64 = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 4]).toString("base64");
+const jpegBase64 = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3, 4]).toString("base64");
+assert.equal(inspectUnprefixedEmbeddedImage(pngBase64)?.mediaType, "image/png");
+assert.equal(inspectUnprefixedEmbeddedImage(jpegBase64)?.mediaType, "image/jpeg");
+assert.equal(inspectUnprefixedEmbeddedImage(`${pngBase64.slice(0, -2)}!x`), null, "invalid Base64-like strings must not be classified as embedded images");
+assert.equal(inspectUnprefixedEmbeddedImage(`${pngBase64}=`), null, "invalid Base64 padding must not be accepted");
+assert.equal(inspectUnprefixedEmbeddedImage(Buffer.from("ordinary text").toString("base64")), null, "valid non-image Base64 must remain unknown");
+assert.equal(classifyAttachmentReference("C:\\Private\\capture.png"), "local");
+assert.equal(classifyAttachmentReference("https://example.invalid/capture.png"), "remote");
+assert.equal(classifyAttachmentReference("opaque-attachment-token"), "unknown");
+
+assert.deepEqual(readTopLevelJsonEventType('{"timestamp":"now","type":"session_meta","payload":{}}'), { status: "FOUND", value: "session_meta" });
+assert.deepEqual(readTopLevelJsonEventType('{"payload":{"type":"nested"},"\\u0074ype":"turn_context"}'), { status: "FOUND", value: "turn_context" });
+assert.deepEqual(readTopLevelJsonEventType('{"timestamp":"now","payload":{"type":"nested"}}'), { status: "NOT_FOUND", value: "" });
+assert.equal(readTopLevelJsonEventType('{"timestamp":').status, "UNCERTAIN");
+assert.equal(readTopLevelJsonEventType('{"type":"session_meta","type":"event_msg","payload":{}}').status, "UNCERTAIN", "duplicate top-level type keys must fall back to full JSON parsing");
+assert.equal(readTopLevelJsonEventType('{"type":"session_meta","payload":{}} trailing').status, "UNCERTAIN", "trailing malformed content must not be routed optimistically");
+assert.deepEqual(readTopLevelJsonEventType(`{"timestamp":"now","type":"response_item","payload":{"data":"${"A".repeat(1024 * 1024)}"}}`), { status: "FOUND", value: "response_item" }, "large JSON strings must preserve structured routing semantics");
+assert.deepEqual(readTopLevelJsonEventType(JSON.stringify({ timestamp: "now", type: "response_item", payload: { data: 'quoted "value" and slash \\' } })), { status: "FOUND", value: "response_item" }, "escaped quotes and backslashes must preserve string boundaries");
+const hugePayload = "A".repeat(1024 * 1024);
+assert.equal(readTopLevelJsonEventType(JSON.stringify({ payload: { image: hugePayload }, timestamp: "now", type: "session_meta" })).value, "session_meta");
+assert.equal(readTopLevelJsonEventType(JSON.stringify({ type: "turn_context", payload: { image: hugePayload } })).value, "turn_context");
+
+const progressEvents = [];
+const reportProgress = createProgressReporter((event) => progressEvents.push(event), 0);
+reportProgress({ phase: "discovery", message: "Discovering sessions" });
+reportProgress({ phase: "processing", message: "Processing session 1 of 2", current: 1, total: 2 });
+reportProgress({ phase: "processing", message: "Processing session 2 of 2", current: 2, total: 2 });
+reportProgress({ phase: "complete", message: "Export complete" });
+assert.deepEqual(progressEvents.map((event) => event.message), ["Discovering sessions", "Processing session 1 of 2", "Processing session 2 of 2", "Export complete"]);
+const throttledEvents = [];
+const reportThrottledProgress = createProgressReporter((event) => throttledEvents.push(event), 60_000);
+for (let current = 1; current <= 100; current += 1) reportThrottledProgress({ phase: "processing", message: `Processing session ${current} of 100`, current, total: 100 });
+assert.equal(throttledEvents.length, 2, "same-phase progress must be throttled while still reporting the first and final session");
+assert.equal(throttledEvents.at(-1).current, 100);
 
 assert.ok(REDACTION_PATTERNS.length >= 5, "expected common redaction patterns");
 

@@ -1,39 +1,46 @@
 #!/usr/bin/env node
 import fs from "node:fs";
 import fsp from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
+import { performance } from "node:perf_hooks";
 import readline from "node:readline";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-const VERSION = "0.1.0";
-let argumentError = null;
-let args = {};
-try {
-  args = parseArgs(process.argv.slice(2));
-} catch (error) {
-  argumentError = error;
-}
+const VERSION = "0.2.0";
+const ARCHIVE_FORMAT_VERSION = 1;
+const EXPORT_PROFILE = Object.freeze({
+  COMPLETE: "complete",
+  READABLE: "readable",
+  SOURCE_SNAPSHOTS: "source-snapshots",
+});
+const EXPORT_PROFILES = Object.freeze({
+  [EXPORT_PROFILE.COMPLETE]: Object.freeze({ raw: true, markdown: true, html: true }),
+  [EXPORT_PROFILE.READABLE]: Object.freeze({ raw: false, markdown: true, html: true }),
+  [EXPORT_PROFILE.SOURCE_SNAPSHOTS]: Object.freeze({ raw: true, markdown: false, html: true }),
+});
+const RAW_COPY_STATUS = Object.freeze({
+  VERIFIED_AT_EXPORT: "VERIFIED_AT_EXPORT",
+  NOT_INCLUDED: "NOT_INCLUDED",
+});
+const INCOMPLETE_MARKER_NAME = "EXPORT_INCOMPLETE.txt";
+const GENERATION_ROOT_FILES = Object.freeze(["manifest.json", "README.txt", "index.html", "index.md"]);
+const FUTURE_EXPORT_FORMATS = Object.freeze({ docx: false, pdf: false, attachments: false });
+const MIRRORED_USER_EVENT_MAX_DELAY_MS = 100;
+const USER_RECORD_KIND = Object.freeze({
+  DIRECT_USER_TURN: "DIRECT_USER_TURN",
+  SUBAGENT_INPUT: "SUBAGENT_INPUT",
+  AUTOMATIC_RUNTIME_CONTEXT: "AUTOMATIC_RUNTIME_CONTEXT",
+  UNCLASSIFIED_USER_ROLE_RECORD: "UNCLASSIFIED_USER_ROLE_RECORD",
+});
+const SESSION_KIND = Object.freeze({
+  DIRECT_USER: "DIRECT_USER",
+  SUBAGENT: "SUBAGENT",
+  UNKNOWN: "UNKNOWN",
+});
+const { args: cliArgs, error: argumentError } = parseCliInvocation(process.argv.slice(2));
 const toolRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const codexHome = path.resolve(args["codex-home"] || process.env.CODEX_HOME || path.join(os.homedir(), ".codex"));
-const sessionsDir = path.resolve(args["sessions-dir"] || path.join(codexHome, "sessions"));
-const archivedSessionsDir = path.resolve(args["archived-dir"] || path.join(codexHome, "archived_sessions"));
-const sessionIndexPath = path.resolve(args["session-index"] || path.join(codexHome, "session_index.jsonl"));
-const pathStyle = args["readable-paths"] ? "readable" : "short";
-const markdownDirName = pathStyle === "readable" ? "markdown" : "md";
-const outputPrefix = pathStyle === "readable" ? "codex-chat-export" : "cx";
-const defaultOutputBase = isPathInside(process.cwd(), toolRoot) ? path.join(os.homedir(), "Documents") : process.cwd();
-const outputDir = path.resolve(args.out || path.join(defaultOutputBase, `${outputPrefix}-${stampForName(new Date())}`));
-const projectFilter = args.project || "";
-const exportAll = args.all || !projectFilter;
-const includeTools = Boolean(args["include-tools"]);
-const copyRaw = !args["no-raw"];
-const redactMarkdown = !args["no-redact-markdown"];
-const listOnly = Boolean(args.list);
-const listSessionsOnly = Boolean(args["list-sessions"]);
-const diagnoseOnly = Boolean(args.diagnose);
-const includeArchived = !args["no-archived"];
-const allowOutputInToolDir = Boolean(args["allow-output-in-tool-dir"]);
 const isCli = process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href;
 
 class ExportError extends Error {
@@ -99,20 +106,191 @@ function formatErrorWithHints(error) {
     lines.push("- Windows path length or security software interfered with file creation.");
     lines.push("- Try a short output path such as C:\\cx\\codex-export.");
     lines.push("");
+  } else if (error?.code === "INCOMPLETE_EXPORT_EXISTS") {
+    lines.push("The output folder contains EXPORT_INCOMPLETE.txt and cannot be reused automatically.");
+    lines.push("Use a new empty output folder, or manually inspect and remove the incomplete export before retrying.");
+    lines.push("");
   }
   lines.push("See FAQ.md in the tool folder for common fixes.");
   return lines.join("\n");
 }
 
 async function main() {
+  return runCommand(createExportContext(cliArgs), { print: true });
+}
+
+async function exportArchive(options = {}) {
+  const context = createExportContext(argsFromExportOptions(options), options.cwd || process.cwd(), {
+    onProgress: options.onProgress,
+    progressThrottleMs: options.progressThrottleMs,
+    onDiagnostic: options.onDiagnostic,
+  });
+  return runCommand(context, { print: false });
+}
+
+function argsFromExportOptions(options) {
+  const next = {};
+  const scope = options.scope || (options.workspacePath ? "project" : "all");
+  if (scope === "all") next.all = true;
+  else next.project = options.workspacePath || options.projectFilter || "";
+  if (options.outputDirectory) next.out = options.outputDirectory;
+  if (options.codexHome) next["codex-home"] = options.codexHome;
+  if (options.sessionsDir) next["sessions-dir"] = options.sessionsDir;
+  if (options.archivedDir) next["archived-dir"] = options.archivedDir;
+  if (options.sessionIndexPath) next["session-index"] = options.sessionIndexPath;
+  if (options.pathStyle === "readable") next["readable-paths"] = true;
+  if (options.includeTools) next["include-tools"] = true;
+  if (options.exportProfile) next.profile = options.exportProfile;
+  else if (options.includeOriginalJsonl === false) next["no-raw"] = true;
+  if (options.redactMarkdown === false) next["no-redact-markdown"] = true;
+  if (options.includeArchived === false) next["no-archived"] = true;
+  if (options.allowOutputInToolDir) next["allow-output-in-tool-dir"] = true;
+  if (options.performanceProfilePath) next["performance-profile"] = options.performanceProfilePath;
+  return next;
+}
+
+function createExportContext(args = {}, cwd = process.cwd(), runtimeOptions = {}) {
+  const codexHome = path.resolve(args["codex-home"] || process.env.CODEX_HOME || path.join(os.homedir(), ".codex"));
+  const sessionsDir = path.resolve(args["sessions-dir"] || path.join(codexHome, "sessions"));
+  const archivedSessionsDir = path.resolve(args["archived-dir"] || path.join(codexHome, "archived_sessions"));
+  const sessionIndexPath = path.resolve(args["session-index"] || path.join(codexHome, "session_index.jsonl"));
+  const pathStyle = args["readable-paths"] ? "readable" : "short";
+  const markdownDirName = pathStyle === "readable" ? "markdown" : "md";
+  const outputPrefix = pathStyle === "readable" ? "codex-chat-export" : "cx";
+  const defaultOutputBase = isPathInside(cwd, toolRoot) ? path.join(os.homedir(), "Documents") : cwd;
+  const outputDir = path.resolve(args.out || path.join(defaultOutputBase, `${outputPrefix}-${stampForName(new Date())}`));
+  const projectFilter = args.project || "";
+  const exportAll = args.all || !projectFilter;
+  const exportProfile = resolveExportProfile(args.profile, Boolean(args["no-raw"]));
+  const exportFormats = Object.freeze({ ...EXPORT_PROFILES[exportProfile], ...FUTURE_EXPORT_FORMATS });
+  return Object.freeze({
+    args: Object.freeze({ ...args }),
+    codexHome,
+    sessionsDir,
+    archivedSessionsDir,
+    sessionIndexPath,
+    pathStyle,
+    markdownDirName,
+    outputPrefix,
+    defaultOutputBase,
+    outputDir,
+    projectFilter,
+    exportAll,
+    includeTools: Boolean(args["include-tools"]),
+    copyRaw: exportFormats.raw,
+    redactMarkdown: !args["no-redact-markdown"],
+    listOnly: Boolean(args.list),
+    listSessionsOnly: Boolean(args["list-sessions"]),
+    diagnoseOnly: Boolean(args.diagnose),
+    includeArchived: !args["no-archived"],
+    allowOutputInToolDir: Boolean(args["allow-output-in-tool-dir"]),
+    performanceProfilePath: args["performance-profile"] ? path.resolve(args["performance-profile"]) : "",
+    exportProfile,
+    exportFormats,
+    progressReporter: createProgressReporter(runtimeOptions.onProgress, runtimeOptions.progressThrottleMs),
+    diagnosticReporter: createDiagnosticReporter(runtimeOptions.onDiagnostic),
+  });
+}
+
+function resolveExportProfile(requestedProfile, legacyNoRaw = false) {
+  if (requestedProfile) {
+    if (!Object.hasOwn(EXPORT_PROFILES, requestedProfile)) throw new ExportError("INVALID_EXPORT_PROFILE", `Unsupported export profile: ${requestedProfile}`);
+    return requestedProfile;
+  }
+  return legacyNoRaw ? EXPORT_PROFILE.READABLE : EXPORT_PROFILE.COMPLETE;
+}
+
+function createProgressReporter(callback, throttleMs = 125) {
+  if (typeof callback !== "function") return () => {};
+  const minimumInterval = Math.max(0, Number.isFinite(throttleMs) ? throttleMs : 125);
+  let lastAt = 0;
+  let lastPhase = "";
+  return (event) => {
+    const now = performance.now();
+    const phaseChanged = event.phase !== lastPhase;
+    const terminal = event.phase === "complete" || (event.phase === "processing" && event.current === event.total);
+    if (!phaseChanged && !terminal && now - lastAt < minimumInterval) return;
+    lastAt = now;
+    lastPhase = event.phase;
+    try { callback({ ...event }); } catch {}
+  };
+}
+
+function createDiagnosticReporter(callback) {
+  if (typeof callback !== "function") return () => {};
+  return (event, details = {}) => {
+    try {
+      callback({ monotonic_ms: roundMs(performance.now()), scope: "core", event, ...details });
+    } catch {}
+  };
+}
+
+async function runCommand(context, { print }) {
+  const { performanceProfilePath, copyRaw, exportAll, exportProfile } = context;
+  const profiler = performanceProfilePath ? createPerformanceProfiler({ rawEnabled: copyRaw, scope: exportAll ? "all" : "workspace", profile: exportProfile }) : null;
+  const runState = { sourceProtection: null };
+  let result;
+  let failure;
+  try {
+    result = await runCommandInternal(context, { print, profiler, runState });
+  } catch (error) {
+    failure = error;
+  }
+  if (profiler && runState.sourceProtection) {
+    const profile = profiler.finish({ status: failure ? "FAILED" : "COMPLETED", errorCode: failure?.code || "" });
+    await assertPerformanceProfileSeparated(performanceProfilePath, context.outputDir, runState.sourceProtection);
+    await ensureSeparatedOutputDirectory(path.dirname(performanceProfilePath), runState.sourceProtection, { rejectSourceDescendants: false });
+    await writeSeparatedOutputFile(performanceProfilePath, runState.sourceProtection, (handle) => handle.writeFile(`${JSON.stringify(profile, null, 2)}\n`, "utf8"));
+    if (result) {
+      result.performanceProfilePath = performanceProfilePath;
+      result.performanceProfile = profile;
+    }
+  }
+  if (failure) throw failure;
+  return result;
+}
+
+async function runCommandInternal(context, { print, profiler, runState }) {
+  const {
+    args,
+    codexHome,
+    sessionsDir,
+    archivedSessionsDir,
+    sessionIndexPath,
+    pathStyle,
+    markdownDirName,
+    outputDir,
+    projectFilter,
+    exportAll,
+    copyRaw,
+    listOnly,
+    listSessionsOnly,
+    diagnoseOnly,
+    includeArchived,
+    allowOutputInToolDir,
+    exportProfile,
+    exportFormats,
+    progressReporter,
+    diagnosticReporter,
+  } = context;
+  const coreStartedAt = performance.now();
+  const runtimeTimings = {
+    discovery_ms: 0,
+    routing_ms: 0,
+    snapshots_ms: 0,
+    processing_ms: 0,
+    indexes_manifest_ms: 0,
+    verification_ms: 0,
+  };
+  diagnosticReporter("core_start", { profile: exportProfile, scope_kind: exportAll ? "all" : "workspace" });
   if (args.help) {
-    printHelp();
-    return;
+    if (print) printHelp();
+    return null;
   }
 
   if (args.version) {
-    console.log(VERSION);
-    return;
+    if (print) console.log(VERSION);
+    return null;
   }
 
   if (!args.all && !projectFilter && !listOnly && !listSessionsOnly && !diagnoseOnly) {
@@ -123,6 +301,9 @@ async function main() {
     throw new ExportError("OUTPUT_IN_TOOL_DIR", `Refusing to export into the tool/repository folder: ${outputDir}`);
   }
 
+  progressReporter({ phase: "discovery", message: "Discovering sessions" });
+  diagnosticReporter("discovery_start");
+  const discoveryStart = performance.now();
   const locations = [];
   if (fs.existsSync(sessionsDir)) locations.push({ root: sessionsDir, storage: "active" });
   if (includeArchived && fs.existsSync(archivedSessionsDir)) locations.push({ root: archivedSessionsDir, storage: "archived" });
@@ -132,127 +313,265 @@ async function main() {
 
   const files = [];
   for (const location of locations) {
-    for (const file of await findJsonlFiles(location.root)) files.push({ file, storage: location.storage });
+    for (const file of await findJsonlFiles(location.root)) files.push({ file, sourceRootPath: location.root, storage: location.storage });
   }
   if (!files.length) {
     throw new ExportError("NO_SESSIONS", `No rollout JSONL files found under: ${locations.map((location) => location.root).join(", ")}`);
   }
   files.sort((a, b) => a.file.localeCompare(b.file));
-  const titleIndex = await readSessionIndex(sessionIndexPath);
-  const metaMap = new Map();
+  const sourceProtection = await createSourceProtection(files, locations, [sessionIndexPath]);
+  runState.sourceProtection = sourceProtection;
+  const titleIndex = await readSessionIndex(sessionIndexPath, profiler);
+  profiler?.addPhase("session_discovery_and_metadata", performance.now() - discoveryStart);
+  runtimeTimings.discovery_ms = roundMs(performance.now() - discoveryStart);
+  profiler?.setCounts({ scannedSessions: files.length });
+  diagnosticReporter("discovery_end", { duration_ms: roundMs(performance.now() - discoveryStart), scanned_sessions: files.length });
+  const needsCompleteInventory = listOnly || listSessionsOnly || diagnoseOnly || exportProfile === EXPORT_PROFILE.READABLE;
   const parsedEntries = [];
-
-  for (const entry of files) {
-    const meta = await readSessionMeta(entry.file);
-    const indexed = meta.id ? (titleIndex.get(meta.id) || {}) : {};
-    const indexedTitle = deriveTitle(indexed.threadName, 120);
-    const fallbackTitle = deriveTitle(meta.firstUserText, 120);
-    const rawTitle = indexedTitle || fallbackTitle || "";
-    const title = redactMarkdown ? redactSecrets(rawTitle) : rawTitle;
-    const enriched = {
-      ...meta,
-      title,
-      titleSource: indexedTitle ? "session_index" : (fallbackTitle ? "first_user_message" : ""),
-      updatedAt: indexed.updatedAt || "",
-      file: entry.file,
-      storage: entry.storage,
-    };
-    parsedEntries.push(enriched);
-    const key = meta.id || normalizePathForCompare(entry.file);
-    const existing = metaMap.get(key);
-    if (!existing || (existing.storage === "archived" && entry.storage === "active")) metaMap.set(key, enriched);
+  let metas;
+  let projectListMetas;
+  if (needsCompleteInventory) {
+    const metaMap = new Map();
+    for (const entry of files) {
+      const enriched = await readAndEnrichSession(entry, titleIndex, profiler, "initial_parse_ms", context);
+      parsedEntries.push(enriched);
+      retainPreferredSession(metaMap, enriched);
+    }
+    metas = sortedSessionValues(metaMap);
+  } else {
+    progressReporter({ phase: "routing", message: "Routing sessions" });
+    const allRoutingStartedAt = performance.now();
+    diagnosticReporter("routing_start", { scanned_sessions: files.length });
+    const routingMap = new Map();
+    for (let routingIndex = 0; routingIndex < files.length; routingIndex += 1) {
+      const entry = files[routingIndex];
+      const routingStart = performance.now();
+      let routing = await readSessionRoutingMeta(entry.file);
+      const routingMs = performance.now() - routingStart;
+      diagnosticReporter("routing_hash_end", {
+        ordinal: routingIndex + 1,
+        total: files.length,
+        short_id: shortenSessionId(routing.id || routing.session_id || ""),
+        size_bytes: routing.fileSize || 0,
+        stable: routing.routingSnapshot?.stable === true,
+      });
+      profiler?.addPhase("routing", routingMs, routing.fileSize, 0);
+      profiler?.recordSession(routing, "routing_scan_ms", routingMs, routing.fileSize, 0);
+      routing = { ...routing, file: entry.file, sourceRootPath: entry.sourceRootPath, storage: entry.storage };
+      if (!routing.cwd) {
+        const routingEvidence = routing.routingSnapshot;
+        routing = await readAndEnrichSession(entry, titleIndex, profiler, "routing_fallback_parse_ms", context);
+        routing.routingSnapshot = routingEvidence;
+      }
+      diagnosticReporter("routing_session_end", {
+        ordinal: routingIndex + 1,
+        total: files.length,
+        short_id: shortenSessionId(routing.id || routing.session_id || ""),
+        size_bytes: routing.fileSize || 0,
+        duration_ms: roundMs(performance.now() - routingStart),
+        storage: entry.storage,
+      });
+      retainPreferredSession(routingMap, routing);
+    }
+    const routed = sortedSessionValues(routingMap);
+    projectListMetas = routed;
+    metas = routed;
+    runtimeTimings.routing_ms = roundMs(performance.now() - allRoutingStartedAt);
+    diagnosticReporter("routing_end", { duration_ms: roundMs(performance.now() - allRoutingStartedAt), retained_sessions: routed.length });
   }
-  const metas = Array.from(metaMap.values()).sort((a, b) => (a.timestamp || "").localeCompare(b.timestamp || ""));
 
   if (listOnly) {
-    printProjectList(metas);
-    return;
+    if (print) printProjectList(metas, context);
+    return { projects: metas.length, locations };
   }
 
   if (listSessionsOnly) {
-    printSessionList(metas);
-    return;
+    if (print) printSessionList(metas, context);
+    return { sessions: metas.length, locations };
   }
 
   if (diagnoseOnly) {
-    printDiagnostics(parsedEntries, metas, locations);
-    return;
+    if (print) printDiagnostics(parsedEntries, metas, locations, context);
+    return { parsedEntries: parsedEntries.length, sessions: metas.length, locations };
   }
 
   const selected = metas.filter((meta) => exportAll || matchesProject(meta.cwd, projectFilter));
   if (!selected.length) {
-    printProjectList(metas);
+    if (print) printProjectList(projectListMetas || metas, context);
     throw new ExportError("NO_PROJECT_MATCH", `No sessions matched project filter: ${projectFilter}`);
   }
+  profiler?.setCounts({ exportedSessions: selected.length });
 
-  await fsp.mkdir(outputDir, { recursive: true });
-  await fsp.mkdir(path.join(outputDir, markdownDirName), { recursive: true });
-  if (copyRaw) await fsp.mkdir(path.join(outputDir, "raw"), { recursive: true });
-
-  const rows = [];
+  await assertSeparatedExportRoot(outputDir, locations.map((location) => location.root));
+  await ensureSeparatedOutputDirectory(outputDir, sourceProtection);
+  const exportLock = await acquireExportLock(outputDir, sourceProtection);
+  try {
   const projectDirs = new Map();
-  for (const meta of selected) {
-    const sessionSlug = slug(meta.title || meta.id || path.basename(meta.file, ".jsonl")).slice(0, 80);
-    const start = meta.timestamp ? stampForName(new Date(meta.timestamp)) : stampForName(new Date());
+  const tasks = selected.map((meta, selectedIndex) => {
     const projectDir = pathStyle === "readable" ? readableProjectDir(projectDirs, meta.cwd) : shortProjectDir(projectDirs, meta.cwd);
-    const sessionCode = `s${String(rows.length + 1).padStart(4, "0")}`;
-    const baseName = pathStyle === "readable" ? `${start}-${sessionSlug || "codex-session"}-${sessionCode}` : sessionCode;
-    const markdownRel = path.join(markdownDirName, projectDir, `${baseName}.md`);
-    const rawRel = path.join("raw", projectDir, pathStyle === "readable" ? path.basename(meta.file) : `${baseName}.jsonl`);
+    const sessionCode = `s${String(selectedIndex + 1).padStart(4, "0")}`;
+    const sourceOriginalFilename = path.basename(meta.file);
+    const rawExportName = pathStyle === "readable" ? `${sessionCode}-${sourceOriginalFilename}` : `${sessionCode}.jsonl`;
+    const rawRel = path.join("raw", projectDir, rawExportName);
+    return { meta, projectDir, sessionCode, sourceOriginalFilename, rawExportName, rawRel, snapshot: null, parsedSnapshotMeta: null, metadataAlreadyParsed: needsCompleteInventory };
+  });
+  const plannedPaths = ["manifest.json", "README.txt"];
+  if (exportFormats.html) plannedPaths.push("index.html");
+  if (exportFormats.markdown) plannedPaths.push("index.md");
+  if (copyRaw) plannedPaths.push(...tasks.map((task) => task.rawRel));
+  const generation = await beginExportGeneration(outputDir, sourceProtection, { plannedPaths });
 
-    await fsp.mkdir(path.join(outputDir, markdownDirName, projectDir), { recursive: true });
-    if (copyRaw) {
-      await fsp.mkdir(path.join(outputDir, "raw", projectDir), { recursive: true });
-      await fsp.copyFile(meta.file, path.join(outputDir, rawRel));
-    }
+  if (exportFormats.markdown) await ensureSeparatedOutputDirectory(path.join(outputDir, markdownDirName), sourceProtection);
+  if (copyRaw) await ensureSeparatedOutputDirectory(path.join(outputDir, "raw"), sourceProtection);
 
-    const stats = await writeMarkdownTranscript(meta, path.join(outputDir, markdownRel), copyRaw ? rawRel : "");
-    rows.push({
-      project: meta.cwd || "",
-      project_name: meta.cwd ? portableBasename(meta.cwd) : "",
-      title: meta.title || "",
-      title_source: meta.titleSource || "",
+  const snapshotsStartedAt = performance.now();
+  if (copyRaw) progressReporter({ phase: "snapshot", message: "Verifying source snapshots" });
+  for (let selectedIndex = 0; selectedIndex < tasks.length; selectedIndex += 1) {
+    const task = tasks[selectedIndex];
+    const { meta, projectDir, sessionCode, sourceOriginalFilename, rawExportName, rawRel } = task;
+    const sessionStartedAt = performance.now();
+    const diagnosticContext = {
+      ordinal: selectedIndex + 1,
+      total: selected.length,
+      short_id: shortenSessionId(meta.id || meta.session_id || ""),
+      size_bytes: meta.fileSize || 0,
       storage: meta.storage || "active",
-      session_id: meta.id || "",
-      started_at: meta.timestamp || "",
-      updated_at: stats.updatedAt || meta.updatedAt || "",
-      model: stats.model || meta.model || "",
-      user_messages: stats.userMessages,
-      assistant_messages: stats.assistantMessages,
-      tool_events: stats.toolEvents,
-      source_jsonl: meta.file,
-      source_jsonl_name: path.basename(meta.file),
-      markdown_file: markdownRel,
-      raw_export_file: copyRaw ? rawRel : "",
+    };
+    diagnosticReporter("session_start", diagnosticContext);
+    progressReporter({
+      phase: "processing",
+      message: `Processing session ${selectedIndex + 1} of ${selected.length}`,
+      current: selectedIndex + 1,
+      total: selected.length,
+      sessionId: shortenSessionId(meta.id || meta.session_id || ""),
     });
+    let snapshot = null;
+    if (copyRaw) {
+      await ensureSeparatedOutputDirectory(path.join(outputDir, "raw", projectDir), sourceProtection);
+      const rawPath = path.join(outputDir, rawRel);
+      const verifyPublishedSnapshot = exportFormats.markdown && !needsCompleteInventory
+        ? async (publishedPath) => {
+            const parseStart = performance.now();
+            const parsedMeta = await readSessionMeta(publishedPath, {
+              fallbackSessionId: meta.id,
+              fallbackTimestamp: meta.timestamp,
+              collectAttachmentMetrics: Boolean(profiler),
+              calculateSha256: true,
+            });
+            const parseMs = performance.now() - parseStart;
+            profiler?.addPhase("parse_and_classify", parseMs, parsedMeta.fileSize, 0);
+            profiler?.recordSession(meta, "snapshot_parse_ms", parseMs, parsedMeta.fileSize, 0);
+            return {
+              sha256: parsedMeta.fileSha256,
+              sizeBytes: parsedMeta.fileReadAfterSizeBytes,
+              stable: parsedMeta.fileReadStable,
+              value: parsedMeta,
+            };
+          }
+        : null;
+      snapshot = await copyStableRawSnapshot(meta.file, rawPath, {
+        profiler,
+        profileSession: meta,
+        diagnostic: diagnosticReporter,
+        diagnosticContext,
+        routingSnapshot: meta.routingSnapshot,
+        verifyPublishedSnapshot,
+        generation,
+      });
+    }
+    task.snapshot = snapshot;
+    task.parsedSnapshotMeta = snapshot?.verificationValue || null;
+    diagnosticReporter("session_end", { ...diagnosticContext, duration_ms: roundMs(performance.now() - sessionStartedAt), snapshot_attempts: snapshot?.attempts || 0 });
   }
+  runtimeTimings.snapshots_ms = roundMs(performance.now() - snapshotsStartedAt);
 
-  await writeIndexFiles(outputDir, rows);
-  await writeSummary(outputDir, rows);
-  await verifyExport(outputDir, rows);
+  if (exportFormats.markdown) progressReporter({ phase: "rendering", message: "Rendering reading views" });
+  const processingStartedAt = performance.now();
+  const rows = [];
+  for (const task of tasks) rows.push(await processExportTask(task, titleIndex, profiler, context, sourceProtection, generation));
+  runtimeTimings.processing_ms = roundMs(performance.now() - processingStartedAt);
 
-  console.log("");
-  console.log(`Export complete: ${outputDir}`);
-  console.log(`Sessions: ${rows.length}`);
-  console.log(`Active: ${rows.filter((row) => row.storage === "active").length}`);
-  console.log(`Archived: ${rows.filter((row) => row.storage === "archived").length}`);
-  console.log(`Path style: ${pathStyle}`);
-  console.log(`Markdown: ${path.join(outputDir, markdownDirName)}`);
-  if (copyRaw) console.log(`Raw data: ${path.join(outputDir, "raw")}`);
-  console.log(`HTML index: ${path.join(outputDir, "index.html")}`);
-  console.log(`Markdown index: ${path.join(outputDir, "index.md")}`);
-  console.log("");
-  console.log("Next steps:");
-  console.log(`1. Open ${path.join(outputDir, "index.html")} to browse the export in your browser.`);
-  console.log(`2. Spot-check a few files in ${path.join(outputDir, markdownDirName)}.`);
-  console.log(`   Markdown users can also open ${path.join(outputDir, "index.md")}.`);
-  console.log("3. If your export contains a raw/ folder, keep it private.");
+  progressReporter({ phase: "writing", message: "Writing indexes and manifest" });
+  const indexesManifestStartedAt = performance.now();
+  diagnosticReporter("indexes_and_manifest_start");
+  const manifest = await writeIndexFiles(outputDir, rows, profiler, context, sourceProtection, generation);
+  const summaryStart = performance.now();
+  diagnosticReporter("summary_start");
+  await writeSummary(outputDir, rows, context, sourceProtection, generation);
+  profiler?.addPhase("other", performance.now() - summaryStart, 0, (await fsp.stat(path.join(outputDir, "README.txt"))).size);
+  diagnosticReporter("summary_end", { duration_ms: roundMs(performance.now() - summaryStart) });
+  let verificationElapsedMs = 0;
+  const contentVerificationStartedAt = performance.now();
+  diagnosticReporter("verification_start", { sessions: rows.length });
+  await verifyExport(outputDir, rows, profiler, context, { includeManifest: false });
+  verificationElapsedMs += performance.now() - contentVerificationStartedAt;
+  const manifestStart = performance.now();
+  diagnosticReporter("manifest_start", { sessions: rows.length });
+  await writeSeparatedOutputFile(path.join(outputDir, "manifest.json"), sourceProtection, (handle) => handle.writeFile(manifest, "utf8"), generation);
+  profiler?.addPhase("manifest", performance.now() - manifestStart, 0, Buffer.byteLength(manifest));
+  diagnosticReporter("manifest_end", { duration_ms: roundMs(performance.now() - manifestStart), bytes_written: Buffer.byteLength(manifest) });
+  diagnosticReporter("indexes_and_manifest_end");
+  runtimeTimings.indexes_manifest_ms = roundMs(performance.now() - indexesManifestStartedAt);
+  const finalVerificationStartedAt = performance.now();
+  await verifyExport(outputDir, rows, profiler, context, { includeManifest: true, expectedManifest: manifest });
+  await completeExportGeneration(generation);
+  verificationElapsedMs += performance.now() - finalVerificationStartedAt;
+  runtimeTimings.verification_ms = roundMs(verificationElapsedMs);
+  diagnosticReporter("verification_end", { duration_ms: runtimeTimings.verification_ms, sessions: rows.length });
+  progressReporter({ phase: "complete", message: "Export complete" });
+  diagnosticReporter("core_end", { duration_ms: roundMs(performance.now() - coreStartedAt), exported_sessions: rows.length });
+
+  const result = {
+    outputDirectory: outputDir,
+    htmlIndexPath: exportFormats.html ? path.join(outputDir, "index.html") : "",
+    markdownIndexPath: exportFormats.markdown ? path.join(outputDir, "index.md") : "",
+    manifestPath: path.join(outputDir, "manifest.json"),
+    exportProfile,
+    formats: { ...exportFormats },
+    exportedProjectCount: new Set(rows.map((row) => row.project || "unknown")).size,
+    exportedSessionCount: rows.length,
+    activeSessionCount: rows.filter((row) => row.storage === "active").length,
+    archivedSessionCount: rows.filter((row) => row.storage === "archived").length,
+    warnings: [],
+    runtimeTimings: {
+      ...runtimeTimings,
+      total_ms: roundMs(performance.now() - coreStartedAt),
+    },
+    rows,
+  };
+
+  if (print) printExportResult(result, context);
+  return result;
+  } finally {
+    await releaseExportLock(exportLock);
+  }
 }
 
+function printExportResult(result, context) {
+  const { exportProfile, pathStyle, exportFormats, markdownDirName, copyRaw } = context;
+  console.log("");
+  console.log(`Export complete: ${result.outputDirectory}`);
+  console.log(`Sessions: ${result.exportedSessionCount}`);
+  console.log(`Active: ${result.activeSessionCount}`);
+  console.log(`Archived: ${result.archivedSessionCount}`);
+  console.log(`Profile: ${exportProfile}`);
+  console.log(`Path style: ${pathStyle}`);
+  if (exportFormats.markdown) console.log(`Markdown: ${path.join(result.outputDirectory, markdownDirName)}`);
+  if (copyRaw) console.log(`Raw data: ${path.join(result.outputDirectory, "raw")}`);
+  if (result.htmlIndexPath) console.log(`HTML index: ${result.htmlIndexPath}`);
+  if (result.markdownIndexPath) console.log(`Markdown index: ${result.markdownIndexPath}`);
+  console.log("");
+  console.log("Next steps:");
+  const nextSteps = [];
+  if (result.htmlIndexPath) nextSteps.push(`Open ${result.htmlIndexPath} to browse the export in your browser.`);
+  if (exportFormats.markdown) nextSteps.push(`Spot-check a few files in ${path.join(result.outputDirectory, markdownDirName)}.${result.markdownIndexPath ? ` Markdown users can also open ${result.markdownIndexPath}.` : ""}`);
+  if (copyRaw) nextSteps.push("Keep the raw/ folder private.");
+  nextSteps.forEach((step, index) => console.log(`${index + 1}. ${step}`));
+}
 function parseArgs(argv) {
   const parsed = {};
   const flagArgs = new Set(["all", "include-tools", "no-raw", "no-redact-markdown", "no-archived", "list", "list-sessions", "diagnose", "help", "version", "readable-paths", "allow-output-in-tool-dir"]);
-  const valueArgs = new Set(["project", "out", "codex-home", "sessions-dir", "archived-dir", "session-index"]);
+  const valueArgs = new Set(["project", "out", "codex-home", "sessions-dir", "archived-dir", "session-index", "performance-profile", "profile"]);
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === "-h") {
@@ -277,6 +596,7 @@ function parseArgs(argv) {
     }
   }
   if (parsed.all && parsed.project) throw new Error("Use either --all or --project, not both.");
+  if (parsed.profile && !Object.hasOwn(EXPORT_PROFILES, parsed.profile)) throw new Error(`Unsupported export profile: ${parsed.profile}`);
   return parsed;
 }
 
@@ -294,9 +614,11 @@ async function findJsonlFiles(root) {
   return results;
 }
 
-async function readSessionIndex(indexPath) {
+async function readSessionIndex(indexPath, profiler = null) {
   const result = new Map();
   if (!fs.existsSync(indexPath)) return result;
+  const indexStat = await fsp.stat(indexPath).catch(() => null);
+  profiler?.addPhase("session_discovery_and_metadata", 0, indexStat?.size || 0, 0);
   const rl = readline.createInterface({ input: fs.createReadStream(indexPath, { encoding: "utf8" }), crlfDelay: Infinity });
   for await (const line of rl) {
     if (!line.trim()) continue;
@@ -308,30 +630,48 @@ async function readSessionIndex(indexPath) {
   return result;
 }
 
-async function readSessionMeta(file) {
+async function readSessionMeta(file, { fallbackSessionId = "", fallbackTimestamp = "", collectAttachmentMetrics = false, calculateSha256 = false } = {}) {
   const filenameId = extractSessionIdFromFilename(file);
   const stat = await fsp.stat(file).catch(() => null);
+  const fileHash = calculateSha256 ? createHash("sha256") : null;
+  const classifier = createSessionEventClassifier();
   const meta = {
     file,
-    id: filenameId,
-    session_id: filenameId,
-    idSource: filenameId ? "filename" : "",
+    id: filenameId || fallbackSessionId,
+    session_id: filenameId || fallbackSessionId,
+    idSource: filenameId ? "filename" : (fallbackSessionId ? "source_mapping" : ""),
     metadataId: "",
     metadataIdMismatch: false,
     cwd: "",
     timestamp: "",
     source: "",
+    threadSource: "",
+    parentThreadId: "",
     model: "",
     firstUserText: "",
+    firstCwdText: "",
     hasSessionMeta: false,
     parsedLines: 0,
+    jsonlLineCount: 0,
+    parsedEventCount: 0,
     invalidJsonLines: 0,
     fileSize: stat?.size || 0,
+    latestTimestamp: "",
+    attachmentMetrics: collectAttachmentMetrics ? createAttachmentMetrics() : null,
+    fileSha256: "",
+    fileReadBeforeSizeBytes: stat?.size ?? null,
+    fileReadBeforeMtimeMs: stat?.mtimeMs ?? null,
+    fileReadAfterSizeBytes: null,
+    fileReadAfterMtimeMs: null,
+    fileReadStable: false,
   };
-  const rl = readline.createInterface({ input: fs.createReadStream(file, { encoding: "utf8" }), crlfDelay: Infinity });
+  const input = fs.createReadStream(file);
+  if (fileHash) input.on("data", (chunk) => fileHash.update(chunk));
+  const rl = readline.createInterface({ input, crlfDelay: Infinity });
   for await (const line of rl) {
     meta.parsedLines += 1;
     if (!line.trim()) continue;
+    meta.jsonlLineCount += 1;
     let item;
     try {
       item = JSON.parse(line);
@@ -339,6 +679,10 @@ async function readSessionMeta(file) {
       meta.invalidJsonLines += 1;
       continue;
     }
+    meta.parsedEventCount += 1;
+    if (meta.attachmentMetrics) observeAttachmentMetrics(item, meta.attachmentMetrics);
+    classifier.observe(item, meta.jsonlLineCount);
+    if (item.timestamp && (!meta.latestTimestamp || item.timestamp > meta.latestTimestamp)) meta.latestTimestamp = item.timestamp;
     if (item.type === "session_meta" && item.payload) {
       const payloadId = item.payload.id || item.payload.session_id || "";
       if (!meta.hasSessionMeta) {
@@ -354,6 +698,8 @@ async function readSessionMeta(file) {
         meta.cwd = item.payload.cwd || meta.cwd;
         meta.timestamp = item.payload.timestamp || item.timestamp || meta.timestamp;
         meta.source = item.payload.source || meta.source;
+        meta.threadSource = item.payload.thread_source || meta.threadSource;
+        meta.parentThreadId = item.payload.parent_thread_id || meta.parentThreadId;
       } else {
         meta.cwd = meta.cwd || item.payload.cwd || "";
         meta.timestamp = meta.timestamp || item.payload.timestamp || item.timestamp || "";
@@ -363,22 +709,512 @@ async function readSessionMeta(file) {
       meta.cwd = item.payload.cwd || meta.cwd;
       meta.model = item.payload.model || meta.model;
     }
-    if (item.type === "response_item" && item.payload?.type === "message" && item.payload?.role === "user" && !meta.firstUserText) {
-      meta.firstUserText = extractText(item.payload.content);
-    }
-    if (item.type === "event_msg" && item.payload?.type === "user_message" && !meta.firstUserText) {
-      meta.firstUserText = item.payload.message || item.payload.text || "";
-    }
-    if (!meta.cwd && meta.firstUserText) {
-      meta.cwd = extractCwdFromText(meta.firstUserText) || meta.cwd;
-    }
-    if (meta.cwd && meta.id && meta.timestamp && meta.firstUserText && meta.model) {
-      rl.close();
-      break;
+    if (item.type === "response_item" && item.payload?.type === "message" && item.payload?.role === "user" && !meta.firstCwdText) {
+      meta.firstCwdText = extractText(item.payload.content);
     }
   }
-  if (!meta.timestamp && stat) meta.timestamp = stat.mtime.toISOString();
+  const eventAnalysis = classifier.finish();
+  meta.eventAnalysis = eventAnalysis;
+  meta.firstUserText = eventAnalysis.firstDirectUserText;
+  meta.sessionKind = eventAnalysis.sessionKind;
+  if (!meta.cwd && meta.firstCwdText) meta.cwd = extractCwdFromText(meta.firstCwdText) || meta.cwd;
+  if (!meta.timestamp) meta.timestamp = fallbackTimestamp || (stat ? stat.mtime.toISOString() : "");
+  if (!meta.latestTimestamp) meta.latestTimestamp = meta.timestamp;
+  if (fileHash) {
+    const afterRead = await fsp.stat(file);
+    meta.fileSha256 = fileHash.digest("hex");
+    meta.fileReadAfterSizeBytes = afterRead.size;
+    meta.fileReadAfterMtimeMs = afterRead.mtimeMs;
+    meta.fileReadStable = Boolean(stat && sameFileVersion(stat, afterRead));
+  }
   return meta;
+}
+
+async function processExportTask(task, titleIndex, profiler, context, sourceProtection, generation) {
+  const { exportFormats, copyRaw, outputDir, redactMarkdown, pathStyle, markdownDirName } = context;
+  const { meta, projectDir, sessionCode, sourceOriginalFilename, rawExportName, rawRel, snapshot, parsedSnapshotMeta, metadataAlreadyParsed } = task;
+  let renderMeta = meta;
+  let stats = { userMessages: 0, assistantMessages: 0, subagentInputs: 0, runtimeContexts: 0, unclassifiedUserRoleRecords: 0, toolEvents: 0, model: meta.model || "", updatedAt: meta.updatedAt || meta.timestamp || "" };
+  let markdownRel = "";
+
+  if (exportFormats.markdown) {
+    const parsePath = copyRaw ? path.join(outputDir, rawRel) : meta.file;
+    let parsedMeta = parsedSnapshotMeta || meta;
+    if (!metadataAlreadyParsed && !parsedSnapshotMeta) {
+      const parseStart = performance.now();
+      parsedMeta = await readSessionMeta(parsePath, {
+        fallbackSessionId: meta.id,
+        fallbackTimestamp: meta.timestamp,
+        collectAttachmentMetrics: Boolean(profiler),
+      });
+      const parseMs = performance.now() - parseStart;
+      profiler?.addPhase("parse_and_classify", parseMs, parsedMeta.fileSize, 0);
+      profiler?.recordSession(meta, copyRaw ? "snapshot_parse_ms" : "selected_parse_ms", parseMs, parsedMeta.fileSize, 0);
+    }
+    if (meta.id && parsedMeta.id && meta.id !== parsedMeta.id) throw new ExportError("SOURCE_SNAPSHOT_MISMATCH", `Parsed session ID differs from scanned source: ${sourceOriginalFilename}`);
+    const indexed = parsedMeta.id ? (titleIndex.get(parsedMeta.id) || {}) : {};
+    const titleResolution = resolveDisplayTitle(parsedMeta, indexed.threadName);
+    const displayTitle = redactMarkdown ? redactSecrets(titleResolution.displayTitle) : titleResolution.displayTitle;
+    renderMeta = {
+      ...parsedMeta,
+      displayTitle,
+      file: parsePath,
+      indexedTitleStatus: titleResolution.indexedTitleStatus,
+      sourceRootPath: meta.sourceRootPath,
+      sourceOriginalPath: meta.file,
+      storage: meta.storage,
+      title: displayTitle,
+      titleSource: titleResolution.source,
+      updatedAt: indexed.updatedAt || meta.updatedAt || "",
+    };
+    const sessionSlug = slug(renderMeta.displayTitle || renderMeta.title || renderMeta.id || sourceOriginalFilename).slice(0, 80);
+    const start = renderMeta.timestamp ? stampForName(new Date(renderMeta.timestamp)) : stampForName(new Date());
+    const baseName = pathStyle === "readable" ? `${start}-${sessionSlug || "codex-session"}-${sessionCode}` : sessionCode;
+    markdownRel = path.join(markdownDirName, projectDir, `${baseName}.md`);
+    await ensureSeparatedOutputDirectory(path.join(outputDir, markdownDirName, projectDir), sourceProtection);
+    profiler?.recordAttachments(renderMeta.attachmentMetrics);
+    stats = await writeMarkdownTranscript(renderMeta, path.join(outputDir, markdownRel), copyRaw ? rawRel : "", profiler, meta, context, sourceProtection, generation);
+  } else {
+    const title = neutralSessionTitle(meta);
+    renderMeta = { ...meta, title, displayTitle: title, titleSource: "neutral_unclassified_snapshot", indexedTitleStatus: "NOT_EVALUATED", sessionKind: SESSION_KIND.UNKNOWN };
+  }
+
+  const sourceRoot = meta.storage === "archived" ? "archived_sessions" : "sessions";
+  const sourceRelativePath = validatedSourceRelativePath(meta.file, meta.sourceRootPath);
+  return {
+    project: renderMeta.cwd || "",
+    project_name: renderMeta.cwd ? portableBasename(renderMeta.cwd) : "",
+    title: renderMeta.displayTitle || renderMeta.title || "",
+    display_title: renderMeta.displayTitle || renderMeta.title || "",
+    title_source: renderMeta.titleSource || "",
+    indexed_title_status: renderMeta.indexedTitleStatus || "NOT_PRESENT",
+    storage: meta.storage || "active",
+    session_id: renderMeta.id || "",
+    session_kind: renderMeta.sessionKind || SESSION_KIND.UNKNOWN,
+    started_at: renderMeta.timestamp || "",
+    updated_at: stats.updatedAt || renderMeta.updatedAt || "",
+    model: stats.model || renderMeta.model || "",
+    user_messages: exportFormats.markdown ? stats.userMessages : null,
+    assistant_messages: exportFormats.markdown ? stats.assistantMessages : null,
+    subagent_inputs: exportFormats.markdown ? stats.subagentInputs : null,
+    automatic_runtime_contexts: exportFormats.markdown ? stats.runtimeContexts : null,
+    unclassified_user_role_records: exportFormats.markdown ? stats.unclassifiedUserRoleRecords : null,
+    tool_events: exportFormats.markdown ? stats.toolEvents : null,
+    source_jsonl: meta.file,
+    source_original_filename: sourceOriginalFilename,
+    source_root: sourceRoot,
+    source_relative_path: sourceRelativePath,
+    markdown_file: markdownRel,
+    raw_export_file: copyRaw ? rawRel : "",
+    raw_export_name: copyRaw ? rawExportName : "",
+    raw_sha256: snapshot?.sha256 || "",
+    raw_size_bytes: snapshot?.sizeBytes ?? null,
+    snapshot_status: copyRaw ? "STABLE" : "NOT_INCLUDED",
+    raw_copy_status: copyRaw ? snapshot?.copyStatus || "" : RAW_COPY_STATUS.NOT_INCLUDED,
+    raw_verified_at: copyRaw ? snapshot?.verifiedAt || null : null,
+    source_snapshot_before_size_bytes: snapshot?.sourceBeforeSizeBytes ?? null,
+    source_snapshot_before_mtime_ms: snapshot?.sourceBeforeMtimeMs ?? null,
+    source_snapshot_after_size_bytes: snapshot?.sourceAfterSizeBytes ?? null,
+    source_snapshot_after_mtime_ms: snapshot?.sourceAfterMtimeMs ?? null,
+    jsonl_line_count: exportFormats.markdown ? renderMeta.jsonlLineCount : null,
+    parsed_event_count: exportFormats.markdown ? renderMeta.parsedEventCount : null,
+    invalid_jsonl_line_count: exportFormats.markdown ? renderMeta.invalidJsonLines : null,
+  };
+}
+
+async function readAndEnrichSession(entry, titleIndex, profiler, profilePhaseName, context) {
+  const { redactMarkdown } = context;
+  const parseStart = performance.now();
+  const meta = await readSessionMeta(entry.file, { collectAttachmentMetrics: Boolean(profiler) });
+  const parseMs = performance.now() - parseStart;
+  profiler?.addPhase("parse_and_classify", parseMs, meta.fileSize, 0);
+  profiler?.recordSession(meta, profilePhaseName, parseMs, meta.fileSize, 0);
+  const indexed = meta.id ? (titleIndex.get(meta.id) || {}) : {};
+  const titleResolution = resolveDisplayTitle(meta, indexed.threadName);
+  const title = redactMarkdown ? redactSecrets(titleResolution.displayTitle) : titleResolution.displayTitle;
+  return {
+    ...meta,
+    title,
+    displayTitle: title,
+    titleSource: titleResolution.source,
+    indexedTitleStatus: titleResolution.indexedTitleStatus,
+    updatedAt: indexed.updatedAt || "",
+    file: entry.file,
+    sourceRootPath: entry.sourceRootPath,
+    storage: entry.storage,
+  };
+}
+
+async function readSessionRoutingMeta(file) {
+  const filenameId = extractSessionIdFromFilename(file);
+  const stat = await fsp.stat(file).catch(() => null);
+  const fileHash = createHash("sha256");
+  const meta = {
+    file,
+    id: filenameId,
+    session_id: filenameId,
+    idSource: filenameId ? "filename" : "",
+    metadataId: "",
+    metadataIdMismatch: false,
+    cwd: "",
+    timestamp: "",
+    source: "",
+    threadSource: "",
+    parentThreadId: "",
+    hasSessionMeta: false,
+    fileSize: stat?.size || 0,
+  };
+  const input = fs.createReadStream(file);
+  input.on("data", (chunk) => fileHash.update(chunk));
+  const rl = readline.createInterface({ input, crlfDelay: Infinity });
+  for await (const line of rl) {
+    if (!line.trim()) continue;
+    const typeScan = readTopLevelJsonEventType(line);
+    let type = typeScan.status === "FOUND" ? typeScan.value : "";
+    let item;
+    if (typeScan.status === "UNCERTAIN") {
+      try {
+        item = JSON.parse(line);
+        type = item?.type || "";
+      } catch {
+        continue;
+      }
+    }
+    if (typeScan.status === "NOT_FOUND") continue;
+    if (type !== "session_meta" && type !== "turn_context") continue;
+    if (!item) {
+      try { item = JSON.parse(line); } catch { continue; }
+    }
+    if (type === "session_meta" && item.payload) {
+      const payloadId = item.payload.id || item.payload.session_id || "";
+      if (!meta.hasSessionMeta) {
+        meta.hasSessionMeta = true;
+        meta.metadataId = payloadId;
+        if (!meta.id && payloadId) {
+          meta.id = payloadId;
+          meta.session_id = item.payload.session_id || payloadId;
+          meta.idSource = "session_meta";
+        } else if (payloadId && meta.id && payloadId !== meta.id) {
+          meta.metadataIdMismatch = true;
+        }
+        meta.cwd = item.payload.cwd || meta.cwd;
+        meta.timestamp = item.payload.timestamp || item.timestamp || meta.timestamp;
+        meta.source = item.payload.source || meta.source;
+        meta.threadSource = item.payload.thread_source || meta.threadSource;
+        meta.parentThreadId = item.payload.parent_thread_id || meta.parentThreadId;
+      } else {
+        meta.cwd = meta.cwd || item.payload.cwd || "";
+        meta.timestamp = meta.timestamp || item.payload.timestamp || item.timestamp || "";
+      }
+    }
+    if (type === "turn_context" && item.payload) meta.cwd = item.payload.cwd || meta.cwd;
+  }
+  if (!meta.timestamp && stat) meta.timestamp = stat.mtime.toISOString();
+  const afterRead = await fsp.stat(file);
+  meta.routingSnapshot = {
+    sha256: fileHash.digest("hex"),
+    beforeSizeBytes: stat?.size ?? null,
+    beforeMtimeMs: stat?.mtimeMs ?? null,
+    afterSizeBytes: afterRead.size,
+    afterMtimeMs: afterRead.mtimeMs,
+    stable: Boolean(stat && sameFileVersion(stat, afterRead)),
+  };
+  return meta;
+}
+
+function readTopLevelJsonEventType(line) {
+  const text = String(line || "");
+  let index = skipJsonWhitespace(text, 0);
+  if (text[index] !== "{") return { status: "UNCERTAIN", value: "" };
+  index += 1;
+  let foundType = "";
+  let foundTypeCount = 0;
+  while (index < text.length) {
+    index = skipJsonWhitespace(text, index);
+    if (text[index] === "}") return finishTopLevelTypeScan(text, index + 1, foundType, foundTypeCount);
+    const key = readJsonStringToken(text, index);
+    if (!key) return { status: "UNCERTAIN", value: "" };
+    index = skipJsonWhitespace(text, key.end);
+    if (text[index] !== ":") return { status: "UNCERTAIN", value: "" };
+    index = skipJsonWhitespace(text, index + 1);
+    if (key.value === "type") {
+      const value = readJsonStringToken(text, index);
+      if (!value) return { status: "UNCERTAIN", value: "" };
+      foundType = value.value;
+      foundTypeCount += 1;
+      index = value.end;
+    } else {
+      const valueEnd = skipJsonValue(text, index);
+      if (valueEnd === null) return { status: "UNCERTAIN", value: "" };
+      index = valueEnd;
+    }
+    index = skipJsonWhitespace(text, index);
+    if (text[index] === ",") {
+      index += 1;
+      continue;
+    }
+    if (text[index] === "}") return finishTopLevelTypeScan(text, index + 1, foundType, foundTypeCount);
+    return { status: "UNCERTAIN", value: "" };
+  }
+  return { status: "UNCERTAIN", value: "" };
+}
+
+function finishTopLevelTypeScan(text, end, foundType, foundTypeCount) {
+  if (skipJsonWhitespace(text, end) !== text.length || foundTypeCount > 1) return { status: "UNCERTAIN", value: "" };
+  return foundTypeCount === 1 ? { status: "FOUND", value: foundType } : { status: "NOT_FOUND", value: "" };
+}
+
+function skipJsonWhitespace(text, start) {
+  let index = start;
+  while (index < text.length && (text[index] === " " || text[index] === "\t" || text[index] === "\r" || text[index] === "\n")) index += 1;
+  return index;
+}
+
+function skipJsonValue(text, start) {
+  if (text[start] === "\"") return skipJsonString(text, start);
+  if (text[start] === "{" || text[start] === "[") {
+    const stack = [text[start] === "{" ? "}" : "]"];
+    let index = start + 1;
+    while (index < text.length) {
+      if (text[index] === "\"") {
+        const end = skipJsonString(text, index);
+        if (end === null) return null;
+        index = end;
+        continue;
+      }
+      if (text[index] === "{" || text[index] === "[") stack.push(text[index] === "{" ? "}" : "]");
+      else if (text[index] === "}" || text[index] === "]") {
+        if (stack.pop() !== text[index]) return null;
+        if (!stack.length) return index + 1;
+      }
+      index += 1;
+    }
+    return null;
+  }
+  let index = start;
+  while (index < text.length && text[index] !== "," && text[index] !== "}" && text[index] !== "]" && ![" ", "\t", "\r", "\n"].includes(text[index])) index += 1;
+  if (index === start) return null;
+  try {
+    JSON.parse(text.slice(start, index));
+    return index;
+  } catch {
+    return null;
+  }
+}
+
+function skipJsonString(text, start) {
+  if (text[start] !== "\"") return null;
+  let searchFrom = start + 1;
+  while (searchFrom < text.length) {
+    const quote = text.indexOf("\"", searchFrom);
+    if (quote === -1) return null;
+    let slashCount = 0;
+    for (let index = quote - 1; index > start && text[index] === "\\"; index -= 1) slashCount += 1;
+    if (slashCount % 2 === 0) return quote + 1;
+    searchFrom = quote + 1;
+  }
+  return null;
+}
+
+function readJsonStringToken(text, start) {
+  if (text[start] !== "\"") return null;
+  let escaped = false;
+  for (let index = start + 1; index < text.length; index += 1) {
+    const character = text[index];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (character === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (character === "\"") {
+      try {
+        return { value: JSON.parse(text.slice(start, index + 1)), end: index + 1 };
+      } catch {
+        return null;
+      }
+    }
+  }
+  return null;
+}
+
+function retainPreferredSession(map, meta) {
+  const key = meta.id || normalizePathForCompare(meta.file);
+  const existing = map.get(key);
+  if (!existing || (existing.storage === "archived" && meta.storage === "active")) map.set(key, meta);
+}
+
+function sortedSessionValues(map) {
+  return Array.from(map.values()).sort((left, right) => (left.timestamp || "").localeCompare(right.timestamp || ""));
+}
+
+function createSessionEventClassifier() {
+  let sessionMeta = {};
+  let sessionKind = SESSION_KIND.UNKNOWN;
+  let previousParsed = null;
+  let firstPairedInputText = "";
+  const userRecords = [];
+
+  function observe(item, recordNumber) {
+    if (item.type === "session_meta" && item.payload) {
+      sessionMeta = { ...sessionMeta, ...item.payload };
+      sessionKind = classifySessionKind(sessionMeta);
+    }
+
+    const current = { item, recordNumber, userRecord: null };
+    if (item.type === "response_item" && item.payload?.type === "message" && item.payload?.role === "user") {
+      const text = extractText(item.payload.content);
+      const userRecord = {
+        recordNumber,
+        timestamp: item.timestamp || "",
+        turnId: item.payload.internal_chat_message_metadata_passthrough?.turn_id || "",
+        mirrorRejected: false,
+        paired: false,
+        titleCandidate: deriveUserDisplayTitle(text, 120),
+        runtimeContextTypes: classifyRuntimeContextTypes(text),
+        fullText: text,
+      };
+      userRecords.push(userRecord);
+      current.userRecord = userRecord;
+    }
+
+    if (item.type === "event_msg" && item.payload?.type === "user_message" && previousParsed?.userRecord) {
+      if (isMirroredUserEvent(previousParsed.item, item)) {
+        previousParsed.userRecord.paired = true;
+        if (!firstPairedInputText) firstPairedInputText = previousParsed.userRecord.fullText;
+      } else {
+        previousParsed.userRecord.mirrorRejected = true;
+      }
+    }
+
+    if (previousParsed?.userRecord) delete previousParsed.userRecord.fullText;
+    previousParsed = current;
+  }
+
+  function finish() {
+    if (previousParsed?.userRecord) delete previousParsed.userRecord.fullText;
+    const recordsByTurn = new Map();
+    for (const record of userRecords) {
+      if (!recordsByTurn.has(record.turnId)) recordsByTurn.set(record.turnId, []);
+      recordsByTurn.get(record.turnId).push(record);
+    }
+
+    const classifications = new Map();
+    let directUserMessages = 0;
+    let subagentInputs = 0;
+    let runtimeContexts = 0;
+    let unclassifiedUserRoleRecords = 0;
+    const nonDirectTitleCandidates = [];
+
+    for (const record of userRecords) {
+      let kind;
+      if (record.paired) {
+        if (sessionKind === SESSION_KIND.DIRECT_USER) {
+          kind = USER_RECORD_KIND.DIRECT_USER_TURN;
+          directUserMessages += 1;
+        } else if (sessionKind === SESSION_KIND.SUBAGENT) {
+          kind = USER_RECORD_KIND.SUBAGENT_INPUT;
+          subagentInputs += 1;
+        } else {
+          kind = USER_RECORD_KIND.UNCLASSIFIED_USER_ROLE_RECORD;
+          unclassifiedUserRoleRecords += 1;
+        }
+      } else if (record.mirrorRejected) {
+        kind = USER_RECORD_KIND.UNCLASSIFIED_USER_ROLE_RECORD;
+        unclassifiedUserRoleRecords += 1;
+      } else {
+        const sameTurn = recordsByTurn.get(record.turnId) || [];
+        if (record.turnId && sameTurn.some((candidate) => candidate.paired)) {
+          kind = USER_RECORD_KIND.AUTOMATIC_RUNTIME_CONTEXT;
+          runtimeContexts += 1;
+        } else {
+          kind = USER_RECORD_KIND.UNCLASSIFIED_USER_ROLE_RECORD;
+          unclassifiedUserRoleRecords += 1;
+        }
+      }
+      const classification = {
+        kind,
+        mirrorRejected: record.mirrorRejected,
+        runtimeContextTypes: [...record.runtimeContextTypes],
+        pairedResponseRecord: record.paired,
+      };
+      classifications.set(record.recordNumber, classification);
+      if (kind !== USER_RECORD_KIND.DIRECT_USER_TURN && record.titleCandidate) nonDirectTitleCandidates.push(record.titleCandidate);
+    }
+
+    return {
+      classifications,
+      directUserMessages,
+      firstDirectUserText: sessionKind === SESSION_KIND.DIRECT_USER ? firstPairedInputText : "",
+      nonDirectTitleCandidates,
+      runtimeContexts,
+      sessionKind,
+      subagentInputs,
+      unclassifiedUserRoleRecords,
+    };
+  }
+
+  return { finish, observe };
+}
+
+function classifySessionKind(payload = {}) {
+  if (payload.thread_source === "subagent" || payload.source?.subagent) return SESSION_KIND.SUBAGENT;
+  if (payload.thread_source === "user") return SESSION_KIND.DIRECT_USER;
+  if (typeof payload.source === "string" && ["cli", "exec", "vscode"].includes(payload.source.toLowerCase())) return SESSION_KIND.DIRECT_USER;
+  return SESSION_KIND.UNKNOWN;
+}
+
+function isMirroredUserEvent(responseItem, eventMessage) {
+  if (responseItem?.type !== "response_item" || responseItem.payload?.type !== "message" || responseItem.payload?.role !== "user") return false;
+  if (eventMessage?.type !== "event_msg" || eventMessage.payload?.type !== "user_message") return false;
+  const responseTime = Date.parse(responseItem.timestamp || "");
+  const eventTime = Date.parse(eventMessage.timestamp || "");
+  const delay = eventTime - responseTime;
+  if (!Number.isFinite(delay) || delay < 0 || delay > MIRRORED_USER_EVENT_MAX_DELAY_MS) return false;
+  const eventText = typeof eventMessage.payload.message === "string" ? eventMessage.payload.message : "";
+  return eventText.length > 0
+    && canonicalResponseUserMessage(responseItem.payload.content) === eventText
+    && mirroredUserAttachmentsMatch(responseItem.payload.content, eventMessage.payload);
+}
+
+function canonicalResponseUserMessage(content) {
+  if (!Array.isArray(content)) return "";
+  return content.map((item, index) => {
+    if (typeof item?.text !== "string") return "";
+    const trimmed = item.text.trim();
+    const imageOpeningWrapper = trimmed.startsWith("<image") && content[index + 1]?.type === "input_image";
+    const imageClosingWrapper = trimmed === "</image>" && content[index - 1]?.type === "input_image";
+    return imageOpeningWrapper || imageClosingWrapper ? "" : item.text;
+  }).join("");
+}
+
+function mirroredUserAttachmentsMatch(content, eventPayload) {
+  const responseImages = Array.isArray(content) ? content.filter((item) => item?.type === "input_image").map((item) => item.image_url) : [];
+  const eventImages = Array.isArray(eventPayload?.images) ? eventPayload.images : [];
+  const eventLocalImages = Array.isArray(eventPayload?.local_images) ? eventPayload.local_images : [];
+  const eventAttachments = [...eventImages, ...eventLocalImages];
+  return responseImages.length === eventAttachments.length
+    && responseImages.every((image, index) => image === eventAttachments[index]);
+}
+
+function classifyRuntimeContextTypes(text) {
+  const value = String(text || "");
+  const trimmed = value.trimStart();
+  const lines = value.split(/\r?\n/).map((line) => line.trim());
+  const types = [];
+  if (lines.includes("# AGENTS.md instructions")) types.push("AGENTS");
+  if (trimmed.startsWith("<recommended_plugins>") || trimmed.startsWith("<plugins_instructions>") || value.includes("\n<recommended_plugins>") || value.includes("\n<plugins_instructions>")) types.push("PLUGIN");
+  if (trimmed.startsWith("<environment_context>") || trimmed.startsWith("<app-context") || value.includes("\n<environment_context>") || value.includes("\n<app-context")) types.push("ENVIRONMENT");
+  return types;
+}
+
+function deriveUserDisplayTitle(text, maxLength = 96) {
+  const lines = String(text || "").split(/\r?\n/);
+  const requestMarker = lines.findIndex((line) => line.trim() === "## My request for Codex:");
+  if (requestMarker >= 0) return deriveTitle(lines.slice(requestMarker + 1).join("\n"), maxLength);
+  return deriveTitle(text, maxLength);
 }
 
 function extractSessionIdFromFilename(file) {
@@ -408,6 +1244,851 @@ async function readLatestTimestamp(file, fallback = "") {
     } catch {}
   }
   return latest;
+}
+
+async function copyStableRawSnapshot(sourcePath, destinationPath, options = {}) {
+  const io = { copyOpenedFile, hashFile: sha256File, link: fsp.link, lstat: fsp.lstat, open: fsp.open, realpath: fsp.realpath, rename: fsp.rename, rm: fsp.rm, stat: fsp.stat, statIdentity: (file) => fsp.stat(file, { bigint: true }), ...options.io };
+  const maxAttempts = Math.max(1, options.maxAttempts || 3);
+  const diagnostic = typeof options.diagnostic === "function" ? options.diagnostic : () => {};
+  const diagnosticContext = options.diagnosticContext || {};
+  const sourceIdentity = await inspectSeparatedPath(sourcePath, { io, requireRegularFile: true, requireReliableIdentity: true });
+  await assertSnapshotDestinationSeparated(sourceIdentity, destinationPath, io);
+  const generationDestination = options.generation ? await assertGenerationDestinationWritable(destinationPath, options.generation) : null;
+  await fsp.mkdir(path.dirname(destinationPath), { recursive: true });
+  let lastReason = "source changed during export";
+  let routingSnapshotReusable = isStableRoutingSnapshot(options.routingSnapshot);
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    options.profiler?.recordSnapshotAttempt(options.profileSession);
+    const attemptStartedAt = performance.now();
+    diagnostic("snapshot_attempt_start", { ...diagnosticContext, attempt });
+    const temporaryPath = options.makeTemporaryPath
+      ? options.makeTemporaryPath({ destinationPath, attempt })
+      : `${destinationPath}.partial-${process.pid}-${attempt}-${randomUUID()}`;
+    let published = false;
+    let temporaryOwned = false;
+    let previousDestination = null;
+    let publishedIdentity = null;
+    let destinationCompromised = false;
+    await assertSnapshotTemporarySeparated(sourceIdentity, destinationPath, temporaryPath, io);
+    try {
+      const before = await timedSnapshotStat(sourcePath, "source_before_copy", attempt);
+      if (before.identity !== sourceIdentity.identity) throw new ExportError("UNSAFE_EXPORT_PATH", "The source session identity changed before snapshot copying");
+      let sourceSha256 = "";
+      let sourceHashBasis = "FALLBACK";
+      if (routingSnapshotReusable && routingSnapshotMatches(options.routingSnapshot, before)) {
+        sourceSha256 = options.routingSnapshot.sha256;
+        sourceHashBasis = "ROUTING";
+        diagnostic("source_hash_reused", { ...diagnosticContext, attempt, bytes: before.size });
+      } else {
+        const sourceHashBefore = await timedSnapshotStat(sourcePath, "source_before_hash", attempt);
+        const sourceHashStart = performance.now();
+        diagnostic("source_hash_start", { ...diagnosticContext, attempt, stage: "fallback" });
+        sourceSha256 = await io.hashFile(sourcePath);
+        const sourceHashMs = performance.now() - sourceHashStart;
+        diagnostic("source_hash_end", { ...diagnosticContext, attempt, stage: "fallback", duration_ms: roundMs(sourceHashMs), bytes: sourceHashBefore.size });
+        options.profiler?.addPhase("source_hashing", sourceHashMs, sourceHashBefore.size, 0);
+        options.profiler?.recordSession(options.profileSession, "source_hash_ms", sourceHashMs, sourceHashBefore.size, 0);
+        const sourceHashAfter = await timedSnapshotStat(sourcePath, "source_after_hash", attempt);
+        if (sourceHashBefore.identity !== sourceIdentity.identity || sourceHashAfter.identity !== sourceIdentity.identity || !sameFileVersion(sourceHashBefore, sourceHashAfter) || !sameFileVersion(before, sourceHashAfter)) {
+          lastReason = "source size or modification time changed while calculating its hash";
+          routingSnapshotReusable = false;
+          diagnostic("snapshot_attempt_end", { ...diagnosticContext, attempt, status: "RETRY", reason: "SOURCE_CHANGED", duration_ms: roundMs(performance.now() - attemptStartedAt) });
+          if (attempt < maxAttempts) options.profiler?.recordSnapshotRetryCount(1);
+          continue;
+        }
+      }
+      if (options.beforeCopy) await options.beforeCopy({ attempt, sourcePath, temporaryPath, sourceHashBasis });
+      const copyStart = performance.now();
+      diagnostic("snapshot_copy_start", { ...diagnosticContext, attempt });
+      let sourceHandle;
+      let temporaryHandle;
+      try {
+        sourceHandle = await io.open(sourcePath, "r");
+        const openedSourceStat = await sourceHandle.stat({ bigint: true });
+        if (!openedSourceStat.isFile() || reliableFileIdentity(openedSourceStat) !== sourceIdentity.identity) {
+          throw new ExportError("UNSAFE_EXPORT_PATH", "The opened source session does not match the validated source file");
+        }
+        temporaryHandle = await io.open(temporaryPath, "wx");
+        const openedTemporaryStat = await temporaryHandle.stat({ bigint: true });
+        if (!openedTemporaryStat.isFile()) throw new ExportError("UNSAFE_EXPORT_PATH", `Expected a regular raw snapshot temporary file: ${path.basename(temporaryPath)}`);
+        const openedTemporaryIdentity = reliableFileIdentity(openedTemporaryStat);
+        if (!openedTemporaryIdentity) throw new ExportError("UNSAFE_EXPORT_PATH", `Reliable file identity is unavailable for ${path.basename(temporaryPath)}`);
+        if (openedTemporaryIdentity === sourceIdentity.identity) throw new ExportError("OUTPUT_OVERLAPS_SOURCE", "Raw temporary file aliases its source session file");
+        temporaryOwned = { path: temporaryPath, identity: { identity: openedTemporaryIdentity } };
+        await io.copyOpenedFile(sourceHandle, temporaryHandle, before.size);
+        const writtenTemporaryStat = await temporaryHandle.stat({ bigint: true });
+        if (reliableFileIdentity(writtenTemporaryStat) !== openedTemporaryIdentity) {
+          throw new ExportError("UNSAFE_EXPORT_PATH", `Raw temporary file identity changed while copying: ${path.basename(temporaryPath)}`);
+        }
+      } finally {
+        await temporaryHandle?.close().catch(() => {});
+        await sourceHandle?.close().catch(() => {});
+      }
+      const copiedIdentity = await inspectSeparatedPath(temporaryPath, { io, requireRegularFile: true, requireReliableIdentity: true });
+      if (!sameReliableFileIdentity(temporaryOwned?.identity, copiedIdentity)) {
+        temporaryOwned = null;
+        throw new ExportError("UNSAFE_EXPORT_PATH", `Raw temporary file was replaced after copying: ${path.basename(temporaryPath)}`);
+      }
+      assertDistinctPathIdentity(sourceIdentity, copiedIdentity, "Raw temporary file aliases its source session file");
+      const copiedStat = await timedSnapshotStat(temporaryPath, "temporary_after_copy", attempt);
+      const copyMs = performance.now() - copyStart;
+      diagnostic("snapshot_copy_end", { ...diagnosticContext, attempt, duration_ms: roundMs(copyMs), bytes: copiedStat.size });
+      options.profiler?.addPhase("raw_snapshot_copy", copyMs, before.size, copiedStat.size);
+      options.profiler?.recordSession(options.profileSession, "raw_copy_ms", copyMs, before.size, copiedStat.size);
+      if (options.afterCopy) await options.afterCopy({ attempt, sourcePath, temporaryPath });
+      const afterCopy = await timedSnapshotStat(sourcePath, "source_after_copy", attempt);
+      const stableMetadata = afterCopy.identity === sourceIdentity.identity && sameFileVersion(before, afterCopy) && copiedStat.size === before.size;
+      if (stableMetadata) {
+        if (options.beforeExportVerification) await options.beforeExportVerification({ attempt, sourcePath, temporaryPath });
+        const publicationCandidate = await inspectSeparatedPath(temporaryPath, { io, requireRegularFile: true, requireReliableIdentity: true });
+        if (!sameReliableFileIdentity(temporaryOwned?.identity, publicationCandidate)) {
+          temporaryOwned = null;
+          throw new ExportError("UNSAFE_EXPORT_PATH", `Raw temporary file was replaced before publication: ${path.basename(temporaryPath)}`);
+        }
+        assertDistinctPathIdentity(sourceIdentity, publicationCandidate, "Raw temporary file aliases its source session file");
+        if (options.generation) {
+          const currentDestination = await inspectSeparatedPath(destinationPath, { allowMissing: true, io, rejectAliases: true, requireRegularFile: true, requireReliableIdentity: true });
+          if (generationDestination.exists !== currentDestination.exists || (generationDestination.exists && !sameReliableFileIdentity(generationDestination, currentDestination))) {
+            throw new ExportError("UNSAFE_EXPORT_PATH", `Raw destination changed before reuse verification: ${path.basename(destinationPath)}`);
+          }
+          if (currentDestination.exists) {
+            assertDistinctPathIdentity(sourceIdentity, currentDestination, "Existing Raw destination aliases its source session file");
+            const exportedBeforeVerification = await timedSnapshotStat(destinationPath, "published_before_verification", attempt);
+            if (exportedBeforeVerification.identity !== currentDestination.identity) {
+              throw new ExportError("UNSAFE_EXPORT_PATH", `Existing Raw destination changed before verification: ${path.basename(destinationPath)}`);
+            }
+            const exportHashStart = performance.now();
+            const exportHashStage = options.verifyPublishedSnapshot ? "snapshot_parse" : "snapshot";
+            diagnostic("export_hash_start", { ...diagnosticContext, attempt, stage: exportHashStage });
+            const verification = options.verifyPublishedSnapshot
+              ? await options.verifyPublishedSnapshot(destinationPath)
+              : { sha256: await io.hashFile(destinationPath), sizeBytes: exportedBeforeVerification.size, stable: true, value: null };
+            const exportHashMs = performance.now() - exportHashStart;
+            diagnostic("export_hash_end", { ...diagnosticContext, attempt, stage: exportHashStage, duration_ms: roundMs(exportHashMs), bytes: verification.sizeBytes ?? exportedBeforeVerification.size });
+            if (!options.verifyPublishedSnapshot) {
+              options.profiler?.addPhase("export_hashing", exportHashMs, exportedBeforeVerification.size, 0);
+              options.profiler?.recordSession(options.profileSession, "snapshot_hash_ms", exportHashMs, exportedBeforeVerification.size, 0);
+            }
+            const exportedAfterVerification = await timedSnapshotStat(destinationPath, "published_after_verification", attempt);
+            if (exportedAfterVerification.identity !== currentDestination.identity) {
+              throw new ExportError("UNSAFE_EXPORT_PATH", `Existing Raw destination changed during verification: ${path.basename(destinationPath)}`);
+            }
+            const exportedStable = verification.stable !== false && sameFileVersion(exportedBeforeVerification, exportedAfterVerification);
+            if (!exportedStable || verification.sizeBytes !== before.size || verification.sha256 !== sourceSha256) {
+              throw new ExportError("EXPORT_DESTINATION_COLLISION", `Refusing to replace an existing Raw file whose bytes do not match the stable source: ${path.basename(destinationPath)}`);
+            }
+            await removeOwnedTemporary(temporaryOwned, io);
+            temporaryOwned = null;
+            const previousSession = previousRawSession(options.generation, destinationPath);
+            const verifiedAt = previousSession?.raw_sha256 === verification.sha256 && isCanonicalIsoTimestamp(previousSession.raw_verified_at)
+              ? previousSession.raw_verified_at
+              : new Date().toISOString();
+            diagnostic("snapshot_attempt_end", { ...diagnosticContext, attempt, status: "STABLE", duration_ms: roundMs(performance.now() - attemptStartedAt) });
+            return {
+              sha256: verification.sha256,
+              sizeBytes: exportedAfterVerification.size,
+              sourceAfterMtimeMs: afterCopy.mtimeMs,
+              sourceAfterSizeBytes: afterCopy.size,
+              sourceBeforeMtimeMs: before.mtimeMs,
+              sourceBeforeSizeBytes: before.size,
+              attempts: attempt,
+              sourceHashBasis,
+              verificationValue: verification.value || null,
+              copyStatus: RAW_COPY_STATUS.VERIFIED_AT_EXPORT,
+              verifiedAt,
+            };
+          }
+        }
+        const runOwnedIdentity = temporaryOwned.identity;
+        if (options.generation) {
+          await io.link(temporaryPath, destinationPath);
+        } else {
+          previousDestination = await moveExistingDestinationAside(sourceIdentity, destinationPath, io);
+          await io.rename(temporaryPath, destinationPath);
+          temporaryOwned = null;
+        }
+        publishedIdentity = await inspectSeparatedPath(destinationPath, { io, requireRegularFile: true, requireReliableIdentity: true });
+        if (!sameReliableFileIdentity(runOwnedIdentity, publishedIdentity)) {
+          destinationCompromised = true;
+          publishedIdentity = null;
+          throw new ExportError("UNSAFE_EXPORT_PATH", `Published Raw destination was replaced during publication: ${path.basename(destinationPath)}`);
+        }
+        assertDistinctPathIdentity(sourceIdentity, publishedIdentity, "Published Raw destination aliases its source session file");
+        if (options.generation) {
+          await removeOwnedTemporary(temporaryOwned, io);
+          temporaryOwned = null;
+        }
+        published = true;
+        const exportedBeforeVerification = await timedSnapshotStat(destinationPath, "published_before_verification", attempt);
+        if (exportedBeforeVerification.identity !== publishedIdentity.identity) {
+          destinationCompromised = true;
+          published = false;
+          publishedIdentity = null;
+          throw new ExportError("UNSAFE_EXPORT_PATH", `Published Raw destination changed before verification: ${path.basename(destinationPath)}`);
+        }
+        const exportHashStart = performance.now();
+        const exportHashStage = options.verifyPublishedSnapshot ? "snapshot_parse" : "snapshot";
+        diagnostic("export_hash_start", { ...diagnosticContext, attempt, stage: exportHashStage });
+        const verification = options.verifyPublishedSnapshot
+          ? await options.verifyPublishedSnapshot(destinationPath)
+          : { sha256: await io.hashFile(destinationPath), sizeBytes: exportedBeforeVerification.size, stable: true, value: null };
+        const exportHashMs = performance.now() - exportHashStart;
+        diagnostic("export_hash_end", { ...diagnosticContext, attempt, stage: exportHashStage, duration_ms: roundMs(exportHashMs), bytes: verification.sizeBytes ?? exportedBeforeVerification.size });
+        if (!options.verifyPublishedSnapshot) {
+          options.profiler?.addPhase("export_hashing", exportHashMs, exportedBeforeVerification.size, 0);
+          options.profiler?.recordSession(options.profileSession, "snapshot_hash_ms", exportHashMs, exportedBeforeVerification.size, 0);
+        }
+        const exportedAfterVerification = await timedSnapshotStat(destinationPath, "published_after_verification", attempt);
+        if (exportedAfterVerification.identity !== publishedIdentity.identity) {
+          destinationCompromised = true;
+          published = false;
+          publishedIdentity = null;
+          throw new ExportError("UNSAFE_EXPORT_PATH", `Published Raw destination changed during verification: ${path.basename(destinationPath)}`);
+        }
+        const exportedStable = verification.stable !== false && sameFileVersion(exportedBeforeVerification, exportedAfterVerification);
+        if (exportedStable && verification.sizeBytes === before.size && verification.sha256 === sourceSha256) {
+          await removeOwnedTemporary(previousDestination, io);
+          previousDestination = null;
+          diagnostic("snapshot_attempt_end", { ...diagnosticContext, attempt, status: "STABLE", duration_ms: roundMs(performance.now() - attemptStartedAt) });
+          return {
+            sha256: verification.sha256,
+            sizeBytes: exportedAfterVerification.size,
+            sourceAfterMtimeMs: afterCopy.mtimeMs,
+            sourceAfterSizeBytes: afterCopy.size,
+            sourceBeforeMtimeMs: before.mtimeMs,
+            sourceBeforeSizeBytes: before.size,
+            attempts: attempt,
+            sourceHashBasis,
+            verificationValue: verification.value || null,
+            copyStatus: RAW_COPY_STATUS.VERIFIED_AT_EXPORT,
+            verifiedAt: new Date().toISOString(),
+          };
+        }
+        lastReason = exportedStable ? "published bytes differ from the stable source hash" : "published snapshot changed while it was verified";
+        routingSnapshotReusable = false;
+        diagnostic("snapshot_attempt_end", { ...diagnosticContext, attempt, status: "RETRY", reason: exportedStable ? "HASH_MISMATCH" : "EXPORT_CHANGED", duration_ms: roundMs(performance.now() - attemptStartedAt) });
+        await rollbackPublishedDestination(destinationPath, publishedIdentity, previousDestination, io);
+        previousDestination = null;
+        published = false;
+      } else {
+        lastReason = copiedStat.size === before.size ? "source size or modification time changed" : "copied snapshot size differs from the source";
+        routingSnapshotReusable = false;
+        diagnostic("snapshot_attempt_end", { ...diagnosticContext, attempt, status: "RETRY", reason: copiedStat.size === before.size ? "SOURCE_CHANGED" : "COPY_INCOMPLETE", duration_ms: roundMs(performance.now() - attemptStartedAt) });
+      }
+    } catch (error) {
+      diagnostic("snapshot_attempt_end", { ...diagnosticContext, attempt, status: "ERROR", error_code: error?.code || "UNKNOWN", duration_ms: roundMs(performance.now() - attemptStartedAt) });
+      if (published) {
+        try {
+          await rollbackPublishedDestination(destinationPath, publishedIdentity, previousDestination, io);
+          previousDestination = null;
+        } catch (rollbackError) {
+          throw new ExportError("UNSAFE_EXPORT_PATH", `Could not safely roll back the published raw snapshot: ${rollbackError?.message || rollbackError}`);
+        }
+      }
+      if (destinationCompromised) {
+        throw new ExportError("UNSAFE_EXPORT_PATH", `The Raw destination changed during publication and was left untouched for manual inspection: ${path.basename(destinationPath)}`);
+      }
+      if (temporaryOwned) await removeOwnedTemporary(temporaryOwned, io);
+      if (previousDestination) await restorePreviousDestination(destinationPath, previousDestination, io);
+      if (error instanceof ExportError) throw error;
+      if (["EACCES", "EBUSY", "EPERM"].includes(error?.code)) throw new ExportError("SOURCE_SNAPSHOT_LOCKED", `Could not create a stable raw snapshot because the source file is locked or inaccessible: ${path.basename(sourcePath)}`);
+      throw new ExportError("SOURCE_SNAPSHOT_FAILED", `Could not create a stable raw snapshot for ${path.basename(sourcePath)}: ${error?.message || error}`);
+    }
+    if (temporaryOwned) await removeOwnedTemporary(temporaryOwned, io);
+    if (attempt < maxAttempts) options.profiler?.recordSnapshotRetryCount(1);
+  }
+
+  throw new ExportError("SOURCE_CHANGED_DURING_EXPORT", `Could not create a stable raw snapshot because ${lastReason}: ${path.basename(sourcePath)}`);
+
+  async function timedSnapshotStat(file, checkpoint, attempt) {
+    const startedAt = performance.now();
+    const [stat, identityStat] = await Promise.all([io.stat(file), io.statIdentity(file)]);
+    const durationMs = performance.now() - startedAt;
+    options.profiler?.addPhase("snapshot_stability_checks", durationMs);
+    options.profiler?.recordSession(options.profileSession, "snapshot_stability_check_ms", durationMs);
+    diagnostic("snapshot_stability_check", { ...diagnosticContext, attempt, checkpoint, duration_ms: roundMs(durationMs), size_bytes: stat.size });
+    return { identity: reliableFileIdentity(identityStat), mtimeMs: stat.mtimeMs, size: stat.size };
+  }
+}
+
+async function copyOpenedFile(sourceHandle, destinationHandle, expectedSize) {
+  const buffer = Buffer.allocUnsafe(1024 * 1024);
+  let position = 0;
+  while (position < expectedSize) {
+    const requested = Math.min(buffer.length, expectedSize - position);
+    const { bytesRead } = await sourceHandle.read(buffer, 0, requested, position);
+    if (bytesRead === 0) break;
+    let written = 0;
+    while (written < bytesRead) {
+      const result = await destinationHandle.write(buffer, written, bytesRead - written, position + written);
+      if (result.bytesWritten === 0) throw new Error("Could not write the complete raw snapshot temporary file");
+      written += result.bytesWritten;
+    }
+    position += bytesRead;
+  }
+  if (position !== expectedSize) throw new Error("Copied raw snapshot size differs from the validated source size");
+}
+
+function isStableRoutingSnapshot(snapshot) {
+  return Boolean(snapshot?.stable
+    && snapshot.sha256
+    && Number.isFinite(snapshot.beforeSizeBytes)
+    && Number.isFinite(snapshot.beforeMtimeMs)
+    && snapshot.beforeSizeBytes === snapshot.afterSizeBytes
+    && snapshot.beforeMtimeMs === snapshot.afterMtimeMs);
+}
+
+function routingSnapshotMatches(snapshot, stat) {
+  return isStableRoutingSnapshot(snapshot)
+    && snapshot.afterSizeBytes === stat.size
+    && snapshot.afterMtimeMs === stat.mtimeMs;
+}
+
+function sameFileVersion(left, right) {
+  return left.size === right.size && left.mtimeMs === right.mtimeMs;
+}
+
+function parseCliInvocation(argv) {
+  try {
+    return { args: parseArgs(argv), error: null };
+  } catch (error) {
+    return { args: {}, error };
+  }
+}
+
+async function acquireExportLock(outputRoot, sourceProtection) {
+  const lockPath = path.join(outputRoot, ".codex-export.lock");
+  await assertSeparatedOutputPath(lockPath, sourceProtection, { allowMissing: true });
+  let handle;
+  try {
+    handle = await fsp.open(lockPath, "wx");
+    await handle.writeFile(`${JSON.stringify({ pid: process.pid, started_at: new Date().toISOString() })}\n`, "utf8");
+  } catch (error) {
+    await handle?.close().catch(() => {});
+    if (error?.code === "EEXIST") throw new ExportError("EXPORT_ALREADY_RUNNING", `Another export is already using the output folder: ${path.basename(outputRoot)}`);
+    throw new ExportError("EXPORT_LOCK_FAILED", `Could not lock the output folder: ${error?.message || error}`);
+  }
+  await handle.close();
+  const identity = await inspectSeparatedPath(lockPath, { requireRegularFile: true, requireReliableIdentity: true });
+  return { path: lockPath, identity };
+}
+
+async function releaseExportLock(lock) {
+  await removeOwnedTemporary(lock, { lstat: fsp.lstat, realpath: fsp.realpath, rm: fsp.rm, stat: fsp.stat });
+}
+
+async function createSourceProtection(files, locations, protectedInputPaths = []) {
+  const rootCanonicalPaths = new Set();
+  const fileCanonicalPaths = new Set();
+  const fileIdentities = new Set();
+  for (const location of locations) {
+    const root = await inspectSeparatedPath(location.root, { requireDirectory: true });
+    rootCanonicalPaths.add(normalizePathForCompare(root.canonicalPath));
+  }
+  for (const entry of files) {
+    const source = await inspectSeparatedPath(entry.file, { requireRegularFile: true, requireReliableIdentity: true });
+    fileCanonicalPaths.add(normalizePathForCompare(source.canonicalPath));
+    fileIdentities.add(source.identity);
+  }
+  for (const protectedInputPath of protectedInputPaths) {
+    const input = await inspectSeparatedPath(protectedInputPath, { allowMissing: true, requireRegularFile: true, requireReliableIdentity: true });
+    fileCanonicalPaths.add(normalizePathForCompare(input.canonicalPath));
+    if (input.identity) fileIdentities.add(input.identity);
+  }
+  return Object.freeze({ rootCanonicalPaths, fileCanonicalPaths, fileIdentities });
+}
+
+async function ensureSeparatedOutputDirectory(directoryPath, sourceProtection, options = {}) {
+  const candidate = await inspectSeparatedPath(directoryPath, { allowMissing: true, rejectAliases: true });
+  assertSeparatedFromSources(candidate, sourceProtection, options);
+  await fsp.mkdir(directoryPath, { recursive: true });
+  const created = await inspectSeparatedPath(directoryPath, { rejectAliases: true, requireDirectory: true });
+  assertSeparatedFromSources(created, sourceProtection, options);
+  return created;
+}
+
+async function assertSeparatedOutputPath(candidatePath, sourceProtection, options = {}) {
+  const parent = await inspectSeparatedPath(path.dirname(candidatePath), { rejectAliases: true, requireDirectory: true });
+  assertSeparatedFromSources(parent, sourceProtection, { rejectSourceDescendants: false });
+  const candidate = await inspectSeparatedPath(candidatePath, { allowMissing: options.allowMissing === true, rejectAliases: true, requireRegularFile: options.requireRegularFile === true, requireReliableIdentity: options.requireReliableIdentity === true });
+  assertSeparatedFromSources(candidate, sourceProtection);
+  return candidate;
+}
+
+function assertSeparatedFromSources(candidate, sourceProtection, options = {}) {
+  const canonicalKey = normalizePathForCompare(candidate.canonicalPath);
+  if (sourceProtection.fileCanonicalPaths.has(canonicalKey) || (candidate.identity && sourceProtection.fileIdentities.has(candidate.identity))) {
+    throw new ExportError("OUTPUT_OVERLAPS_SOURCE", `Refusing to write an export file that aliases a protected Codex input: ${path.basename(candidate.absolutePath)}`);
+  }
+  for (const sourceRoot of sourceProtection.rootCanonicalPaths) {
+    const insideSource = isPathInside(candidate.canonicalPath, sourceRoot);
+    const containsSource = options.rejectSourceDescendants !== false && isPathInside(sourceRoot, candidate.canonicalPath);
+    if (insideSource || containsSource) throw new ExportError("OUTPUT_OVERLAPS_SOURCE", `Refusing to write inside or above a Codex session source folder: ${path.basename(candidate.absolutePath)}`);
+  }
+}
+
+async function writeSeparatedOutputFile(destinationPath, sourceProtection, writer, generation = null) {
+  const generationDestination = generation ? await assertGenerationDestinationWritable(destinationPath, generation) : null;
+  const destinationBefore = await assertSeparatedOutputPath(destinationPath, sourceProtection, { allowMissing: true, requireRegularFile: true, requireReliableIdentity: true });
+  const temporaryPath = `${destinationPath}.partial-${process.pid}-${randomUUID()}`;
+  await assertSeparatedOutputPath(temporaryPath, sourceProtection, { allowMissing: true });
+  let handle;
+  let temporaryOwned = null;
+  let previousDestination = null;
+  let publishedIdentity = null;
+  try {
+    handle = await fsp.open(temporaryPath, "wx");
+    const openedStat = await handle.stat({ bigint: true });
+    if (!openedStat.isFile()) throw new ExportError("UNSAFE_EXPORT_PATH", `Expected a regular export file: ${path.basename(destinationPath)}`);
+    const openedIdentity = reliableFileIdentity(openedStat);
+    if (!openedIdentity) throw new ExportError("UNSAFE_EXPORT_PATH", `Reliable file identity is unavailable for ${path.basename(temporaryPath)}`);
+    temporaryOwned = { path: temporaryPath, identity: { identity: openedIdentity } };
+    await writer(handle);
+    const writtenStat = await handle.stat({ bigint: true });
+    if (reliableFileIdentity(writtenStat) !== openedIdentity) throw new ExportError("UNSAFE_EXPORT_PATH", `Export destination identity changed while writing: ${path.basename(destinationPath)}`);
+    await handle.close();
+    handle = null;
+    const temporary = await assertSeparatedOutputPath(temporaryPath, sourceProtection, { requireRegularFile: true, requireReliableIdentity: true });
+    if (temporary.identity !== openedIdentity) throw new ExportError("UNSAFE_EXPORT_PATH", `Temporary export file was replaced before publication: ${path.basename(destinationPath)}`);
+    temporaryOwned = { path: temporaryPath, identity: temporary };
+    const currentDestination = await assertSeparatedOutputPath(destinationPath, sourceProtection, { allowMissing: true, requireRegularFile: true, requireReliableIdentity: true });
+    if (destinationBefore.exists !== currentDestination.exists || (destinationBefore.exists && !sameReliableFileIdentity(destinationBefore, currentDestination))) {
+      throw new ExportError("UNSAFE_EXPORT_PATH", `Export destination changed before publication: ${path.basename(destinationPath)}`);
+    }
+    if (generation && currentDestination.exists) {
+      if (!generationDestination.exists || !sameReliableFileIdentity(generationDestination, currentDestination)) {
+        throw new ExportError("UNSAFE_EXPORT_PATH", `Export destination changed before reuse verification: ${path.basename(destinationPath)}`);
+      }
+      const identical = await filesHaveIdenticalVerifiedBytes(temporaryPath, temporary, destinationPath, currentDestination, sourceProtection);
+      if (!identical) throw new ExportError("EXPORT_DESTINATION_COLLISION", `Refusing to replace an existing export file whose bytes differ: ${path.basename(destinationPath)}`);
+      await removeOwnedTemporary(temporaryOwned, { lstat: fsp.lstat, realpath: fsp.realpath, rm: fsp.rm, stat: fsp.stat });
+      temporaryOwned = null;
+      return;
+    }
+    if (!generation) previousDestination = await moveExistingOutputAside(destinationPath, currentDestination, sourceProtection);
+    await fsp.link(temporaryPath, destinationPath);
+    publishedIdentity = await assertSeparatedOutputPath(destinationPath, sourceProtection, { requireRegularFile: true, requireReliableIdentity: true });
+    if (publishedIdentity.identity !== openedIdentity) throw new ExportError("UNSAFE_EXPORT_PATH", `Published export file does not match its temporary file: ${path.basename(destinationPath)}`);
+    await removeOwnedTemporary(temporaryOwned, { lstat: fsp.lstat, realpath: fsp.realpath, rm: fsp.rm, stat: fsp.stat });
+    temporaryOwned = null;
+    await removeOwnedTemporary(previousDestination, { lstat: fsp.lstat, realpath: fsp.realpath, rm: fsp.rm, stat: fsp.stat });
+    previousDestination = null;
+  } catch (error) {
+    await handle?.close().catch(() => {});
+    if (publishedIdentity) {
+      await rollbackPublishedDestination(destinationPath, publishedIdentity, previousDestination, { lstat: fsp.lstat, realpath: fsp.realpath, rename: fsp.rename, rm: fsp.rm, stat: fsp.stat });
+      previousDestination = null;
+    }
+    if (temporaryOwned) await removeOwnedTemporary(temporaryOwned, { lstat: fsp.lstat, realpath: fsp.realpath, rm: fsp.rm, stat: fsp.stat });
+    if (previousDestination) await restorePreviousDestination(destinationPath, previousDestination, { lstat: fsp.lstat, realpath: fsp.realpath, rename: fsp.rename, stat: fsp.stat });
+    throw error;
+  }
+}
+
+async function moveExistingOutputAside(destinationPath, destination, sourceProtection) {
+  if (!destination.exists) return null;
+  assertSeparatedFromSources(destination, sourceProtection);
+  const backupPath = `${destinationPath}.previous-${process.pid}-${randomUUID()}`;
+  const backup = await assertSeparatedOutputPath(backupPath, sourceProtection, { allowMissing: true });
+  if (backup.exists) throw new ExportError("UNSAFE_EXPORT_PATH", `Refusing to reuse an existing export backup file: ${path.basename(backupPath)}`);
+  await fsp.rename(destinationPath, backupPath);
+  const moved = await assertSeparatedOutputPath(backupPath, sourceProtection, { requireRegularFile: true, requireReliableIdentity: true });
+  if (!sameReliableFileIdentity(destination, moved)) {
+    await restoreUnexpectedMove(destinationPath, backupPath, moved, { lstat: fsp.lstat, realpath: fsp.realpath, rename: fsp.rename, stat: fsp.stat });
+    throw new ExportError("UNSAFE_EXPORT_PATH", "Existing export destination identity changed while it was moved aside");
+  }
+  return { path: backupPath, identity: moved };
+}
+
+async function assertPerformanceProfileSeparated(profilePath, outputRoot, sourceProtection) {
+  const profile = await inspectSeparatedPath(profilePath, { allowMissing: true, rejectAliases: true });
+  assertSeparatedFromSources(profile, sourceProtection);
+  const output = await inspectSeparatedPath(outputRoot, { allowMissing: true, rejectAliases: true });
+  if (pathsOverlap(profile.canonicalPath, output.canonicalPath)) throw new ExportError("UNSAFE_EXPORT_PATH", "The performance profile must be stored outside the export output folder");
+}
+
+async function assertSeparatedExportRoot(candidateOutputRoot, sourceRoots) {
+  const output = await inspectSeparatedPath(candidateOutputRoot, { allowMissing: true, rejectAliases: true });
+  for (const sourceRoot of sourceRoots) {
+    const source = await inspectSeparatedPath(sourceRoot, { requireDirectory: true });
+    if (pathsOverlap(output.canonicalPath, source.canonicalPath)) {
+      throw new ExportError("OUTPUT_OVERLAPS_SOURCE", `Refusing to export into or above a Codex session source folder: ${path.basename(candidateOutputRoot)}`);
+    }
+  }
+}
+
+async function assertSnapshotDestinationSeparated(sourceIdentity, destinationPath, io) {
+  const destination = await inspectSeparatedPath(destinationPath, { allowMissing: true, io, rejectAliases: true });
+  assertDistinctPathIdentity(sourceIdentity, destination, "Raw destination aliases its source session file");
+}
+
+async function assertSnapshotTemporarySeparated(sourceIdentity, destinationPath, temporaryPath, io) {
+  const destination = await inspectSeparatedPath(destinationPath, { allowMissing: true, io, rejectAliases: true });
+  const temporary = await inspectSeparatedPath(temporaryPath, { allowMissing: true, io, rejectAliases: true });
+  if (temporary.exists) throw new ExportError("UNSAFE_EXPORT_PATH", `Refusing to reuse an existing raw snapshot temporary file: ${path.basename(temporaryPath)}`);
+  assertDistinctPathIdentity(sourceIdentity, destination, "Raw destination aliases its source session file");
+  assertDistinctPathIdentity(sourceIdentity, temporary, "Raw temporary path aliases its source session file");
+  if (sameCanonicalPath(destination.canonicalPath, temporary.canonicalPath)) throw new ExportError("UNSAFE_EXPORT_PATH", "Raw destination and temporary path resolve to the same path");
+}
+
+async function moveExistingDestinationAside(sourceIdentity, destinationPath, io) {
+  const destination = await inspectSeparatedPath(destinationPath, { allowMissing: true, io, rejectAliases: true, requireRegularFile: true, requireReliableIdentity: true });
+  if (!destination.exists) return null;
+  assertDistinctPathIdentity(sourceIdentity, destination, "Existing Raw destination aliases its source session file");
+  const backupPath = `${destinationPath}.previous-${process.pid}-${randomUUID()}`;
+  const backup = await inspectSeparatedPath(backupPath, { allowMissing: true, io, rejectAliases: true });
+  if (backup.exists) throw new ExportError("UNSAFE_EXPORT_PATH", `Refusing to reuse an existing raw snapshot backup file: ${path.basename(backupPath)}`);
+  await io.rename(destinationPath, backupPath);
+  const moved = await inspectSeparatedPath(backupPath, { io, rejectAliases: true, requireRegularFile: true, requireReliableIdentity: true });
+  if (!sameReliableFileIdentity(destination, moved)) {
+    await restoreUnexpectedMove(destinationPath, backupPath, moved, io);
+    throw new ExportError("UNSAFE_EXPORT_PATH", "Existing Raw destination identity changed while it was moved aside");
+  }
+  return { path: backupPath, identity: moved };
+}
+
+async function rollbackPublishedDestination(destinationPath, publishedIdentity, previousDestination, io) {
+  if (!publishedIdentity) throw new ExportError("UNSAFE_EXPORT_PATH", "Published Raw destination identity was not established");
+  const current = await inspectSeparatedPath(destinationPath, { io, rejectAliases: true, requireRegularFile: true, requireReliableIdentity: true });
+  if (!sameReliableFileIdentity(publishedIdentity, current)) throw new ExportError("UNSAFE_EXPORT_PATH", "Published Raw destination was replaced before rollback");
+  const failedPath = `${destinationPath}.failed-${process.pid}-${randomUUID()}`;
+  const failedCandidate = await inspectSeparatedPath(failedPath, { allowMissing: true, io, rejectAliases: true });
+  if (failedCandidate.exists) throw new ExportError("UNSAFE_EXPORT_PATH", `Refusing to reuse an existing failed snapshot path: ${path.basename(failedPath)}`);
+  await io.rename(destinationPath, failedPath);
+  const failedIdentity = await inspectSeparatedPath(failedPath, { io, rejectAliases: true, requireRegularFile: true, requireReliableIdentity: true });
+  if (!sameReliableFileIdentity(publishedIdentity, failedIdentity)) {
+    await restoreUnexpectedMove(destinationPath, failedPath, failedIdentity, io);
+    throw new ExportError("UNSAFE_EXPORT_PATH", "Published Raw destination identity changed during rollback");
+  }
+  if (previousDestination) await restorePreviousDestination(destinationPath, previousDestination, io);
+  await removeOwnedTemporary({ path: failedPath, identity: failedIdentity }, io);
+}
+
+async function restorePreviousDestination(destinationPath, previousDestination, io) {
+  const destination = await inspectSeparatedPath(destinationPath, { allowMissing: true, io, rejectAliases: true });
+  if (destination.exists) throw new ExportError("UNSAFE_EXPORT_PATH", "Refusing to overwrite a destination while restoring the previous Raw snapshot");
+  const previous = await inspectSeparatedPath(previousDestination.path, { io, rejectAliases: true, requireRegularFile: true, requireReliableIdentity: true });
+  if (!sameReliableFileIdentity(previousDestination.identity, previous)) throw new ExportError("UNSAFE_EXPORT_PATH", "Previous Raw destination identity changed before restoration");
+  await io.rename(previousDestination.path, destinationPath);
+}
+
+async function restoreUnexpectedMove(destinationPath, movedPath, movedIdentity, io) {
+  const destination = await inspectSeparatedPath(destinationPath, { allowMissing: true, io, rejectAliases: true });
+  if (destination.exists) throw new ExportError("UNSAFE_EXPORT_PATH", "Could not restore a moved file because the destination was replaced");
+  const moved = await inspectSeparatedPath(movedPath, { io, rejectAliases: true, requireRegularFile: true, requireReliableIdentity: true });
+  if (!sameReliableFileIdentity(movedIdentity, moved)) throw new ExportError("UNSAFE_EXPORT_PATH", "Could not restore a moved file because its identity changed");
+  await io.rename(movedPath, destinationPath);
+}
+
+async function removeOwnedTemporary(owned, io) {
+  if (!owned) return;
+  const current = await inspectSeparatedPath(owned.path, { io, rejectAliases: true, requireRegularFile: true, requireReliableIdentity: true });
+  if (!sameReliableFileIdentity(owned.identity, current)) throw new ExportError("UNSAFE_EXPORT_PATH", `Refusing to remove a temporary file whose identity changed: ${path.basename(owned.path)}`);
+  await io.rm(owned.path);
+}
+
+async function inspectSeparatedPath(candidatePath, options = {}) {
+  const io = { lstat: fsp.lstat, realpath: fsp.realpath, stat: fsp.stat, statIdentity: (file) => fsp.stat(file, { bigint: true }), ...options.io };
+  const absolutePath = path.resolve(candidatePath);
+  let lstat;
+  try {
+    lstat = await io.lstat(absolutePath);
+  } catch (error) {
+    if (error?.code !== "ENOENT" || !options.allowMissing) throw new ExportError("UNSAFE_EXPORT_PATH", `Could not inspect path separation for ${path.basename(candidatePath)}: ${error?.message || error}`);
+  }
+  if (lstat) {
+    if (lstat.isSymbolicLink()) throw new ExportError("UNSAFE_EXPORT_PATH", `Symbolic-link or junction path is not accepted for snapshot publication: ${path.basename(candidatePath)}`);
+    const canonicalPath = await io.realpath(absolutePath);
+    if (options.rejectAliases && !sameCanonicalPath(canonicalPath, absolutePath)) {
+      throw new ExportError("UNSAFE_EXPORT_PATH", `Output path resolves through a symbolic-link, junction, or alias component: ${path.basename(candidatePath)}`);
+    }
+    const [stat, identityStat] = await Promise.all([io.stat(canonicalPath), io.statIdentity(canonicalPath)]);
+    if (options.requireRegularFile && !stat.isFile()) throw new ExportError("UNSAFE_EXPORT_PATH", `Expected a regular file while checking path separation: ${path.basename(candidatePath)}`);
+    if (options.requireDirectory && !stat.isDirectory()) throw new ExportError("UNSAFE_EXPORT_PATH", `Expected a directory while checking path separation: ${path.basename(candidatePath)}`);
+    const identity = reliableFileIdentity(identityStat);
+    if (options.requireReliableIdentity && !identity) throw new ExportError("UNSAFE_EXPORT_PATH", `Reliable file identity is unavailable for ${path.basename(candidatePath)}`);
+    return { absolutePath, canonicalPath, exists: true, identity, stat };
+  }
+  const canonicalPath = await canonicalizeMissingPath(absolutePath, io);
+  if (options.rejectAliases && !sameCanonicalPath(canonicalPath, absolutePath)) {
+    throw new ExportError("UNSAFE_EXPORT_PATH", `Output path resolves through a symbolic-link, junction, or alias component: ${path.basename(candidatePath)}`);
+  }
+  return { absolutePath, canonicalPath, exists: false, identity: null, stat: null };
+}
+
+async function canonicalizeMissingPath(absolutePath, io) {
+  let ancestor = absolutePath;
+  const suffix = [];
+  while (true) {
+    try {
+      const lstat = await io.lstat(ancestor);
+      if (lstat.isSymbolicLink()) throw new ExportError("UNSAFE_EXPORT_PATH", `Symbolic-link or junction ancestor is not accepted: ${path.basename(ancestor)}`);
+      const realAncestor = await io.realpath(ancestor);
+      return path.join(realAncestor, ...suffix);
+    } catch (error) {
+      if (error instanceof ExportError) throw error;
+      if (error?.code !== "ENOENT") throw new ExportError("UNSAFE_EXPORT_PATH", `Could not resolve path separation for ${path.basename(absolutePath)}: ${error?.message || error}`);
+      const parent = path.dirname(ancestor);
+      if (parent === ancestor) throw new ExportError("UNSAFE_EXPORT_PATH", `No existing ancestor could be resolved for ${path.basename(absolutePath)}`);
+      suffix.unshift(path.basename(ancestor));
+      ancestor = parent;
+    }
+  }
+}
+
+function reliableFileIdentity(stat) {
+  if (typeof stat?.dev === "bigint" && typeof stat?.ino === "bigint") {
+    if (stat.dev < 0n || stat.ino <= 0n) return null;
+    return `${stat.dev}:${stat.ino}`;
+  }
+  if (!Number.isSafeInteger(stat?.dev) || !Number.isSafeInteger(stat?.ino) || stat.dev < 0 || stat.ino <= 0) return null;
+  return `${stat.dev}:${stat.ino}`;
+}
+
+async function filesHaveIdenticalVerifiedBytes(leftPath, leftIdentity, rightPath, rightIdentity, sourceProtection) {
+  const leftBefore = await assertSeparatedOutputPath(leftPath, sourceProtection, { requireRegularFile: true, requireReliableIdentity: true });
+  const rightBefore = await assertSeparatedOutputPath(rightPath, sourceProtection, { requireRegularFile: true, requireReliableIdentity: true });
+  if (!sameReliableFileIdentity(leftIdentity, leftBefore) || !sameReliableFileIdentity(rightIdentity, rightBefore)) {
+    throw new ExportError("UNSAFE_EXPORT_PATH", "An export file changed before byte comparison");
+  }
+  if (leftBefore.stat.size !== rightBefore.stat.size) return false;
+  const [leftHash, rightHash] = await Promise.all([sha256File(leftPath), sha256File(rightPath)]);
+  const leftAfter = await assertSeparatedOutputPath(leftPath, sourceProtection, { requireRegularFile: true, requireReliableIdentity: true });
+  const rightAfter = await assertSeparatedOutputPath(rightPath, sourceProtection, { requireRegularFile: true, requireReliableIdentity: true });
+  if (!sameReliableFileIdentity(leftBefore, leftAfter) || !sameReliableFileIdentity(rightBefore, rightAfter)
+    || !sameFileVersion(leftBefore.stat, leftAfter.stat) || !sameFileVersion(rightBefore.stat, rightAfter.stat)) {
+    throw new ExportError("UNSAFE_EXPORT_PATH", "An export file changed during byte comparison");
+  }
+  return leftHash === rightHash;
+}
+
+async function beginExportGeneration(outputRoot, sourceProtection, options = {}) {
+  const root = path.resolve(outputRoot);
+  const markerPath = path.join(root, INCOMPLETE_MARKER_NAME);
+  const existingMarker = await fsp.lstat(markerPath).then(() => true, (error) => {
+    if (error?.code === "ENOENT") return false;
+    throw error;
+  });
+  if (existingMarker) {
+    throw new ExportError("INCOMPLETE_EXPORT_EXISTS", `The output folder already contains ${INCOMPLETE_MARKER_NAME}. Use a new empty output folder, or manually inspect and remove the incomplete export.`);
+  }
+  const markerCandidate = await assertSeparatedOutputPath(markerPath, sourceProtection, { allowMissing: true, requireRegularFile: true, requireReliableIdentity: true });
+  if (markerCandidate.exists) {
+    throw new ExportError("INCOMPLETE_EXPORT_EXISTS", `The output folder already contains ${INCOMPLETE_MARKER_NAME}. Use a new empty output folder, or manually inspect and remove the incomplete export.`);
+  }
+
+  const previous = await inspectPreviousExportGeneration(root, sourceProtection);
+  const generation = {
+    root,
+    sourceProtection,
+    marker: null,
+    describedPreviousPaths: previous.describedPaths,
+    generatedAt: previous.generatedAt,
+    previousRawSessions: previous.rawSessions,
+  };
+  for (const candidate of options.plannedPaths || []) await assertGenerationDestinationWritable(candidate, generation);
+
+  const temporaryPath = `${markerPath}.partial-${process.pid}-${randomUUID()}`;
+  await assertSeparatedOutputPath(temporaryPath, sourceProtection, { allowMissing: true });
+  let handle;
+  let temporaryOwned = null;
+  let markerPublished = false;
+  try {
+    handle = await fsp.open(temporaryPath, "wx");
+    const openedStat = await handle.stat({ bigint: true });
+    const openedIdentity = reliableFileIdentity(openedStat);
+    if (!openedStat.isFile() || !openedIdentity) throw new ExportError("UNSAFE_EXPORT_PATH", `Reliable file identity is unavailable for ${INCOMPLETE_MARKER_NAME}`);
+    temporaryOwned = { path: temporaryPath, identity: { identity: openedIdentity } };
+    await handle.writeFile([
+      "Codex Project Chat Export",
+      "Status: INCOMPLETE",
+      "",
+      "This export generation did not complete successfully.",
+      "Do not use manifest.json, index.html, or index.md while this marker exists.",
+      "Use a new empty output folder, or manually inspect and remove this incomplete export.",
+      "",
+    ].join("\n"), "utf8");
+    await handle.sync();
+    const writtenStat = await handle.stat({ bigint: true });
+    if (reliableFileIdentity(writtenStat) !== openedIdentity) throw new ExportError("UNSAFE_EXPORT_PATH", `The ${INCOMPLETE_MARKER_NAME} identity changed while it was written`);
+    await handle.close();
+    handle = null;
+    const temporary = await assertSeparatedOutputPath(temporaryPath, sourceProtection, { requireRegularFile: true, requireReliableIdentity: true });
+    if (temporary.identity !== openedIdentity) throw new ExportError("UNSAFE_EXPORT_PATH", `The temporary ${INCOMPLETE_MARKER_NAME} was replaced before publication`);
+    temporaryOwned = { path: temporaryPath, identity: temporary };
+    await fsp.link(temporaryPath, markerPath);
+    markerPublished = true;
+    const published = await assertSeparatedOutputPath(markerPath, sourceProtection, { requireRegularFile: true, requireReliableIdentity: true });
+    if (published.identity !== openedIdentity) throw new ExportError("UNSAFE_EXPORT_PATH", `The published ${INCOMPLETE_MARKER_NAME} does not match the run-owned marker`);
+    await removeOwnedTemporary(temporaryOwned, { lstat: fsp.lstat, realpath: fsp.realpath, rm: fsp.rm, stat: fsp.stat });
+    temporaryOwned = null;
+    generation.marker = { path: markerPath, identity: published };
+    return generation;
+  } catch (error) {
+    await handle?.close().catch(() => {});
+    if (temporaryOwned) await removeOwnedTemporary(temporaryOwned, { lstat: fsp.lstat, realpath: fsp.realpath, rm: fsp.rm, stat: fsp.stat });
+    if (error?.code === "EEXIST") throw new ExportError("INCOMPLETE_EXPORT_EXISTS", `The output folder already contains ${INCOMPLETE_MARKER_NAME}. Use a new empty output folder, or manually inspect and remove the incomplete export.`);
+    if (markerPublished) throw new ExportError(error?.code || "EXPORT_MARKER_FAILED", `${error?.message || error}. ${INCOMPLETE_MARKER_NAME} remains present and the export is incomplete.`);
+    throw error;
+  }
+}
+
+async function inspectPreviousExportGeneration(outputRoot, sourceProtection) {
+  const manifestPath = path.join(outputRoot, "manifest.json");
+  const manifestBefore = await assertSeparatedOutputPath(manifestPath, sourceProtection, { allowMissing: true, requireRegularFile: true, requireReliableIdentity: true });
+  if (!manifestBefore.exists) {
+    for (const name of GENERATION_ROOT_FILES.filter((value) => value !== "manifest.json")) {
+      const candidate = await assertSeparatedOutputPath(path.join(outputRoot, name), sourceProtection, { allowMissing: true, requireRegularFile: true, requireReliableIdentity: true });
+      if (candidate.exists) throw new ExportError("UNOWNED_EXPORT_FILE", `Refusing to overwrite ${name} because no valid previous manifest assigns it to an exporter generation`);
+    }
+    return { describedPaths: new Map(), generatedAt: new Date().toISOString(), rawSessions: new Map() };
+  }
+
+  let manifest;
+  try {
+    manifest = JSON.parse(await fsp.readFile(manifestPath, "utf8"));
+  } catch (error) {
+    throw new ExportError("INVALID_PREVIOUS_MANIFEST", `The previous manifest is not valid JSON: ${error?.message || error}`);
+  }
+  const manifestAfter = await assertSeparatedOutputPath(manifestPath, sourceProtection, { requireRegularFile: true, requireReliableIdentity: true });
+  if (!sameReliableFileIdentity(manifestBefore, manifestAfter) || manifestBefore.stat.size !== manifestAfter.stat.size || manifestBefore.stat.mtimeMs !== manifestAfter.stat.mtimeMs) {
+    throw new ExportError("INVALID_PREVIOUS_MANIFEST", "The previous manifest changed while it was being validated");
+  }
+
+  const describedPaths = collectPreviousGenerationPaths(manifest);
+  for (const name of GENERATION_ROOT_FILES) {
+    const candidate = await assertSeparatedOutputPath(path.join(outputRoot, name), sourceProtection, { allowMissing: true, requireRegularFile: true, requireReliableIdentity: true });
+    if (candidate.exists && !describedPaths.has(generationPathKey(name))) {
+      throw new ExportError("UNOWNED_EXPORT_FILE", `Refusing to reuse ${name} because the previous manifest does not describe it`);
+    }
+  }
+  const rawSessions = new Map();
+  for (const session of manifest.sessions) {
+    if (!session.raw_export_file) continue;
+    rawSessions.set(generationPathKey(validatedGenerationRelativePath(session.raw_export_file, "raw")), session);
+  }
+  return {
+    describedPaths,
+    generatedAt: isCanonicalIsoTimestamp(manifest.generated_at) ? manifest.generated_at : new Date().toISOString(),
+    rawSessions,
+  };
+}
+
+function collectPreviousGenerationPaths(manifest) {
+  if (!manifest || manifest.archive_format_version !== ARCHIVE_FORMAT_VERSION || !Array.isArray(manifest.sessions) || !manifest.formats || typeof manifest.formats !== "object") {
+    throw new ExportError("INVALID_PREVIOUS_MANIFEST", "The previous manifest does not match archive format version 1");
+  }
+  const authorized = new Map();
+  addAuthorizedGenerationPath(authorized, "manifest.json", "root");
+  addAuthorizedGenerationPath(authorized, "README.txt", "root");
+  if (manifest.formats.html === true) addAuthorizedGenerationPath(authorized, "index.html", "root");
+  if (manifest.formats.markdown === true) addAuthorizedGenerationPath(authorized, "index.md", "root");
+  for (const session of manifest.sessions) {
+    if (!session || typeof session !== "object") throw new ExportError("INVALID_PREVIOUS_MANIFEST", "The previous manifest contains an invalid session record");
+    if (session.raw_export_file) addAuthorizedGenerationPath(authorized, session.raw_export_file, "raw");
+    if (session.markdown_file) addAuthorizedGenerationPath(authorized, session.markdown_file, "markdown");
+  }
+  return authorized;
+}
+
+function addAuthorizedGenerationPath(authorized, value, kind) {
+  const relativePath = validatedGenerationRelativePath(value, kind);
+  const key = generationPathKey(relativePath);
+  if (authorized.has(key)) throw new ExportError("INVALID_PREVIOUS_MANIFEST", `The previous manifest assigns the same export path more than once: ${relativePath}`);
+  authorized.set(key, relativePath);
+}
+
+function validatedGenerationRelativePath(value, kind = "any") {
+  if (typeof value !== "string" || !value || value.includes("\0") || path.win32.isAbsolute(value) || path.posix.isAbsolute(value)) {
+    throw new ExportError("INVALID_PREVIOUS_MANIFEST", "The previous manifest contains an absolute or invalid export path");
+  }
+  const portable = value.replaceAll("\\", "/");
+  const segments = portable.split("/");
+  if (segments.some((segment) => !segment || segment === "." || segment === ".." || segment.includes(":"))) {
+    throw new ExportError("INVALID_PREVIOUS_MANIFEST", `The previous manifest contains a non-canonical export path: ${portable}`);
+  }
+  const normalized = segments.join("/");
+  const validRoot = GENERATION_ROOT_FILES.includes(normalized);
+  const validRaw = normalized.startsWith("raw/") && normalized.toLowerCase().endsWith(".jsonl");
+  const validMarkdown = (normalized.startsWith("md/") || normalized.startsWith("markdown/")) && normalized.toLowerCase().endsWith(".md");
+  if ((kind === "root" && !validRoot) || (kind === "raw" && !validRaw) || (kind === "markdown" && !validMarkdown) || (kind === "any" && !validRoot && !validRaw && !validMarkdown)) {
+    throw new ExportError("INVALID_PREVIOUS_MANIFEST", `The previous manifest contains an unexpected export path: ${normalized}`);
+  }
+  return normalized;
+}
+
+function generationPathKey(value) {
+  const normalized = String(value).replaceAll("\\", "/");
+  return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+}
+
+function generationAbsolutePath(outputRoot, relativePath) {
+  const validated = validatedGenerationRelativePath(relativePath);
+  const absolutePath = path.resolve(outputRoot, ...validated.split("/"));
+  if (!isPathInside(absolutePath, outputRoot) || sameCanonicalPath(absolutePath, outputRoot)) throw new ExportError("INVALID_PREVIOUS_MANIFEST", `Export path escapes the output folder: ${validated}`);
+  return absolutePath;
+}
+
+async function assertGenerationDestinationWritable(candidatePath, generation) {
+  const absolutePath = path.isAbsolute(candidatePath) ? path.resolve(candidatePath) : generationAbsolutePath(generation.root, candidatePath);
+  if (!isPathInside(absolutePath, generation.root) || sameCanonicalPath(absolutePath, generation.root)) throw new ExportError("UNSAFE_EXPORT_PATH", "Export generation path is outside the output folder");
+  const relativePath = validatedGenerationRelativePath(path.relative(generation.root, absolutePath));
+  const key = generationPathKey(relativePath);
+  const candidate = await inspectSeparatedPath(absolutePath, { allowMissing: true, rejectAliases: true, requireRegularFile: true, requireReliableIdentity: true });
+  assertSeparatedFromSources(candidate, generation.sourceProtection);
+  if (candidate.exists && !generation.describedPreviousPaths.has(key)) {
+    throw new ExportError("UNOWNED_EXPORT_FILE", `Refusing to reuse ${relativePath} because the previous manifest does not describe it`);
+  }
+  return candidate;
+}
+
+function previousRawSession(generation, destinationPath) {
+  if (!generation?.previousRawSessions) return null;
+  const relativePath = validatedGenerationRelativePath(path.relative(generation.root, destinationPath), "raw");
+  return generation.previousRawSessions.get(generationPathKey(relativePath)) || null;
+}
+
+async function completeExportGeneration(generation) {
+  if (!generation?.marker) throw new ExportError("EXPORT_VERIFICATION_FAILED", "The export generation has no verified incomplete marker");
+  await removeOwnedTemporary(generation.marker, { lstat: fsp.lstat, realpath: fsp.realpath, rm: fsp.rm, stat: fsp.stat });
+  generation.marker = null;
+}
+
+function sameReliableFileIdentity(left, right) {
+  return Boolean(left?.identity && right?.identity && left.identity === right.identity);
+}
+
+function assertDistinctPathIdentity(left, right, message) {
+  if (sameCanonicalPath(left.canonicalPath, right.canonicalPath) || sameReliableFileIdentity(left, right)) throw new ExportError("OUTPUT_OVERLAPS_SOURCE", message);
+  if (left.exists && right.exists && (!left.identity || !right.identity)) throw new ExportError("UNSAFE_EXPORT_PATH", "Reliable file identity is required to prove source and destination separation");
+}
+
+function sameCanonicalPath(left, right) {
+  return normalizePathForCompare(left) === normalizePathForCompare(right);
+}
+
+function pathsOverlap(left, right) {
+  return isPathInside(left, right) || isPathInside(right, left);
+}
+
+function isCanonicalIsoTimestamp(value) {
+  if (typeof value !== "string") return false;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) && new Date(timestamp).toISOString() === value;
+}
+
+async function sha256File(file) {
+  const hash = createHash("sha256");
+  const input = fs.createReadStream(file);
+  for await (const chunk of input) hash.update(chunk);
+  return hash.digest("hex");
+}
+
+function validatedSourceRelativePath(sourcePath, sourceRootPath) {
+  const relative = path.relative(path.resolve(sourceRootPath), path.resolve(sourcePath));
+  if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) throw new ExportError("INVALID_SOURCE_RELATIVE_PATH", `Source file is outside its declared ${path.basename(sourceRootPath)} root: ${path.basename(sourcePath)}`);
+  return toPosixPath(relative);
 }
 
 function normalizePathForCompare(value) {
@@ -452,6 +2133,34 @@ function deriveTitle(text, maxLength = 96) {
   return `${compact.slice(0, Math.max(1, maxLength - 1)).trimEnd()}…`;
 }
 
+function resolveDisplayTitle(meta, indexedThreadName) {
+  const indexedTitle = deriveTitle(indexedThreadName, 120);
+  const firstDirectTitle = deriveUserDisplayTitle(meta.firstUserText, 120);
+  const indexedTitleStatus = validateIndexedTitle(indexedTitle, firstDirectTitle, meta.eventAnalysis?.nonDirectTitleCandidates || []);
+  if (indexedTitle && indexedTitleStatus === "ACCEPTED") return { displayTitle: indexedTitle, indexedTitleStatus, source: "session_index" };
+  if (firstDirectTitle) return { displayTitle: firstDirectTitle, indexedTitleStatus, source: "direct_user_message" };
+  return { displayTitle: neutralSessionTitle(meta), indexedTitleStatus, source: meta.sessionKind === SESSION_KIND.SUBAGENT ? "neutral_subagent" : "neutral_no_user" };
+}
+
+function validateIndexedTitle(indexedTitle, firstDirectTitle, nonDirectTitleCandidates = []) {
+  if (!indexedTitle) return "NOT_PRESENT";
+  const normalizedIndexed = normalizeTitleForCompare(indexedTitle);
+  if (firstDirectTitle && normalizedIndexed === normalizeTitleForCompare(firstDirectTitle)) return "ACCEPTED";
+  if (nonDirectTitleCandidates.some((candidate) => normalizeTitleForCompare(candidate) === normalizedIndexed)) return "REJECTED_TECHNICAL_CONTEXT_MATCH";
+  if (["agents.md instructions", "environment context", "plugin instructions", "recommended plugins"].includes(normalizedIndexed)) return "REJECTED_TECHNICAL_CONTEXT_TITLE";
+  return "ACCEPTED";
+}
+
+function normalizeTitleForCompare(value) {
+  return String(value || "").trim().replace(/^#+\s*/, "").replace(/[<>_]+/g, " ").replace(/\s+/g, " ").toLowerCase();
+}
+
+function neutralSessionTitle(meta) {
+  const id = String(meta.id || meta.session_id || path.basename(meta.file || "", ".jsonl") || "unknown");
+  const shortId = id.length > 12 ? `${id.slice(0, 8)}…` : id;
+  return `${meta.sessionKind === SESSION_KIND.SUBAGENT ? "Subagent session" : "Codex session"} ${shortId}`;
+}
+
 function shortProjectDir(projectDirs, cwd) {
   const key = cwd || "unknown";
   if (!projectDirs.has(key)) {
@@ -478,39 +2187,66 @@ function readableProjectDir(projectDirs, cwd) {
   return projectDirs.get(key);
 }
 
-async function writeMarkdownTranscript(meta, outputPath, rawRel) {
-  const out = fs.createWriteStream(outputPath, { encoding: "utf8" });
-  const latestTimestamp = await readLatestTimestamp(meta.file, meta.updatedAt || meta.timestamp || "");
-  const stats = { userMessages: 0, assistantMessages: 0, toolEvents: 0, model: meta.model || "", updatedAt: latestTimestamp };
-  writeLine(out, `# ${meta.title || "Codex Project Chat Export"}`);
+async function writeMarkdownTranscript(meta, outputPath, rawRel, profiler = null, profileSession = meta, context, sourceProtection, generation) {
+  const { redactMarkdown, includeTools } = context;
+  const renderStart = performance.now();
+  let writeStart = renderStart;
+  const stats = { userMessages: 0, assistantMessages: 0, subagentInputs: 0, runtimeContexts: 0, unclassifiedUserRoleRecords: 0, toolEvents: 0, model: meta.model || "", updatedAt: meta.latestTimestamp || meta.updatedAt || meta.timestamp || "" };
+  await writeSeparatedOutputFile(outputPath, sourceProtection, async (handle) => {
+  const out = fs.createWriteStream(outputPath, { fd: handle.fd, encoding: "utf8", autoClose: false });
+  writeLine(out, `# ${meta.displayTitle || meta.title || "Codex Project Chat Export"}`);
   writeLine(out, "");
   writeLine(out, `- Project: ${meta.cwd || ""}`);
   writeLine(out, `- Storage: ${meta.storage || "active"}`);
   writeLine(out, `- Session ID: ${meta.id || ""}`);
-  writeLine(out, `- Started: ${meta.timestamp || ""}`);
-  writeLine(out, `- Updated: ${stats.updatedAt || ""}`);
+  writeLine(out, `- Started: ${formatDerivedTimestamp(meta.timestamp)}`);
+  writeLine(out, `- Updated: ${formatDerivedTimestamp(stats.updatedAt)}`);
   if (meta.model) writeLine(out, `- Model: ${meta.model}`);
   if (rawRel) writeLine(out, `- Raw JSONL: ${rawRel.replace(/\\/g, "/")}`);
   writeLine(out, "");
-  writeLine(out, "> Markdown is a readable view. The raw JSONL file is the complete local session export.");
-  if (redactMarkdown) writeLine(out, "> Known token-shaped secrets are redacted in this Markdown view only.");
+  writeLine(out, "> Markdown is a classified, derived reading view. The raw JSONL file is the canonical lossless session snapshot.");
+  if (redactMarkdown) writeLine(out, "> Known token-shaped secrets are masked when detected in this reading view; the raw snapshot remains unchanged.");
   writeLine(out, "");
 
   const rl = readline.createInterface({ input: fs.createReadStream(meta.file, { encoding: "utf8" }), crlfDelay: Infinity });
+  let recordNumber = 0;
   for await (const line of rl) {
     if (!line.trim()) continue;
+    recordNumber += 1;
     let item;
     try { item = JSON.parse(line); } catch { continue; }
     if (item.timestamp && (!stats.updatedAt || item.timestamp > stats.updatedAt)) stats.updatedAt = item.timestamp;
     if (item.type === "turn_context" && item.payload?.model && !stats.model) stats.model = item.payload.model;
     if (item.type !== "response_item" || !item.payload) continue;
     const payload = item.payload;
-    if (payload.type === "message" && ["user", "assistant"].includes(payload.role)) {
+    if (payload.type === "message" && payload.role === "user") {
       const text = extractText(payload.content);
       if (!text.trim()) continue;
-      if (payload.role === "user") stats.userMessages += 1;
-      if (payload.role === "assistant") stats.assistantMessages += 1;
-      writeLine(out, `## ${payload.role === "user" ? "User" : "Assistant"}${item.timestamp ? ` - ${item.timestamp}` : ""}`);
+      const classification = meta.eventAnalysis?.classifications?.get(recordNumber) || { kind: USER_RECORD_KIND.UNCLASSIFIED_USER_ROLE_RECORD, runtimeContextTypes: [] };
+      if (classification.kind === USER_RECORD_KIND.DIRECT_USER_TURN) {
+        stats.userMessages += 1;
+        writeLine(out, `## User${formatDerivedTimestampSuffix(item.timestamp)}`);
+        writeLine(out, "");
+        writeLine(out, redactMarkdown ? redactSecrets(text) : text);
+        writeLine(out, "");
+      } else if (classification.kind === USER_RECORD_KIND.SUBAGENT_INPUT) {
+        stats.subagentInputs += 1;
+        writeClassifiedContext(out, "Subagent input / parent-agent handoff", text, item.timestamp, redactMarkdown);
+      } else if (classification.kind === USER_RECORD_KIND.AUTOMATIC_RUNTIME_CONTEXT) {
+        stats.runtimeContexts += 1;
+        const suffix = classification.runtimeContextTypes.length ? ` – ${classification.runtimeContextTypes.join(" / ")}` : "";
+        writeClassifiedContext(out, `Automatic runtime context${suffix}`, text, item.timestamp, redactMarkdown);
+      } else {
+        stats.unclassifiedUserRoleRecords += 1;
+        writeClassifiedContext(out, "Unclassified user-role record", text, item.timestamp, redactMarkdown);
+      }
+      continue;
+    }
+    if (payload.type === "message" && payload.role === "assistant") {
+      const text = extractText(payload.content);
+      if (!text.trim()) continue;
+      stats.assistantMessages += 1;
+      writeLine(out, `## Assistant${formatDerivedTimestampSuffix(item.timestamp)}`);
       writeLine(out, "");
       writeLine(out, redactMarkdown ? redactSecrets(text) : text);
       writeLine(out, "");
@@ -519,7 +2255,7 @@ async function writeMarkdownTranscript(meta, outputPath, rawRel) {
     if (["function_call", "custom_tool_call", "function_call_output", "custom_tool_call_output"].includes(payload.type)) {
       stats.toolEvents += 1;
       if (includeTools) {
-        writeLine(out, `## Tool ${payload.type}${payload.name ? ` - ${payload.name}` : ""}${item.timestamp ? ` - ${item.timestamp}` : ""}`);
+        writeLine(out, `## Tool ${payload.type}${payload.name ? ` - ${payload.name}` : ""}${formatDerivedTimestampSuffix(item.timestamp)}`);
         writeLine(out, "");
         const toolText = payload.arguments || payload.input || payload.output || JSON.stringify(payload, null, 2);
         const renderedToolText = redactMarkdown ? redactSecrets(String(toolText)) : String(toolText);
@@ -531,8 +2267,31 @@ async function writeMarkdownTranscript(meta, outputPath, rawRel) {
       }
     }
   }
+  const renderMs = performance.now() - renderStart;
+  profiler?.addPhase("markdown_rendering", renderMs, meta.fileSize || 0, 0);
+  profiler?.recordSession(profileSession, "markdown_render_ms", renderMs, meta.fileSize || 0, 0);
+  writeStart = performance.now();
   await new Promise((resolve, reject) => { out.end(resolve); out.on("error", reject); });
+  }, generation);
+  const writeMs = performance.now() - writeStart;
+  const outputSize = (await fsp.stat(outputPath)).size;
+  profiler?.addPhase("markdown_writing", writeMs, 0, outputSize);
+  profiler?.recordSession(profileSession, "markdown_write_ms", writeMs, 0, outputSize);
   return stats;
+}
+
+function writeClassifiedContext(stream, label, text, timestamp, redactMarkdown) {
+  const rendered = redactMarkdown ? redactSecrets(text) : text;
+  const fence = markdownFence(rendered);
+  writeLine(stream, "<details>");
+  writeLine(stream, `<summary>${label}${formatDerivedTimestampSuffix(timestamp)}</summary>`);
+  writeLine(stream, "");
+  writeLine(stream, `${fence}text`);
+  writeLine(stream, rendered);
+  writeLine(stream, fence);
+  writeLine(stream, "");
+  writeLine(stream, "</details>");
+  writeLine(stream, "");
 }
 
 function extractText(content) {
@@ -569,28 +2328,366 @@ function redactSecrets(text) {
   return result;
 }
 
-async function writeIndexFiles(dir, rows) {
-  const generatedAt = new Date().toISOString();
+async function writeIndexFiles(dir, rows, profiler = null, context, sourceProtection, generation) {
+  const { diagnosticReporter, exportFormats, exportProfile, copyRaw, codexHome, sessionsDir, includeArchived, archivedSessionsDir, sessionIndexPath, pathStyle } = context;
+  const generatedAt = generation?.generatedAt || new Date().toISOString();
   const indexRows = [...rows].sort((a, b) => (b.updated_at || b.started_at || "").localeCompare(a.updated_at || a.started_at || ""));
-  const md = ["# Codex Project Chat Export Index", "", `Generated: ${generatedAt}`, "", "| Project | Title | Storage | Started | Markdown | Raw |", "| --- | --- | --- | --- | --- | --- |"];
-  for (const row of indexRows) md.push(`| ${mdCell(row.project_name || row.project)} | ${mdCell(row.title || row.session_id)} | ${mdCell(row.storage)} | ${mdCell(row.started_at)} | ${mdLink(row.markdown_file)} | ${row.raw_export_file ? mdLink(row.raw_export_file) : ""} |`);
-  md.push("");
-  await fsp.writeFile(path.join(dir, "index.md"), `${md.join("\n")}\n`, "utf8");
-  await fsp.writeFile(path.join(dir, "index.html"), renderHtmlIndex(indexRows, generatedAt), "utf8");
-  await fsp.writeFile(path.join(dir, "manifest.json"), `${JSON.stringify({ generated_at: generatedAt, codex_home: codexHome, sessions_dir: sessionsDir, archived_sessions_dir: includeArchived ? archivedSessionsDir : "", session_index: sessionIndexPath, path_style: pathStyle, sessions: rows }, null, 2)}\n`, "utf8");
+  const includeRawColumn = indexRows.some((row) => Boolean(row.raw_export_file));
+  const indexStart = performance.now();
+  diagnosticReporter("index_start", { rows: indexRows.length, html: Boolean(exportFormats.html), markdown: Boolean(exportFormats.markdown) });
+  let indexBytes = 0;
+  if (exportFormats.markdown) {
+    const md = ["# Codex Project Chat Export Index", "", `Generated: ${generatedAt}`, "", includeRawColumn ? "| Project | Title | Storage | Started | Markdown | Raw |" : "| Project | Title | Storage | Started | Markdown |", includeRawColumn ? "| --- | --- | --- | --- | --- | --- |" : "| --- | --- | --- | --- | --- |"];
+    for (const row of indexRows) md.push(includeRawColumn ? `| ${mdCell(row.project_name || row.project)} | ${mdCell(row.title || row.session_id)} | ${mdCell(row.storage)} | ${mdCell(formatDerivedTimestamp(row.started_at))} | ${mdLink(row.markdown_file)} | ${row.raw_export_file ? mdLink(row.raw_export_file) : ""} |` : `| ${mdCell(row.project_name || row.project)} | ${mdCell(row.title || row.session_id)} | ${mdCell(row.storage)} | ${mdCell(formatDerivedTimestamp(row.started_at))} | ${mdLink(row.markdown_file)} |`);
+    md.push("");
+    const markdownIndex = `${md.join("\n")}\n`;
+    await writeSeparatedOutputFile(path.join(dir, "index.md"), sourceProtection, (handle) => handle.writeFile(markdownIndex, "utf8"), generation);
+    indexBytes += Buffer.byteLength(markdownIndex);
+  }
+  if (exportFormats.html) {
+    const htmlIndex = renderHtmlIndex(indexRows, generatedAt, { reducedMetadata: exportProfile === EXPORT_PROFILE.SOURCE_SNAPSHOTS });
+    await writeSeparatedOutputFile(path.join(dir, "index.html"), sourceProtection, (handle) => handle.writeFile(htmlIndex, "utf8"), generation);
+    indexBytes += Buffer.byteLength(htmlIndex);
+  }
+  profiler?.addPhase("indexes", performance.now() - indexStart, 0, indexBytes);
+  diagnosticReporter("index_end", { duration_ms: roundMs(performance.now() - indexStart), bytes_written: indexBytes });
+  const manifest = `${JSON.stringify({ archive_format_version: ARCHIVE_FORMAT_VERSION, canonical_representation: "raw_jsonl", canonical_representation_included: copyRaw, export_profile: exportProfile, formats: exportFormats, generated_at: generatedAt, codex_home: codexHome, sessions_dir: sessionsDir, archived_sessions_dir: includeArchived ? archivedSessionsDir : "", session_index: sessionIndexPath, path_style: pathStyle, sessions: rows }, null, 2)}\n`;
+  return manifest;
 }
 
-async function writeSummary(dir, rows) {
+function createAttachmentMetrics() {
+  return {
+    embeddedCount: 0,
+    embeddedBytes: 0,
+    dataUrlCount: 0,
+    dataUrlBytes: 0,
+    unprefixedEmbeddedCount: 0,
+    unprefixedEmbeddedBytes: 0,
+    localReferenceCount: 0,
+    remoteReferenceCount: 0,
+    unknownCount: 0,
+    referencedCount: 0,
+    referencedKnownBytes: 0,
+    referencedUnknownSizeCount: 0,
+  };
+}
+
+function observeAttachmentMetrics(item, metrics) {
+  const seen = new Set();
+  visit(item, false);
+
+  function visit(value, attachmentContext) {
+    if (value === null || value === undefined) return;
+    if (typeof value === "string") {
+      if (attachmentContext) recordAttachmentValue(value, null, metrics);
+      return;
+    }
+    if (typeof value !== "object" || seen.has(value)) return;
+    seen.add(value);
+    if (Array.isArray(value)) {
+      for (const entry of value) visit(entry, attachmentContext);
+      return;
+    }
+
+    const type = String(value.type || "").toLowerCase();
+    const attachmentLike = ["attachment", "file", "image", "image_url", "input_file", "input_image", "local_image"].includes(type);
+    if (attachmentLike) {
+      const candidate = value.image_url?.url || value.image_url || value.url || value.file_path || value.image_path || value.path || value.data || "";
+      const knownBytes = firstFiniteNumber(value.size_bytes, value.sizeBytes, value.byte_length, value.byteLength, value.size);
+      recordAttachmentValue(candidate, knownBytes, metrics);
+    }
+
+    for (const [key, child] of Object.entries(value)) {
+      const childContext = ["attachments", "files", "images"].includes(key.toLowerCase());
+      visit(child, childContext);
+    }
+  }
+}
+
+function recordAttachmentValue(value, knownBytes, metrics) {
+  const text = typeof value === "string" ? value : "";
+  if (text.startsWith("data:") && text.includes(",")) {
+    const payloadStart = text.indexOf(",") + 1;
+    const encoded = text.slice(0, payloadStart).toLowerCase().includes(";base64,");
+    metrics.embeddedCount += 1;
+    const byteLength = encoded ? estimateBase64Bytes(text, payloadStart) : estimatePercentEncodedBytes(text.slice(payloadStart));
+    metrics.embeddedBytes += byteLength;
+    metrics.dataUrlCount += 1;
+    metrics.dataUrlBytes += byteLength;
+    return;
+  }
+  const unprefixed = inspectUnprefixedEmbeddedImage(text);
+  if (unprefixed) {
+    metrics.embeddedCount += 1;
+    metrics.embeddedBytes += unprefixed.bytes;
+    metrics.unprefixedEmbeddedCount += 1;
+    metrics.unprefixedEmbeddedBytes += unprefixed.bytes;
+    return;
+  }
+  const referenceKind = classifyAttachmentReference(text);
+  if (referenceKind === "local") metrics.localReferenceCount += 1;
+  else if (referenceKind === "remote") metrics.remoteReferenceCount += 1;
+  else metrics.unknownCount += 1;
+  if (referenceKind !== "unknown") {
+    metrics.referencedCount += 1;
+    if (Number.isFinite(knownBytes) && knownBytes >= 0) metrics.referencedKnownBytes += knownBytes;
+    else metrics.referencedUnknownSizeCount += 1;
+  }
+}
+
+function classifyAttachmentReference(value) {
+  const text = String(value || "").trim();
+  if (!text) return "unknown";
+  if (path.win32.isAbsolute(text) || path.posix.isAbsolute(text) || text.toLowerCase().startsWith("file:")) return "local";
+  try {
+    const url = new URL(text);
+    if (url.protocol === "http:" || url.protocol === "https:") return "remote";
+  } catch {}
+  return "unknown";
+}
+
+function inspectUnprefixedEmbeddedImage(value) {
+  const text = String(value || "");
+  if (text.length < 12) return null;
+  let encodedLength = 0;
+  let padding = 0;
+  let sawPadding = false;
+  let prefix = "";
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index];
+    if (character === " " || character === "\t" || character === "\r" || character === "\n") continue;
+    if (character === "=") {
+      sawPadding = true;
+      padding += 1;
+      if (padding > 2) return null;
+    } else {
+      const code = character.charCodeAt(0);
+      const alphabetic = (code >= 65 && code <= 90) || (code >= 97 && code <= 122);
+      const numeric = code >= 48 && code <= 57;
+      if (!alphabetic && !numeric && character !== "+" && character !== "/") return null;
+      if (sawPadding) return null;
+    }
+    encodedLength += 1;
+    if (prefix.length < 24) prefix += character;
+  }
+  if (!encodedLength || encodedLength % 4 === 1 || (padding > 0 && encodedLength % 4 !== 0)) return null;
+  let signature;
+  try { signature = Buffer.from(prefix, "base64"); } catch { return null; }
+  const png = signature.length >= 8 && signature[0] === 0x89 && signature[1] === 0x50 && signature[2] === 0x4e && signature[3] === 0x47 && signature[4] === 0x0d && signature[5] === 0x0a && signature[6] === 0x1a && signature[7] === 0x0a;
+  const jpeg = signature.length >= 3 && signature[0] === 0xff && signature[1] === 0xd8 && signature[2] === 0xff;
+  if (!png && !jpeg) return null;
+  return { bytes: Math.max(0, Math.floor((encodedLength * 3) / 4) - padding), mediaType: png ? "image/png" : "image/jpeg" };
+}
+
+function estimateBase64Bytes(value, start = 0) {
+  const text = String(value || "");
+  let encodedLength = 0;
+  for (let index = start; index < text.length; index += 1) {
+    if (![" ", "\t", "\r", "\n"].includes(text[index])) encodedLength += 1;
+  }
+  if (!encodedLength) return 0;
+  let padding = 0;
+  for (let index = text.length - 1; index >= start && padding < 2; index -= 1) {
+    if ([" ", "\t", "\r", "\n"].includes(text[index])) continue;
+    if (text[index] === "=") padding += 1;
+    else break;
+  }
+  return Math.max(0, Math.floor((encodedLength * 3) / 4) - padding);
+}
+
+function estimatePercentEncodedBytes(value) {
+  try {
+    return Buffer.byteLength(decodeURIComponent(String(value || "")));
+  } catch {
+    return Buffer.byteLength(String(value || ""));
+  }
+}
+
+function firstFiniteNumber(...values) {
+  return values.find((value) => Number.isFinite(value));
+}
+
+function createPerformanceProfiler({ rawEnabled, scope, profile }) {
+  const phaseNames = [
+    "session_discovery_and_metadata",
+    "routing",
+    "parse_and_classify",
+    "raw_snapshot_copy",
+    "snapshot_stability_checks",
+    "source_hashing",
+    "export_hashing",
+    "markdown_rendering",
+    "markdown_writing",
+    "indexes",
+    "manifest",
+    "other",
+  ];
+  const startedAt = performance.now();
+  const phases = Object.fromEntries(phaseNames.map((name) => [name, { durationMs: 0, bytesRead: 0, bytesWritten: 0 }]));
+  const sessions = new Map();
+  const attachments = createAttachmentMetrics();
+  const counts = { scannedSessions: 0, exportedSessions: 0 };
+  const memorySamples = [];
+  let snapshotRetries = 0;
+  sampleMemory();
+
+  function addPhase(name, durationMs = 0, bytesRead = 0, bytesWritten = 0) {
+    const phase = phases[name] || phases.other;
+    phase.durationMs += Math.max(0, durationMs || 0);
+    phase.bytesRead += Math.max(0, bytesRead || 0);
+    phase.bytesWritten += Math.max(0, bytesWritten || 0);
+    sampleMemory();
+  }
+
+  function recordSession(meta, phaseName, durationMs, bytesRead = 0, bytesWritten = 0) {
+    const key = meta?.sourceOriginalPath || meta?.file || meta?.id || `unknown-${sessions.size}`;
+    if (!sessions.has(key)) {
+      const rawId = String(meta?.id || meta?.session_id || "");
+      const shortId = rawId ? shortenSessionId(rawId) : `file-${createHash("sha256").update(String(key)).digest("hex").slice(0, 8)}`;
+      sessions.set(key, { shortId, sizeBytes: Math.max(0, meta?.fileSize || 0), phases: {} });
+    }
+    const session = sessions.get(key);
+    session.sizeBytes = Math.max(session.sizeBytes, meta?.fileSize || 0);
+    session.phases[phaseName] = roundMs((session.phases[phaseName] || 0) + Math.max(0, durationMs || 0));
+    session.bytesRead = (session.bytesRead || 0) + Math.max(0, bytesRead || 0);
+    session.bytesWritten = (session.bytesWritten || 0) + Math.max(0, bytesWritten || 0);
+  }
+
+  function recordAttachments(value) {
+    if (!value) return;
+    attachments.embeddedCount += value.embeddedCount || 0;
+    attachments.embeddedBytes += value.embeddedBytes || 0;
+    attachments.referencedCount += value.referencedCount || 0;
+    attachments.referencedKnownBytes += value.referencedKnownBytes || 0;
+    attachments.referencedUnknownSizeCount += value.referencedUnknownSizeCount || 0;
+    attachments.dataUrlCount += value.dataUrlCount || 0;
+    attachments.dataUrlBytes += value.dataUrlBytes || 0;
+    attachments.unprefixedEmbeddedCount += value.unprefixedEmbeddedCount || 0;
+    attachments.unprefixedEmbeddedBytes += value.unprefixedEmbeddedBytes || 0;
+    attachments.localReferenceCount += value.localReferenceCount || 0;
+    attachments.remoteReferenceCount += value.remoteReferenceCount || 0;
+    attachments.unknownCount += value.unknownCount || 0;
+  }
+
+  function sampleMemory() {
+    memorySamples.push(process.memoryUsage().rss);
+  }
+
+  function finish({ status, errorCode }) {
+    sampleMemory();
+    const totalDurationMs = performance.now() - startedAt;
+    const measuredWithoutOther = phaseNames.filter((name) => name !== "other").reduce((sum, name) => sum + phases[name].durationMs, 0);
+    phases.other.durationMs += Math.max(0, totalDurationMs - measuredWithoutOther - phases.other.durationMs);
+    const slowestSessions = [...sessions.values()].map((session) => ({
+      short_id: session.shortId,
+      size_bytes: session.sizeBytes,
+      total_phase_ms: roundMs(Object.values(session.phases).reduce((sum, value) => sum + value, 0)),
+      phase_ms: session.phases,
+      snapshot_attempts: session.snapshotAttempts || 0,
+      bytes_read: session.bytesRead || 0,
+      bytes_written: session.bytesWritten || 0,
+    })).sort((left, right) => right.total_phase_ms - left.total_phase_ms).slice(0, 10);
+    const roundedPhases = Object.fromEntries(phaseNames.map((name) => [name, {
+      duration_ms: roundMs(phases[name].durationMs),
+      bytes_read: phases[name].bytesRead,
+      bytes_written: phases[name].bytesWritten,
+    }]));
+    return {
+      performance_profile_version: 1,
+      privacy: "No message text, full source paths, output paths, or attachment payloads are included.",
+      measurement_notes: [
+        "Memory values are sampled RSS, not continuous process maxima.",
+        "Markdown rendering covers streaming parse, classification lookup, transformation, and write enqueue time; Markdown writing covers final stream completion wait.",
+        "Attachment counts are structured event occurrences; repeated payloads or references are not deduplicated without stable attachment identity.",
+        "Unprefixed embedded images are recognized only when valid Base64 has a PNG or JPEG byte signature.",
+        "Referenced attachment bytes include only explicit structured size metadata; unknown forms and unknown-size references are counted separately.",
+      ],
+      status,
+      error_code: errorCode,
+      node_version: process.version,
+      platform: process.platform,
+      scope,
+      export_profile: profile,
+      raw_enabled: rawEnabled,
+      total_duration_ms: roundMs(totalDurationMs),
+      counts: { scanned_sessions: counts.scannedSessions, exported_sessions: counts.exportedSessions },
+      phases: roundedPhases,
+      io_totals: {
+        bytes_read: Object.values(phases).reduce((sum, phase) => sum + phase.bytesRead, 0),
+        bytes_written: Object.values(phases).reduce((sum, phase) => sum + phase.bytesWritten, 0),
+      },
+      attachments: {
+        embedded_count: attachments.embeddedCount,
+        embedded_bytes: attachments.embeddedBytes,
+        data_url_count: attachments.dataUrlCount,
+        data_url_bytes: attachments.dataUrlBytes,
+        unprefixed_embedded_count: attachments.unprefixedEmbeddedCount,
+        unprefixed_embedded_bytes: attachments.unprefixedEmbeddedBytes,
+        local_reference_count: attachments.localReferenceCount,
+        remote_reference_count: attachments.remoteReferenceCount,
+        unknown_count: attachments.unknownCount,
+        referenced_count: attachments.referencedCount,
+        referenced_known_bytes: attachments.referencedKnownBytes,
+        referenced_unknown_size_count: attachments.referencedUnknownSizeCount,
+      },
+      snapshot_retries: snapshotRetries,
+      memory: {
+        sample_count: memorySamples.length,
+        average_rss_bytes: Math.round(memorySamples.reduce((sum, value) => sum + value, 0) / memorySamples.length),
+        peak_sampled_rss_bytes: Math.max(...memorySamples),
+      },
+      slowest_sessions: slowestSessions,
+    };
+  }
+
+  return {
+    addPhase,
+    finish,
+    recordAttachments,
+    recordSession,
+    recordSnapshotAttempt(meta) {
+      recordSession(meta, "snapshot_stability_check_ms", 0);
+      const key = meta?.sourceOriginalPath || meta?.file || meta?.id || `unknown-${sessions.size}`;
+      sessions.get(key).snapshotAttempts = (sessions.get(key).snapshotAttempts || 0) + 1;
+    },
+    recordSnapshotRetryCount(count) { snapshotRetries += Math.max(0, count || 0); },
+    setCounts(next) { Object.assign(counts, next); },
+  };
+}
+
+function shortenSessionId(value) {
+  const text = String(value || "");
+  return text.length <= 13 ? text : `${text.slice(0, 8)}…${text.slice(-4)}`;
+}
+
+function roundMs(value) {
+  return Math.round(Number(value || 0) * 1000) / 1000;
+}
+
+async function writeSummary(dir, rows, context, sourceProtection, generation) {
+  const { codexHome, sessionsDir, includeArchived, archivedSessionsDir, exportProfile, pathStyle, exportFormats, markdownDirName, copyRaw } = context;
   const projects = new Map();
   for (const row of rows) projects.set(row.project || "unknown", (projects.get(row.project || "unknown") || 0) + 1);
   const activeCount = rows.filter((row) => row.storage === "active").length;
   const archivedCount = rows.filter((row) => row.storage === "archived").length;
-  const lines = ["Codex Project Chat Export", "=========================", "", `Generated: ${new Date().toISOString()}`, `Codex home: ${codexHome}`, `Sessions dir: ${sessionsDir}`, `Archived sessions dir: ${includeArchived ? archivedSessionsDir : "disabled"}`, `Path style: ${pathStyle}`, `Sessions exported: ${rows.length}`, `Active sessions: ${activeCount}`, `Archived sessions: ${archivedCount}`, "", "Projects:", ...Array.from(projects.entries()).map(([project, count]) => `- ${project}: ${count}`), "", "Notes:", "- md/ contains readable user and assistant messages when short path style is used.", "- markdown/ contains readable user and assistant messages when readable path style is used.", "- raw/ contains complete original session JSONL files, if raw export was enabled.", "- Raw export file names may be shortened; manifest.json maps them back to the original source files.", "- index.html can be filtered by project, title, date, model, or storage location.", "- manifest.json preserves metadata for later tooling."];
-  await fsp.writeFile(path.join(dir, "README.txt"), `${lines.join("\n")}\n`, "utf8");
+  const lines = ["Codex Project Chat Export", "=========================", "", `Generated: ${generation?.generatedAt || new Date().toISOString()}`, `Codex home: ${codexHome}`, `Sessions dir: ${sessionsDir}`, `Archived sessions dir: ${includeArchived ? archivedSessionsDir : "disabled"}`, `Export profile: ${exportProfile}`, `Path style: ${pathStyle}`, `Sessions exported: ${rows.length}`, `Active sessions: ${activeCount}`, `Archived sessions: ${archivedCount}`, "", "Projects:", ...Array.from(projects.entries()).map(([project, count]) => `- ${project}: ${count}`), "", "Notes:"];
+  if (exportFormats.markdown) lines.push(`- ${markdownDirName}/ contains classified, derived reading views.`);
+  else lines.push("- This profile intentionally does not create human-readable session transcripts or classify session events.");
+  if (copyRaw) lines.push("- raw/ contains canonical byte-preserving session JSONL snapshots.");
+  else lines.push("- This profile does not include canonical raw JSONL snapshots.");
+  lines.push("- Raw export file names may be collision-safe archive names; manifest.json preserves the original name and portable restore path.", "- raw_copy_status=VERIFIED_AT_EXPORT means the export-time hash check completed at raw_verified_at and the bytes read from the published Raw path matched raw_sha256 during that check; Raw files remain mutable afterward.", "- A future importer must hash the current Raw file again and reject any mismatch; no Codex import path is implemented or validated.", "- Event order is the physical line order inside each canonical raw JSONL file; the manifest does not duplicate that sequence.");
+  if (exportFormats.html && exportProfile === EXPORT_PROFILE.SOURCE_SNAPSHOTS) lines.push("- index.html uses only project, storage, start time, session ID, and Raw links because this profile intentionally skips complete readable metadata.");
+  else if (exportFormats.html) lines.push("- index.html can be filtered by project, title, date, model, or storage location.");
+  lines.push("- Absolute source paths are local metadata and must be omitted from any share-safe derivative.");
+  await writeSeparatedOutputFile(path.join(dir, "README.txt"), sourceProtection, (handle) => handle.writeFile(`${lines.join("\n")}\n`, "utf8"), generation);
 }
 
-async function verifyExport(dir, rows) {
-  const required = ["index.html", "index.md", "manifest.json", "README.txt"];
+async function verifyExport(dir, rows, profiler = null, context, options = {}) {
+  const { exportFormats } = context;
+  const required = ["README.txt"];
+  if (options.includeManifest) required.push("manifest.json");
+  if (exportFormats.html) required.push("index.html");
+  if (exportFormats.markdown) required.push("index.md");
   for (const name of required) {
     const file = path.join(dir, name);
     const stat = await fsp.stat(file).catch(() => null);
@@ -602,6 +2699,19 @@ async function verifyExport(dir, rows) {
       const stat = await fsp.stat(file).catch(() => null);
       if (!stat?.isFile() || stat.size === 0) throw new ExportError("EXPORT_VERIFICATION_FAILED", `Missing or empty session export: ${file}`);
     }
+    if (row.raw_export_file) {
+      if (row.raw_copy_status !== RAW_COPY_STATUS.VERIFIED_AT_EXPORT || !isCanonicalIsoTimestamp(row.raw_verified_at) || row.snapshot_status !== "STABLE" || !row.raw_sha256) throw new ExportError("EXPORT_VERIFICATION_FAILED", `Raw snapshot verification metadata is incomplete: ${row.raw_export_file}`);
+      const rawPath = path.join(dir, row.raw_export_file);
+      const rawStat = await fsp.stat(rawPath);
+      if (rawStat.size !== row.raw_size_bytes) throw new ExportError("EXPORT_VERIFICATION_FAILED", `Raw snapshot size mismatch: ${row.raw_export_file}`);
+      if (!row.source_root || !row.source_relative_path || path.isAbsolute(row.source_relative_path) || row.source_relative_path.split("/").includes("..")) throw new ExportError("EXPORT_VERIFICATION_FAILED", `Portable restore metadata is invalid: ${row.raw_export_file}`);
+      if (!row.source_original_filename || path.basename(row.source_relative_path) !== row.source_original_filename) throw new ExportError("EXPORT_VERIFICATION_FAILED", `Original source filename metadata is invalid: ${row.raw_export_file}`);
+      if (row.source_snapshot_before_size_bytes !== row.source_snapshot_after_size_bytes || row.source_snapshot_before_mtime_ms !== row.source_snapshot_after_mtime_ms) throw new ExportError("EXPORT_VERIFICATION_FAILED", `Source changed while its raw snapshot was copied: ${row.raw_export_file}`);
+    }
+  }
+  if (options.includeManifest) {
+    const publishedManifest = await fsp.readFile(path.join(dir, "manifest.json"), "utf8");
+    if (!options.expectedManifest || publishedManifest !== options.expectedManifest) throw new ExportError("EXPORT_VERIFICATION_FAILED", "Published manifest bytes differ from the verified in-memory generation");
   }
 }
 
@@ -628,9 +2738,11 @@ Options:
   --no-archived               Do not scan the archived sessions directory.
   --session-index <file>      Use a custom session_index.jsonl file.
   --include-tools             Include tool call input/output in Markdown.
-  --no-raw                    Do not copy raw JSONL files.
+  --profile <name>            Use complete, readable, or source-snapshots. Explicit profile wins over --no-raw.
+  --no-raw                    Legacy shorthand for the readable profile when --profile is omitted.
   --no-redact-markdown        Disable redaction in Markdown and derived display titles.
   --readable-paths            Use longer human-readable export file names.
+  --performance-profile <file> Write a message-free, path-redacted local JSON performance profile.
   --allow-output-in-tool-dir  Allow exporting into this tool/repository folder.
   --help, -h                  Show this help.
   --version, -v               Show the version.
@@ -639,7 +2751,8 @@ By default, exports use short paths such as md/p001-project/s0001.md and
 raw/p001-project/s0001.jsonl to make copied or unzipped archives safer on Windows.\n\nIf node is not found, use export-codex-project-chats.cmd or install Node.js 18+.`);
 }
 
-function printProjectList(metas) {
+function printProjectList(metas, context) {
+  const { sessionsDir, includeArchived, archivedSessionsDir } = context;
   const projects = new Map();
   for (const meta of metas) {
     const key = meta.cwd || "(unknown)";
@@ -658,7 +2771,8 @@ function printProjectList(metas) {
   }
 }
 
-function printSessionList(metas) {
+function printSessionList(metas, context) {
+  const { sessionsDir, includeArchived, archivedSessionsDir } = context;
   console.log(`Active sessions directory: ${sessionsDir}`);
   console.log(`Archived sessions directory: ${includeArchived ? archivedSessionsDir : "disabled"}`);
   console.log(`Detected sessions after duplicate-ID handling: ${metas.length}`);
@@ -681,7 +2795,8 @@ function printSessionList(metas) {
   console.log("Note: duplicate copies with the same session ID are shown once; an active copy takes precedence over an archived copy.");
 }
 
-function printDiagnostics(parsedEntries, metas, locations) {
+function printDiagnostics(parsedEntries, metas, locations, context) {
+  const { codexHome, sessionIndexPath, sessionsDir, archivedSessionsDir, includeArchived } = context;
   const byStorage = new Map();
   for (const location of locations) byStorage.set(location.storage, { root: location.root, files: 0, retained: 0 });
   for (const entry of parsedEntries) {
@@ -739,6 +2854,16 @@ function printDiagnostics(parsedEntries, metas, locations) {
 }
 
 function writeLine(stream, text) { stream.write(`${text}\n`); }
+const DERIVED_ISO_TIMESTAMP_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/;
+function formatDerivedTimestamp(value) {
+  if (!value) return "";
+  const timestamp = String(value);
+  return DERIVED_ISO_TIMESTAMP_PATTERN.test(timestamp) && Number.isFinite(Date.parse(timestamp)) ? timestamp : "invalid timestamp";
+}
+function formatDerivedTimestampSuffix(value) {
+  const timestamp = formatDerivedTimestamp(value);
+  return timestamp ? ` - ${timestamp}` : "";
+}
 function mdCell(value) {
   return String(value ?? "")
     .replaceAll("\\", "\\\\")
@@ -751,11 +2876,26 @@ function mdLink(relPath) { const link = toPosixPath(relPath); return `[${mdCell(
 function toPosixPath(value) { return String(value || "").replace(/\\/g, "/"); }
 function htmlEscape(value) { return String(value ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"); }
 function htmlLink(relPath, label) { const link = toPosixPath(relPath); return link ? `<a href="${htmlEscape(encodeURI(link))}">${htmlEscape(label || path.posix.basename(link))}</a>` : ""; }
-function renderHtmlIndex(rows, generatedAt) {
+function renderHtmlIndex(rows, generatedAt, options = {}) {
+  const reducedMetadata = Boolean(options.reducedMetadata);
+  const includeRawColumn = rows.some((row) => Boolean(row.raw_export_file));
+  const includeMarkdownColumn = rows.some((row) => Boolean(row.markdown_file));
   const bodyRows = rows.map((row) => {
-    const searchable = [row.project_name || row.project, row.title || row.session_id, row.storage, row.started_at, row.updated_at, row.model].join(" ").toLowerCase();
-    return `      <tr data-search="${htmlEscape(searchable)}"><td>${htmlEscape(row.project_name || row.project)}</td><td>${htmlEscape(row.title || row.session_id)}</td><td>${htmlEscape(row.storage || "active")}</td><td>${htmlEscape(row.started_at)}</td><td>${htmlEscape(row.model || "")}</td><td>${htmlLink(row.markdown_file, path.posix.basename(toPosixPath(row.markdown_file)))}</td><td>${row.raw_export_file ? htmlLink(row.raw_export_file, path.posix.basename(toPosixPath(row.raw_export_file))) : ""}</td></tr>`;
+    const startedAt = formatDerivedTimestamp(row.started_at);
+    const updatedAt = formatDerivedTimestamp(row.updated_at);
+    const searchable = reducedMetadata
+      ? [row.project_name || row.project, row.storage, startedAt, row.session_id].join(" ").toLowerCase()
+      : [row.project_name || row.project, row.title || row.session_id, row.storage, startedAt, updatedAt, row.model].join(" ").toLowerCase();
+    const rawCell = includeRawColumn ? `<td>${row.raw_export_file ? htmlLink(row.raw_export_file, path.posix.basename(toPosixPath(row.raw_export_file))) : ""}</td>` : "";
+    const markdownCell = includeMarkdownColumn ? `<td>${row.markdown_file ? htmlLink(row.markdown_file, path.posix.basename(toPosixPath(row.markdown_file))) : ""}</td>` : "";
+    if (reducedMetadata) return `      <tr data-search="${htmlEscape(searchable)}"><td>${htmlEscape(row.project_name || row.project)}</td><td>${htmlEscape(row.storage || "active")}</td><td>${htmlEscape(startedAt)}</td><td>${htmlEscape(row.session_id)}</td>${rawCell}</tr>`;
+    return `      <tr data-search="${htmlEscape(searchable)}"><td>${htmlEscape(row.project_name || row.project)}</td><td>${htmlEscape(row.title || row.session_id)}</td><td>${htmlEscape(row.storage || "active")}</td><td>${htmlEscape(startedAt)}</td><td>${htmlEscape(row.model || "")}</td>${markdownCell}${rawCell}</tr>`;
   }).join("\n");
+  const filterPlaceholder = reducedMetadata ? "Project, storage, date, or session ID" : "Project, title, date, model, active or archived";
+  const profileNote = reducedMetadata ? "\n  <p class=\"meta\">Source snapshots intentionally use a reduced index and do not inspect complete readable metadata.</p>" : "";
+  const header = reducedMetadata
+    ? `<th>Project</th><th>Storage</th><th>Started</th><th>Session ID</th>${includeRawColumn ? "<th>Raw</th>" : ""}`
+    : `<th>Project</th><th>Title</th><th>Storage</th><th>Started</th><th>Model</th>${includeMarkdownColumn ? "<th>Markdown</th>" : ""}${includeRawColumn ? "<th>Raw</th>" : ""}`;
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -777,14 +2917,14 @@ function renderHtmlIndex(rows, generatedAt) {
 </head>
 <body>
   <h1>Codex Project Chat Export Index</h1>
-  <p class="meta">Generated: ${htmlEscape(generatedAt)}</p>
+  <p class="meta">Generated: ${htmlEscape(generatedAt)}</p>${profileNote}
   <div class="toolbar">
     <label for="filter">Filter sessions</label>
-    <input id="filter" type="search" placeholder="Project, title, date, model, active or archived" autocomplete="off">
+    <input id="filter" type="search" placeholder="${filterPlaceholder}" autocomplete="off">
     <span class="count" id="count">${rows.length} sessions</span>
   </div>
   <table>
-    <thead><tr><th>Project</th><th>Title</th><th>Storage</th><th>Started</th><th>Model</th><th>Markdown</th><th>Raw</th></tr></thead>
+    <thead><tr>${header}</tr></thead>
     <tbody>
 ${bodyRows}
     </tbody>
@@ -813,15 +2953,42 @@ ${bodyRows}
 function slug(value) { return String(value || "").normalize("NFKD").replace(/[^\w.\-]+/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "").toLowerCase() || "unknown"; }
 function stampForName(date) { const valid = Number.isNaN(date.getTime()) ? new Date() : date; const pad = (n) => String(n).padStart(2, "0"); return `${valid.getFullYear()}${pad(valid.getMonth() + 1)}${pad(valid.getDate())}-${pad(valid.getHours())}${pad(valid.getMinutes())}${pad(valid.getSeconds())}`; }
 export {
+  ARCHIVE_FORMAT_VERSION,
+  INCOMPLETE_MARKER_NAME,
+  EXPORT_PROFILE,
+  EXPORT_PROFILES,
   ExportError,
   REDACTION_PATTERNS,
+  SESSION_KIND,
+  USER_RECORD_KIND,
+  classifyRuntimeContextTypes,
+  classifySessionKind,
+  beginExportGeneration,
+  completeExportGeneration,
+  copyStableRawSnapshot,
+  createProgressReporter,
+  createSessionEventClassifier,
   deriveTitle,
+  deriveUserDisplayTitle,
+  exportArchive,
   extractCwdFromText,
   extractSessionIdFromFilename,
   formatErrorWithHints,
   isPathInside,
   markdownFence,
+  matchesProject,
+  parseArgs,
   portableBasename,
   redactSecrets,
+  readSessionMeta,
+  readSessionRoutingMeta,
+  readTopLevelJsonEventType,
+  inspectUnprefixedEmbeddedImage,
+  classifyAttachmentReference,
+  resolveExportProfile,
+  resolveDisplayTitle,
+  sha256File,
   slug,
+  validateIndexedTitle,
+  validatedSourceRelativePath,
 };

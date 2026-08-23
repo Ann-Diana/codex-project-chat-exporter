@@ -1,0 +1,9 @@
+.vscode-test/
+out/
+dist/
+node_modules/
+*.vsix
+*.log
+.env
+tests/
+scripts/
