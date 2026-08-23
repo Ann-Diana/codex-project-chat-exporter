@@ -29,7 +29,7 @@ All notable changes to this project are documented here.
 - Separated source and output paths, including path and link aliases, and limited cleanup to files owned by the current export run.
 - Bound Raw snapshot publication to the exclusively created temporary-file identity and rejected identity changes before, during, or after publication.
 - Isolated concurrent export contexts and prevented simultaneous exports to the same destination.
-- Scoped sensitive VS Code settings to the application level, required trusted local workspaces, and rejected remote, web, UNC, and Windows device-path export targets.
+- Used machine-scoped local paths for `codexProjectChatExporter.outputDirectory` and `codexProjectChatExporter.codexHome` so their absolute values are not transferred to other computers through VS Code Settings Sync; required trusted local workspaces, and rejected remote, web, UNC, and Windows device-path export targets.
 - Limited VSIX replacement to the exact current candidate, blocked unexpected `dist/` artifacts, and cleaned only uniquely named run-owned staging paths.
 - Pinned installed extensions to their bundled exporter core with a packaged SHA-256 integrity record.
 - Revalidated the last successful export folder and HTML index immediately before open actions; changed or unverifiable targets are refused.
