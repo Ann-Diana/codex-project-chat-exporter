@@ -319,7 +319,7 @@ async function runCommandInternal(context, { print, profiler, runState }) {
     throw new ExportError("NO_SESSIONS", `No rollout JSONL files found under: ${locations.map((location) => location.root).join(", ")}`);
   }
   files.sort((a, b) => a.file.localeCompare(b.file));
-  const sourceProtection = await createSourceProtection(files, locations);
+  const sourceProtection = await createSourceProtection(files, locations, [sessionIndexPath]);
   runState.sourceProtection = sourceProtection;
   const titleIndex = await readSessionIndex(sessionIndexPath, profiler);
   profiler?.addPhase("session_discovery_and_metadata", performance.now() - discoveryStart);
@@ -1578,7 +1578,7 @@ async function releaseExportLock(lock) {
   await removeOwnedTemporary(lock, { lstat: fsp.lstat, realpath: fsp.realpath, rm: fsp.rm, stat: fsp.stat });
 }
 
-async function createSourceProtection(files, locations) {
+async function createSourceProtection(files, locations, protectedInputPaths = []) {
   const rootCanonicalPaths = new Set();
   const fileCanonicalPaths = new Set();
   const fileIdentities = new Set();
@@ -1590,6 +1590,11 @@ async function createSourceProtection(files, locations) {
     const source = await inspectSeparatedPath(entry.file, { requireRegularFile: true, requireReliableIdentity: true });
     fileCanonicalPaths.add(normalizePathForCompare(source.canonicalPath));
     fileIdentities.add(source.identity);
+  }
+  for (const protectedInputPath of protectedInputPaths) {
+    const input = await inspectSeparatedPath(protectedInputPath, { allowMissing: true, requireRegularFile: true, requireReliableIdentity: true });
+    fileCanonicalPaths.add(normalizePathForCompare(input.canonicalPath));
+    if (input.identity) fileIdentities.add(input.identity);
   }
   return Object.freeze({ rootCanonicalPaths, fileCanonicalPaths, fileIdentities });
 }
@@ -1614,7 +1619,7 @@ async function assertSeparatedOutputPath(candidatePath, sourceProtection, option
 function assertSeparatedFromSources(candidate, sourceProtection, options = {}) {
   const canonicalKey = normalizePathForCompare(candidate.canonicalPath);
   if (sourceProtection.fileCanonicalPaths.has(canonicalKey) || (candidate.identity && sourceProtection.fileIdentities.has(candidate.identity))) {
-    throw new ExportError("OUTPUT_OVERLAPS_SOURCE", `Refusing to write an export file that aliases a Codex session source: ${path.basename(candidate.absolutePath)}`);
+    throw new ExportError("OUTPUT_OVERLAPS_SOURCE", `Refusing to write an export file that aliases a protected Codex input: ${path.basename(candidate.absolutePath)}`);
   }
   for (const sourceRoot of sourceProtection.rootCanonicalPaths) {
     const insideSource = isPathInside(candidate.canonicalPath, sourceRoot);

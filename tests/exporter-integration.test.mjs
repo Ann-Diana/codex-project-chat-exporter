@@ -225,9 +225,46 @@ assert.equal(apiProfile.status, "COMPLETED");
 
 const protectedSource = path.join(activeDir, "rollout-active.jsonl");
 const protectedSourceHash = await sha256File(protectedSource);
+const protectedSessionIndex = path.join(codexHome, "session_index.jsonl");
+const protectedSessionIndexHash = await sha256File(protectedSessionIndex);
 const normalLocalOutput = path.join(temp, "normal-local-output");
 await exportArchive({ codexHome, scope: "all", outputDirectory: normalLocalOutput, exportProfile: "readable" });
 assert.equal(await pathExists(path.join(normalLocalOutput, "manifest.json")), true, "a normal local output path must remain supported");
+
+async function assertSessionIndexProfileRejected(profilePath, outputName, expectedCode = "OUTPUT_OVERLAPS_SOURCE") {
+  const outputDirectory = path.join(temp, outputName);
+  await assert.rejects(
+    () => exportArchive({ codexHome, scope: "all", outputDirectory, exportProfile: "readable", performanceProfilePath: profilePath }),
+    (error) => error?.code === expectedCode,
+  );
+  assert.equal(await sha256File(protectedSessionIndex), protectedSessionIndexHash, "a rejected performance profile must not change the session index");
+  const profileParentEntries = await fs.readdir(path.dirname(profilePath));
+  assert.equal(profileParentEntries.some((name) => name.startsWith(`${path.basename(profilePath)}.partial-`)), false, "a rejected performance profile must not leave partial files");
+}
+
+await assertSessionIndexProfileRejected(protectedSessionIndex, "profile-exact-index-output");
+await assertSessionIndexProfileRejected(path.join(codexHome, "sessions", "..", "session_index.jsonl"), "profile-canonical-index-output");
+
+const sessionIndexHardlink = path.join(temp, "session-index-hardlink.jsonl");
+await fs.link(protectedSessionIndex, sessionIndexHardlink);
+await assertSessionIndexProfileRejected(sessionIndexHardlink, "profile-index-hardlink-output");
+
+const sessionIndexAliasParent = path.join(temp, "session-index-alias-home");
+try {
+  await fs.symlink(codexHome, sessionIndexAliasParent, process.platform === "win32" ? "junction" : "dir");
+  await assertSessionIndexProfileRejected(path.join(sessionIndexAliasParent, "session_index.jsonl"), "profile-index-alias-output", "UNSAFE_EXPORT_PATH");
+} catch (error) {
+  if (!["EPERM", "EACCES", "ENOSYS", "EINVAL"].includes(error?.code)) throw error;
+}
+
+const profileOutputCollision = path.join(temp, "profile-output-collision");
+await assert.rejects(
+  () => exportArchive({ codexHome, scope: "all", outputDirectory: profileOutputCollision, exportProfile: "readable", performanceProfilePath: path.join(profileOutputCollision, "manifest.json") }),
+  (error) => error?.code === "UNSAFE_EXPORT_PATH",
+);
+assert.equal(await sha256File(protectedSessionIndex), protectedSessionIndexHash, "an output-overlapping performance profile must not change the session index");
+assert.equal((await fs.readdir(profileOutputCollision)).some((name) => name.startsWith("manifest.json.partial-")), false, "an output-overlapping performance profile must not leave profile partials");
+assert.equal("performance_profile_version" in JSON.parse(await fs.readFile(path.join(profileOutputCollision, "manifest.json"), "utf8")), false, "an output-overlapping profile must not replace the generated manifest");
 
 async function assertAliasedOutputRejected({ aliasPath, outputPath, realOutputPath, type }) {
   try {
