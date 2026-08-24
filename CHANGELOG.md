@@ -9,6 +9,12 @@ All notable changes to this project are documented here.
 - Raised the exporter minimum runtime to Node.js 22 and the experimental extension minimum to Visual Studio Code 1.101. Exporter 0.2.x remains the final line for older Node.js versions; Node.js 18 and 20 are no longer tested.
 - Added the bounded streaming JSONL foundation for processing large string values without materializing complete records.
 - Integrated the bounded reader into the shared CLI and VS Code export core, with committed-record projections, incremental attachment hashing, differential legacy-reference tests, and fail-closed invalid-input handling.
+- Added an export-local, SHA-256-addressed asset store with deterministic schema-1 usage manifests, bounded type validation, Markdown and HTML links, and aggregate root-manifest fields.
+
+### Security
+
+- Added a target-filesystem hard-link capability probe before session reads; asset publication has no overwrite or copy fallback.
+- Unknown, active, truncated, or MIME-spoofed attachments are preserved as non-renderable `.bin` files, and existing targets are rehashed and type-checked before reuse.
 
 ## 0.2.0 – 2026-08-20
 

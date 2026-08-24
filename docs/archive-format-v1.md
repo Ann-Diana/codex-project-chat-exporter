@@ -8,6 +8,7 @@ An export can contain:
 
 - canonical raw JSONL snapshots in `raw/`;
 - classified Markdown reading views in `md/` or `markdown/`;
+- deduplicated decoded embedded attachments and their usage manifest in `assets/`;
 - `index.html` and `index.md` for navigation;
 - `manifest.json` for export and source-mapping metadata;
 - `README.txt` with a local summary.
@@ -18,7 +19,7 @@ When raw export is disabled, the export contains no new canonical session bytes.
 
 ## Generation completion marker
 
-`EXPORT_INCOMPLETE.txt` invalidates the entire export generation while it exists. In that state, `manifest.json`, `index.html`, and `index.md` are not valid descriptions or reading views of the current files, even if they are present and individually well formed.
+`EXPORT_INCOMPLETE.txt` invalidates the entire export generation while it exists. In that state, `manifest.json`, `assets/manifest.json`, `index.html`, and `index.md` are not valid descriptions or reading views of the current files, even if they are present and individually well formed.
 
 The exporter creates the marker before changing files from an existing generation. It publishes and verifies the new manifest before removing the run-owned marker. Marker removal is the generation commit point. A failed or interrupted export leaves the marker in place; it does not claim that the previous generation was restored.
 
@@ -36,7 +37,11 @@ The manifest describes archive membership and source mapping. It is not an authe
   "canonical_representation": "raw_jsonl",
   "canonical_representation_included": true,
   "export_profile": "complete",
-  "formats": { "raw": true, "markdown": true, "html": true, "docx": false, "pdf": false, "attachments": false }
+  "formats": { "raw": true, "markdown": true, "html": true, "docx": false, "pdf": false, "attachments": true },
+  "assets_manifest": "assets/manifest.json",
+  "asset_occurrences": 2,
+  "unique_assets": 1,
+  "unique_asset_bytes": 68
 }
 ```
 
@@ -46,13 +51,33 @@ Relevant top-level fields include:
 - `canonical_representation`: currently `raw_jsonl`.
 - `canonical_representation_included`: whether this export contains the canonical Raw JSONL snapshots.
 - `export_profile`: `complete`, `readable`, or `source-snapshots`.
-- `formats`: explicit current and reserved format flags. Word, PDF, and extracted attachments remain false and are not selectable.
+- `formats`: explicit current and reserved format flags. Deduplicated embedded attachments are always enabled; Word and PDF remain false and are not selectable.
 - `generated_at`: export timestamp.
 - `codex_home`, `sessions_dir`, `archived_sessions_dir`, and `session_index`: local diagnostic paths.
 - `path_style`: `short` or `readable`.
+- `assets_manifest`: the canonical export-relative `assets/manifest.json` path.
+- `asset_occurrences`, `unique_assets`, and `unique_asset_bytes`: aggregate decoded-asset counts and unique-byte volume. `deduplicated_asset_bytes_saved` additionally reports repeated occurrence bytes not stored again.
 - `sessions`: ordered exported-session metadata.
 
 Top-level absolute paths are local diagnostics. They are not needed to reconstruct the portable source mapping and are not share-safe.
+
+## Asset manifest schema 1
+
+Every profile includes `assets/manifest.json`, even when no embedded attachments occur. Its stable header is:
+
+```json
+{
+  "schema_version": 1,
+  "hash_algorithm": "sha256",
+  "assets": []
+}
+```
+
+Each unique decoded byte sequence appears once as `assets/<lowercase-sha256>.<validated-extension>`. The asset entry records the SHA-256, path, canonical MIME type, validated extension, byte count, renderability, and every ordered use. A use contains only the export-internal session ID, record ordinal, attachment ordinal, and optionally a syntactically bounded declared MIME type plus mismatch flag. Duplicate uses remain duplicate. Asset entries are sorted by SHA-256; uses retain export order; JSON ends with one newline.
+
+PNG, JPEG, GIF, and WebP require bounded decoded-header validation. Other bytes, SVG, HTML, truncated signatures, and MIME spoofing are retained as non-renderable `.bin` with `application/octet-stream`. Declared MIME never determines a filename or renderability. Local and remote references are not copied or downloaded.
+
+The exporter probes exclusive hard-link publication inside the target filesystem before opening session streams. Asset files are never overwritten. An authorized existing target is reused only after regular-file, identity, size, SHA-256, and validated-type checks. `assets/manifest.json` is published only after all records, assets, uses, and final validations succeed. See [the asset-store contract](asset-store.md) for the complete publication and cleanup rules.
 
 ## Portable source mapping
 
@@ -185,14 +210,14 @@ Reasoning, internal events, invalid JSON lines, and other event types remain ava
 
 `index.html` and, where present, `index.md` provide metadata navigation. Complete and Readable HTML indexes filter project, title, date, model, and storage status; they are not transcript full-text search engines.
 
-The `source-snapshots` profile intentionally omits Markdown transcripts and `index.md`. Its HTML metadata index links only to Raw snapshots checked at export time and does not imply that event classification was performed; classification-derived counters are `null` in that profile.
+The `source-snapshots` profile intentionally omits Markdown transcripts and `index.md`. Its reduced HTML metadata index links to Raw snapshots checked at export time and to any extracted assets, but it does not imply that event classification was performed; classification-derived counters are `null` in that profile.
 
 ## Import boundary
 
-Version 1 prepares portable preservation metadata but implements no import command and has no validated Codex roundtrip. It does not promise reconstruction of Codex UI state, indexes, project registration, sidebar history, attachment files, or future compatibility with Codex's internal format.
+Version 1 prepares portable preservation metadata but implements no import command and has no validated Codex roundtrip. It does not promise reconstruction of Codex UI state, indexes, project registration, sidebar history, Codex-native attachment registration, or future compatibility with Codex's internal format.
 
 A future importer must reject any generation containing `EXPORT_INCOMPLETE.txt` before reading its manifest. For a completed generation, it must use canonical raw JSONL and validated manifest mapping, hash every current Raw file again, compare that digest with `raw_sha256`, and reject any mismatch before consuming the file. It must also avoid overwriting an existing local session unless a separately designed, explicit conflict policy proves that action safe. Markdown or HTML alone is insufficient. Neither the format version, a stored hash, nor portable source mapping establishes import capability, permanent tamper resistance, sealing, or restore readiness.
 
 ## Privacy boundary
 
-Raw JSONL, Markdown, HTML, and `manifest.json` can contain confidential chats, local paths, runtime contexts, tool data, source code, identifiers, and attachment data or references. Absolute diagnostic paths must be removed from any separately designed share-safe derivative. No current export format should be published without manual privacy review.
+Raw JSONL, Markdown, HTML, both manifests, and decoded files below `assets/` can contain confidential chats, local paths, runtime contexts, tool data, source code, identifiers, and attachment data or references. Absolute diagnostic paths must be removed from any separately designed share-safe derivative. No current export format should be published without manual privacy review.

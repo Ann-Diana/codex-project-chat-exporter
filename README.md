@@ -21,6 +21,7 @@ Core behavior:
 - All detected sessions or only one matching project/work folder.
 - Markdown reading views distinguish direct user turns, assistant responses, subagent inputs, automatic runtime contexts, and unclassified user-role records. Canonical Raw events remain unchanged.
 - A filterable local HTML index and a machine-readable manifest.
+- A per-export content-addressed `assets/` store for decoded embedded attachments, with one file per unique SHA-256 and a complete usage manifest.
 - Optional byte-preserving raw JSONL snapshots with an export-time SHA-256 verification.
 - Recorded tool-call inputs and outputs can optionally be included in Markdown transcripts.
 - Short Windows-friendly paths by default, with a readable-path option.
@@ -54,7 +55,7 @@ If Windows blocks the launcher, see the [FAQ](FAQ.md#windows-blocks-the-cmd-laun
 
 The launcher and CLI do not require administrator rights. Exporter 0.3.0 requires Node.js 22 or newer; the Windows launcher can also use one known bundled Codex Desktop Node runtime when that runtime meets the same requirement. Exporter 0.2.x is the final line for older Node.js versions, and Node.js 18 and 20 are no longer in the supported test matrix.
 
-Exporter 0.3.0 uses a bounded streaming JSONL reader for CLI and Visual Studio Code exports. Embedded Base64 images are decoded and hashed incrementally instead of being rebuilt as complete strings or buffers. Invalid or truncated session records fail the export before a completed manifest is published; remote image references are never downloaded.
+Exporter 0.3.0 uses a bounded streaming JSONL reader for CLI and Visual Studio Code exports. Embedded Base64 images are decoded, hashed, and written incrementally instead of being rebuilt as complete strings or buffers. Safe raster headers are linked from Markdown and HTML; unknown, active, or spoofed content is retained as a non-renderable `.bin` link. Invalid or truncated session records fail the export before a completed manifest is published; remote image references are never downloaded.
 
 ## CLI quick start
 
@@ -72,9 +73,9 @@ node .\bin\export-codex-project-chats.mjs --project my-project --out C:\cx\my-pr
 
 Choose one profile:
 
-- **Complete** (`--profile complete`, default): `raw/` checked at export time, Markdown transcripts in `md/`, `index.html`, `index.md`, `manifest.json`, and `README.txt`.
-- **Readable** (`--profile readable`): Markdown transcripts and both indexes plus `manifest.json` and `README.txt`, without new Raw snapshots.
-- **Source snapshots** (`--profile source-snapshots`): `raw/` checked at export time, a reduced `index.html`, `manifest.json`, and `README.txt`, without Markdown transcripts or `index.md`.
+- **Complete** (`--profile complete`, default): `raw/` checked at export time, deduplicated `assets/`, Markdown transcripts in `md/`, `index.html`, `index.md`, `manifest.json`, and `README.txt`.
+- **Readable** (`--profile readable`): deduplicated `assets/`, Markdown transcripts and both indexes plus `manifest.json` and `README.txt`, without new Raw snapshots.
+- **Source snapshots** (`--profile source-snapshots`): `raw/` checked at export time, deduplicated `assets/`, a reduced `index.html`, `manifest.json`, and `README.txt`, without Markdown transcripts or `index.md`.
 
 Use **Readable** for browsing and searching exported transcripts. **Complete** and **Source snapshots** can be substantially larger and slower because they copy Raw JSONL and verify it with SHA-256.
 
@@ -98,6 +99,9 @@ cx-YYYYMMDD-HHMMSS\
 ├─ index.md
 ├─ manifest.json
 ├─ README.txt
+├─ assets\
+│  ├─ <sha256>.<validated-extension>
+│  └─ manifest.json
 ├─ md\
 │  ├─ p001-project-a\s0001.md
 │  └─ p002-project-b\s0002.md
@@ -108,7 +112,7 @@ cx-YYYYMMDD-HHMMSS\
 
 `raw/` is omitted when raw export is disabled and the destination is new and empty. Reusing an output folder does not delete older files, so use a new empty destination for a clean result.
 
-Future Word, PDF, and extracted-attachment formats are not implemented or selectable.
+Future Word and PDF formats are not implemented or selectable.
 
 Readable-path exports use `markdown/` and longer timestamp/title-based filenames. Short paths remain the safer default for copying and unzipping on Windows.
 
@@ -121,7 +125,7 @@ When included, raw JSONL is the canonical byte-preserving representation. `raw_c
 - The application sends no telemetry, performs no built-in upload, and makes no application-level HTTP, web, or API calls.
 - Configured filesystem paths can still point to network-backed storage. Mapped network drives cannot be identified reliably in every configuration.
 - Markdown masking covers only some common token-shaped secrets and long base64-like values; it is best effort, not complete redaction.
-- Markdown, raw JSONL, HTML, and `manifest.json` can contain confidential chats, local paths, names, runtime contexts, tool output, source code, and attachment data or references.
+- Markdown, raw JSONL, HTML, both manifests, and files below `assets/` can contain confidential chats, local paths, names, runtime contexts, tool output, source code, and attachment data or references.
 - Raw JSONL and the manifest are not share-safe by default.
 - Review every generated file manually before sharing it.
 
@@ -135,7 +139,7 @@ The exporter does not:
 - export ordinary ChatGPT web conversations;
 - import sessions or rebuild Codex UI state, indexes, project registration, or sidebar history;
 - provide transcript full-text search inside `index.html`;
-- extract image attachments into separate files;
+- fetch or copy remote and local-path attachment references (only embedded payloads are decoded into `assets/`);
 - guarantee complete secret or personal-data removal;
 - guarantee compatibility with future changes to Codex's internal JSONL format.
 
@@ -159,6 +163,7 @@ Installation, settings, limitations, and packaged-candidate checks are documente
 
 - [FAQ](FAQ.md) – launcher troubleshooting, session discovery, privacy, and operational details.
 - [Archive format v1](docs/archive-format-v1.md) – canonical data, manifest, snapshots, classification, and import limits.
+- [Deduplicated asset store](docs/asset-store.md) – type allowlist, manifest schema, publication, links, and failure behavior.
 - [Packaged VSIX test plan](integrations/vscode/PACKAGED_TEST_PLAN.md) – installation and manual Extension Host checks.
 - [Tests](tests) – synthetic helper, classification, integration, and adapter coverage.
 - [Changelog](CHANGELOG.md) – release history.

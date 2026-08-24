@@ -180,7 +180,7 @@ Search transcript content in the exported Markdown files with your editor, opera
 
 ## Are image attachments exported?
 
-The reading views export textual direct-user, assistant, subagent, runtime-context, and unclassified user-role records. They do not extract embedded images or copy attachment files. When raw export is enabled, the canonical JSONL snapshot still preserves whatever attachment data or references existed in the source events.
+Embedded Base64 attachments are decoded into the export-local deduplicated `assets/` store. PNG, JPEG, GIF, and WebP content that passes bounded header validation is rendered through relative Markdown and HTML links. Unknown, truncated, SVG, HTML, or MIME-spoofed content is retained as a non-renderable `.bin` link. Local-path and remote references are not copied or downloaded. When Raw export is enabled, canonical JSONL still preserves the original attachment representation.
 
 ## Can this restore sessions into Codex on another computer?
 

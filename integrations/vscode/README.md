@@ -6,7 +6,7 @@ The exporter remains IDE-agnostic. The extension only provides native VS Code co
 
 Exporter 0.3.0 requires Node.js 22 or newer. The extension requires Visual Studio Code 1.101 or newer. Exporter 0.2.x remains the final line for older Node.js versions; Node.js 18 and 20 are no longer part of the supported test matrix.
 
-The extension and CLI use the same productive bounded JSONL reader. Embedded Base64 images are streamed and hashed with fixed-size blocks; invalid or incomplete session records fail closed, and remote image references are not fetched.
+The extension and CLI use the same productive bounded JSONL reader and deduplicated asset store. Embedded Base64 images are streamed, hashed, and written with bounded blocks; validated raster assets use relative reading-view links, unsafe or unknown types remain non-renderable files, invalid records fail closed, and remote references are not fetched.
 
 Unlike Codex's native TUI `/export`, the extension can export the current VS Code workspace or all detected local sessions through a native VS Code workflow.
 
@@ -46,9 +46,9 @@ code --install-extension "C:\path\to\codex-project-chat-exporter-vscode-0.1.3.vs
 
 ## Export profiles
 
-- **Complete export** creates Markdown reading views, indexes, a manifest, and Raw snapshots verified at export time.
-- **Readable export** creates Markdown reading views, indexes, and a manifest without new Raw snapshots.
-- **Source snapshots** creates Raw snapshots verified at export time, a reduced HTML index, and a manifest without Markdown transcripts.
+- **Complete export** creates deduplicated assets, Markdown reading views, indexes, manifests, and Raw snapshots verified at export time.
+- **Readable export** creates deduplicated assets, Markdown reading views, indexes, and manifests without new Raw snapshots.
+- **Source snapshots** creates deduplicated assets, Raw snapshots verified at export time, a reduced HTML index, and manifests without Markdown transcripts.
 
 ## Settings
 
@@ -64,7 +64,7 @@ Output Directory and Codex Home must be local absolute paths and must be configu
 
 All processing stays on the machine running the extension. The extension adds no telemetry or built-in upload and works only in trusted local VS Code Desktop windows.
 
-Exports can contain sensitive chats, local paths, runtime contexts, tool output, and attachment data or references. Raw JSONL and `manifest.json` are not share-safe by default. The output channel also shows local export paths.
+Exports can contain sensitive chats, local paths, runtime contexts, tool output, decoded asset files, and attachment data or references. Raw JSONL, both manifests, and `assets/` are not share-safe by default. The output channel also shows local export paths.
 
 Raw hashes verify snapshots at export time only. Raw files remain mutable and must be hashed again before any later integrity-sensitive use. See the [FAQ](https://github.com/Ann-Diana/codex-project-chat-exporter/blob/main/FAQ.md), [security policy](https://github.com/Ann-Diana/codex-project-chat-exporter/blob/main/SECURITY.md), and [archive format specification](https://github.com/Ann-Diana/codex-project-chat-exporter/blob/main/docs/archive-format-v1.md) for details.
 

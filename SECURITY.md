@@ -14,6 +14,9 @@ The required invariants are:
 - source and output remain separate across canonical paths and supported link/alias checks;
 - temporary files are unique to and verifiably owned by the current run;
 - cleanup removes only files proven to belong to that run;
+- the target filesystem passes an in-place exclusive hard-link identity/content probe before session streams are opened;
+- decoded asset filenames and types come only from decoded SHA-256 and a bounded internal raster allowlist; unknown or active content is never rendered automatically;
+- existing asset targets are rehashed, size/type checked, and never overwritten;
 - invocation contexts never mix, and concurrent exports to one destination are rejected;
 - source changes cause a retry or fail-closed error;
 - `raw_sha256` and `raw_verified_at` describe verification only at export time;
@@ -33,7 +36,7 @@ Active filesystem races by another process running under the same user account a
 
 ## Redaction limits
 
-Markdown applies best-effort masking for some token shapes and long base64-like values. It can miss names, paths, addresses, customer data, source code, proprietary text, and credentials. Raw JSONL is byte-preserving and unredacted. Raw files and manifests are not share-safe.
+Markdown applies best-effort masking for some token shapes and long base64-like values. It can miss names, paths, addresses, customer data, source code, proprietary text, and credentials. Raw JSONL is byte-preserving and unredacted. Decoded assets preserve their original bytes. Raw files, both manifests, and `assets/` are not share-safe.
 
 ## Safe use
 

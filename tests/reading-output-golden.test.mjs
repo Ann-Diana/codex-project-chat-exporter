@@ -83,9 +83,16 @@ async function captureGolden(outputDir, codexHome, fixturePaths) {
     textSha256[relative] = createHash("sha256").update(normalized).digest("hex");
   }
   const normalizedHtml = replaceExact(await fs.readFile(path.join(outputDir, "index.html"), "utf8"), replacements);
+  const assetManifest = JSON.parse(await fs.readFile(path.join(outputDir, "assets", "manifest.json"), "utf8"));
+  const assetSha256 = {};
+  for (const relative of files.filter((file) => file.startsWith("assets/") && file !== "assets/manifest.json")) {
+    assetSha256[relative] = createHash("sha256").update(await fs.readFile(path.join(outputDir, relative))).digest("hex");
+  }
   return {
     files,
     manifest: normalizeManifest(manifest, replacements),
+    asset_manifest: assetManifest,
+    asset_sha256: assetSha256,
     index_html_sha256: createHash("sha256").update(normalizedHtml).digest("hex"),
     text_sha256: textSha256,
   };
@@ -134,6 +141,16 @@ test("version 0.3.0 reference and streaming readers preserve all profile golden 
       assert.equal(await pathExists(path.join(outputDir, INCOMPLETE_MARKER_NAME)), false);
       assert.equal(await pathExists(path.join(outputDir, "manifest.json")), true);
       assert.equal(await pathExists(path.join(outputDir, "index.html")), true);
+      assert.equal(manifest.assets_manifest, "assets/manifest.json");
+      assert.equal(manifest.asset_occurrences, 2);
+      assert.equal(manifest.unique_assets, 1);
+      assert.equal(manifest.unique_asset_bytes, Buffer.from(SMALL_PNG_DATA_URL.slice(SMALL_PNG_DATA_URL.indexOf(",") + 1), "base64").length);
+      assert.equal(manifest.formats.attachments, true);
+      const assetManifest = JSON.parse(await fs.readFile(path.join(outputDir, manifest.assets_manifest), "utf8"));
+      assert.equal(assetManifest.assets.length, 1);
+      assert.equal(assetManifest.assets[0].uses.length, 2);
+      assert.equal(assetManifest.assets[0].renderable, true);
+      assert.equal(assetManifest.assets[0].extension, "png");
 
       if (profile === "complete" || profile === "readable") {
         assert.equal(await pathExists(path.join(outputDir, "index.md")), true);
@@ -149,16 +166,19 @@ test("version 0.3.0 reference and streaming readers preserve all profile golden 
         ]);
         assert.match(subagentMarkdown, /<summary>Subagent input \/ parent-agent handoff/);
         assert.equal(activeMarkdown.includes(SMALL_PNG_DATA_URL), false, "the current reading view must not inline the embedded image payload");
+        assert.match(activeMarkdown, /!\[Attachment 1\]\(\.\.\/\.\.\/assets\/[0-9a-f]{64}\.png\)/);
         const markdownIndex = await fs.readFile(path.join(outputDir, "index.md"), "utf8");
         const htmlIndex = await fs.readFile(path.join(outputDir, "index.html"), "utf8");
         assert.ok(markdownIndex.includes(portable(active.markdown_file)));
         assert.ok(htmlIndex.includes(`href="${portable(active.markdown_file)}"`));
+        assert.match(htmlIndex, /<img src="assets\/[0-9a-f]{64}\.png" alt="Attachment 1" loading="lazy">/);
       } else {
         assert.equal(await pathExists(path.join(outputDir, "index.md")), false);
         assert.ok(manifest.sessions.every((session) => session.markdown_file === ""));
         assert.ok(manifest.sessions.every((session) => session.user_messages === null));
         const htmlIndex = await fs.readFile(path.join(outputDir, "index.html"), "utf8");
         assert.ok(htmlIndex.includes("Source snapshots intentionally use a reduced index and do not inspect complete readable metadata."));
+        assert.match(htmlIndex, /<img src="assets\/[0-9a-f]{64}\.png" alt="Attachment 1" loading="lazy">/);
       }
 
       if (profile === "complete" || profile === "source-snapshots") {

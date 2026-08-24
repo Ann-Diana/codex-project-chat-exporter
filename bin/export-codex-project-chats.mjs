@@ -15,6 +15,12 @@ import {
   isAttachmentDescriptor,
   streamSessionRecords,
 } from "../lib/session-record-reader.mjs";
+import {
+  ASSET_EXTENSIONS,
+  AssetStoreError,
+  DeduplicatedAssetStore,
+  probeHardLinkSupport,
+} from "../lib/asset-store.mjs";
 
 const VERSION = "0.3.0";
 const ARCHIVE_FORMAT_VERSION = 1;
@@ -34,7 +40,8 @@ const RAW_COPY_STATUS = Object.freeze({
 });
 const INCOMPLETE_MARKER_NAME = "EXPORT_INCOMPLETE.txt";
 const GENERATION_ROOT_FILES = Object.freeze(["manifest.json", "README.txt", "index.html", "index.md"]);
-const FUTURE_EXPORT_FORMATS = Object.freeze({ docx: false, pdf: false, attachments: false });
+const ASSET_MANIFEST_PATH = "assets/manifest.json";
+const ADDITIONAL_EXPORT_FORMATS = Object.freeze({ docx: false, pdf: false, attachments: true });
 const MIRRORED_USER_EVENT_MAX_DELAY_MS = 100;
 const attachmentSequenceHashes = new WeakMap();
 const USER_RECORD_KIND = Object.freeze({
@@ -135,6 +142,7 @@ async function exportArchive(options = {}) {
     onDiagnostic: options.onDiagnostic,
     readerImplementation: options._readerImplementation,
     readerOptions: options._readerOptions,
+    assetStoreOptions: options._assetStoreOptions,
   });
   return runCommand(context, { print: false });
 }
@@ -173,7 +181,7 @@ function createExportContext(args = {}, cwd = process.cwd(), runtimeOptions = {}
   const projectFilter = args.project || "";
   const exportAll = args.all || !projectFilter;
   const exportProfile = resolveExportProfile(args.profile, Boolean(args["no-raw"]));
-  const exportFormats = Object.freeze({ ...EXPORT_PROFILES[exportProfile], ...FUTURE_EXPORT_FORMATS });
+  const exportFormats = Object.freeze({ ...EXPORT_PROFILES[exportProfile], ...ADDITIONAL_EXPORT_FORMATS });
   return Object.freeze({
     args: Object.freeze({ ...args }),
     codexHome,
@@ -202,6 +210,7 @@ function createExportContext(args = {}, cwd = process.cwd(), runtimeOptions = {}
     diagnosticReporter: createDiagnosticReporter(runtimeOptions.onDiagnostic),
     readerImplementation: runtimeOptions.readerImplementation || SESSION_READER_IMPLEMENTATION.STREAMING,
     readerOptions: runtimeOptions.readerOptions || Object.freeze({}),
+    assetStoreOptions: runtimeOptions.assetStoreOptions || Object.freeze({}),
   });
 }
 
@@ -334,6 +343,11 @@ async function runCommandInternal(context, { print, profiler, runState }) {
   files.sort((a, b) => a.file.localeCompare(b.file));
   const sourceProtection = await createSourceProtection(files, locations, [sessionIndexPath]);
   runState.sourceProtection = sourceProtection;
+  if (!listOnly && !listSessionsOnly && !diagnoseOnly) {
+    await assertSeparatedExportRoot(outputDir, locations.map((location) => location.root));
+    await ensureSeparatedOutputDirectory(outputDir, sourceProtection);
+    await probeHardLinkSupport(outputDir, { io: context.assetStoreOptions.preflightIo });
+  }
   const titleIndex = await readSessionIndex(sessionIndexPath, profiler);
   profiler?.addPhase("session_discovery_and_metadata", performance.now() - discoveryStart);
   runtimeTimings.discovery_ms = roundMs(performance.now() - discoveryStart);
@@ -418,6 +432,7 @@ async function runCommandInternal(context, { print, profiler, runState }) {
   await assertSeparatedExportRoot(outputDir, locations.map((location) => location.root));
   await ensureSeparatedOutputDirectory(outputDir, sourceProtection);
   const exportLock = await acquireExportLock(outputDir, sourceProtection);
+  let assetStore = null;
   try {
   const projectDirs = new Map();
   const tasks = selected.map((meta, selectedIndex) => {
@@ -426,9 +441,9 @@ async function runCommandInternal(context, { print, profiler, runState }) {
     const sourceOriginalFilename = path.basename(meta.file);
     const rawExportName = pathStyle === "readable" ? `${sessionCode}-${sourceOriginalFilename}` : `${sessionCode}.jsonl`;
     const rawRel = path.join("raw", projectDir, rawExportName);
-    return { meta, projectDir, sessionCode, sourceOriginalFilename, rawExportName, rawRel, snapshot: null, parsedSnapshotMeta: null, metadataAlreadyParsed: needsCompleteInventory };
+    return { meta, projectDir, sessionCode, sourceOriginalFilename, rawExportName, rawRel, snapshot: null, assetSnapshot: null, parsedSnapshotMeta: null, metadataAlreadyParsed: needsCompleteInventory };
   });
-  const plannedPaths = ["manifest.json", "README.txt"];
+  const plannedPaths = ["manifest.json", "README.txt", ASSET_MANIFEST_PATH];
   if (exportFormats.html) plannedPaths.push("index.html");
   if (exportFormats.markdown) plannedPaths.push("index.md");
   if (copyRaw) plannedPaths.push(...tasks.map((task) => task.rawRel));
@@ -436,6 +451,14 @@ async function runCommandInternal(context, { print, profiler, runState }) {
 
   if (exportFormats.markdown) await ensureSeparatedOutputDirectory(path.join(outputDir, markdownDirName), sourceProtection);
   if (copyRaw) await ensureSeparatedOutputDirectory(path.join(outputDir, "raw"), sourceProtection);
+  await ensureSeparatedOutputDirectory(path.join(outputDir, "assets"), sourceProtection);
+  assetStore = await DeduplicatedAssetStore.create({
+    assetRoot: path.join(outputDir, "assets"),
+    exportRoot: outputDir,
+    assertDestination: (destinationPath) => assertGenerationDestinationWritable(destinationPath, generation),
+    publishManifest: (content) => writeSeparatedOutputFile(path.join(outputDir, ASSET_MANIFEST_PATH), sourceProtection, (handle) => handle.writeFile(content, "utf8"), generation),
+    io: context.assetStoreOptions.io,
+  });
 
   const snapshotsStartedAt = performance.now();
   if (copyRaw) progressReporter({ phase: "snapshot", message: "Verifying source snapshots" });
@@ -500,25 +523,40 @@ async function runCommandInternal(context, { print, profiler, runState }) {
   }
   runtimeTimings.snapshots_ms = roundMs(performance.now() - snapshotsStartedAt);
 
+  progressReporter({ phase: "assets", message: "Collecting deduplicated assets" });
+  const assetsStartedAt = performance.now();
+  diagnosticReporter("assets_start", { sessions: tasks.length });
+  for (const task of tasks) {
+    const parsePath = copyRaw ? path.join(outputDir, task.rawRel) : task.meta.file;
+    task.assetSnapshot = await collectSessionAssets(parsePath, task.meta.id || task.meta.session_id, assetStore, context.readerImplementation, context.readerOptions);
+    const expectedSha256 = copyRaw ? task.snapshot?.sha256 : task.meta.fileSha256;
+    if (expectedSha256 && task.assetSnapshot.sha256 !== expectedSha256) throw new ExportError("SOURCE_CHANGED_DURING_EXPORT", "Session content changed before its assets were collected");
+  }
+  runtimeTimings.assets_ms = roundMs(performance.now() - assetsStartedAt);
+  profiler?.addPhase("assets", performance.now() - assetsStartedAt);
+  diagnosticReporter("assets_end", { duration_ms: runtimeTimings.assets_ms, sessions: tasks.length });
+
   if (exportFormats.markdown) progressReporter({ phase: "rendering", message: "Rendering reading views" });
   const processingStartedAt = performance.now();
   const rows = [];
-  for (const task of tasks) rows.push(await processExportTask(task, titleIndex, profiler, context, sourceProtection, generation));
+  for (const task of tasks) rows.push(await processExportTask(task, titleIndex, profiler, context, sourceProtection, generation, assetStore));
   runtimeTimings.processing_ms = roundMs(performance.now() - processingStartedAt);
+
+  const assetPublication = await assetStore.publish();
 
   progressReporter({ phase: "writing", message: "Writing indexes and manifest" });
   const indexesManifestStartedAt = performance.now();
   diagnosticReporter("indexes_and_manifest_start");
-  const manifest = await writeIndexFiles(outputDir, rows, profiler, context, sourceProtection, generation);
+  const manifest = await writeIndexFiles(outputDir, rows, profiler, context, sourceProtection, generation, assetPublication.summary, assetStore);
   const summaryStart = performance.now();
   diagnosticReporter("summary_start");
-  await writeSummary(outputDir, rows, context, sourceProtection, generation);
+  await writeSummary(outputDir, rows, context, sourceProtection, generation, assetPublication.summary);
   profiler?.addPhase("other", performance.now() - summaryStart, 0, (await fsp.stat(path.join(outputDir, "README.txt"))).size);
   diagnosticReporter("summary_end", { duration_ms: roundMs(performance.now() - summaryStart) });
   let verificationElapsedMs = 0;
   const contentVerificationStartedAt = performance.now();
   diagnosticReporter("verification_start", { sessions: rows.length });
-  await verifyExport(outputDir, rows, profiler, context, { includeManifest: false });
+  await verifyExport(outputDir, rows, profiler, context, { assetManifest: assetPublication.content, assetStore, includeManifest: false });
   verificationElapsedMs += performance.now() - contentVerificationStartedAt;
   const manifestStart = performance.now();
   diagnosticReporter("manifest_start", { sessions: rows.length });
@@ -528,7 +566,7 @@ async function runCommandInternal(context, { print, profiler, runState }) {
   diagnosticReporter("indexes_and_manifest_end");
   runtimeTimings.indexes_manifest_ms = roundMs(performance.now() - indexesManifestStartedAt);
   const finalVerificationStartedAt = performance.now();
-  await verifyExport(outputDir, rows, profiler, context, { includeManifest: true, expectedManifest: manifest });
+  await verifyExport(outputDir, rows, profiler, context, { assetManifest: assetPublication.content, assetStore, includeManifest: true, expectedManifest: manifest });
   await completeExportGeneration(generation);
   verificationElapsedMs += performance.now() - finalVerificationStartedAt;
   runtimeTimings.verification_ms = roundMs(verificationElapsedMs);
@@ -541,6 +579,8 @@ async function runCommandInternal(context, { print, profiler, runState }) {
     htmlIndexPath: exportFormats.html ? path.join(outputDir, "index.html") : "",
     markdownIndexPath: exportFormats.markdown ? path.join(outputDir, "index.md") : "",
     manifestPath: path.join(outputDir, "manifest.json"),
+    assetManifestPath: path.join(outputDir, ...ASSET_MANIFEST_PATH.split("/")),
+    assetSummary: assetPublication.summary,
     exportProfile,
     formats: { ...exportFormats },
     exportedProjectCount: new Set(rows.map((row) => row.project || "unknown")).size,
@@ -557,6 +597,11 @@ async function runCommandInternal(context, { print, profiler, runState }) {
 
   if (print) printExportResult(result, context);
   return result;
+  } catch (error) {
+    try { await assetStore?.abort(); } catch (cleanupError) {
+      throw new AssetStoreError("ASSET_CLEANUP_ERROR", "Asset cleanup failed while aborting an incomplete export", new AggregateError([error, cleanupError]));
+    }
+    throw error;
   } finally {
     await releaseExportLock(exportLock);
   }
@@ -569,10 +614,12 @@ function printExportResult(result, context) {
   console.log(`Sessions: ${result.exportedSessionCount}`);
   console.log(`Active: ${result.activeSessionCount}`);
   console.log(`Archived: ${result.archivedSessionCount}`);
+  console.log(`Assets: ${result.assetSummary.assetOccurrences} occurrence(s), ${result.assetSummary.uniqueAssets} unique, ${result.assetSummary.uniqueAssetBytes} byte(s)`);
   console.log(`Profile: ${exportProfile}`);
   console.log(`Path style: ${pathStyle}`);
   if (exportFormats.markdown) console.log(`Markdown: ${path.join(result.outputDirectory, markdownDirName)}`);
   if (copyRaw) console.log(`Raw data: ${path.join(result.outputDirectory, "raw")}`);
+  console.log(`Asset data: ${path.join(result.outputDirectory, "assets")}`);
   if (result.htmlIndexPath) console.log(`HTML index: ${result.htmlIndexPath}`);
   if (result.markdownIndexPath) console.log(`Markdown index: ${result.markdownIndexPath}`);
   console.log("");
@@ -581,6 +628,7 @@ function printExportResult(result, context) {
   if (result.htmlIndexPath) nextSteps.push(`Open ${result.htmlIndexPath} to browse the export in your browser.`);
   if (exportFormats.markdown) nextSteps.push(`Spot-check a few files in ${path.join(result.outputDirectory, markdownDirName)}.${result.markdownIndexPath ? ` Markdown users can also open ${result.markdownIndexPath}.` : ""}`);
   if (copyRaw) nextSteps.push("Keep the raw/ folder private.");
+  nextSteps.push("Keep assets/ and both manifests private until they have been reviewed.");
   nextSteps.forEach((step, index) => console.log(`${index + 1}. ${step}`));
 }
 function parseArgs(argv) {
@@ -747,9 +795,24 @@ async function readSessionMeta(file, {
   return meta;
 }
 
-async function processExportTask(task, titleIndex, profiler, context, sourceProtection, generation) {
+async function collectSessionAssets(file, sessionId, assetStore, readerImplementation, readerOptions = {}) {
+  const summary = createSessionReaderSummary();
+  for await (const _record of streamSessionRecords(file, {
+    ...readerOptions,
+    calculateSha256: true,
+    implementation: readerImplementation,
+    summary,
+    onAttachmentStart: (info) => assetStore.beginAttachment(info),
+    onRecordAbort: (recordNumber) => assetStore.abortRecord(recordNumber),
+    beforeRecordCommit: (record, recordNumber) => assetStore.commitRecord(sessionId, recordNumber, record.attachments),
+  })) {}
+  if (!summary.stable) throw new ExportError("SOURCE_CHANGED_DURING_EXPORT", "A session source changed while its assets were collected");
+  return Object.freeze({ sha256: summary.fileSha256, sizeBytes: summary.afterSizeBytes });
+}
+
+async function processExportTask(task, titleIndex, profiler, context, sourceProtection, generation, assetStore) {
   const { exportFormats, copyRaw, outputDir, redactMarkdown, pathStyle, markdownDirName } = context;
-  const { meta, projectDir, sessionCode, sourceOriginalFilename, rawExportName, rawRel, snapshot, parsedSnapshotMeta, metadataAlreadyParsed } = task;
+  const { meta, projectDir, sessionCode, sourceOriginalFilename, rawExportName, rawRel, snapshot, assetSnapshot, parsedSnapshotMeta, metadataAlreadyParsed } = task;
   let renderMeta = meta;
   let stats = { userMessages: 0, assistantMessages: 0, subagentInputs: 0, runtimeContexts: 0, unclassifiedUserRoleRecords: 0, toolEvents: 0, model: meta.model || "", updatedAt: meta.updatedAt || meta.timestamp || "" };
   let markdownRel = "";
@@ -763,9 +826,11 @@ async function processExportTask(task, titleIndex, profiler, context, sourceProt
         fallbackSessionId: meta.id,
         fallbackTimestamp: meta.timestamp,
         collectAttachmentMetrics: Boolean(profiler),
+        calculateSha256: true,
         readerImplementation: context.readerImplementation,
         readerOptions: context.readerOptions,
       });
+      if (!parsedMeta.fileReadStable || parsedMeta.fileSha256 !== assetSnapshot?.sha256) throw new ExportError("SOURCE_CHANGED_DURING_EXPORT", "Session content changed between asset collection and metadata classification");
       const parseMs = performance.now() - parseStart;
       profiler?.addPhase("parse_and_classify", parseMs, parsedMeta.fileSize, 0);
       profiler?.recordSession(meta, copyRaw ? "snapshot_parse_ms" : "selected_parse_ms", parseMs, parsedMeta.fileSize, 0);
@@ -792,7 +857,7 @@ async function processExportTask(task, titleIndex, profiler, context, sourceProt
     markdownRel = path.join(markdownDirName, projectDir, `${baseName}.md`);
     await ensureSeparatedOutputDirectory(path.join(outputDir, markdownDirName, projectDir), sourceProtection);
     profiler?.recordAttachments(renderMeta.attachmentMetrics);
-    stats = await writeMarkdownTranscript(renderMeta, path.join(outputDir, markdownRel), copyRaw ? rawRel : "", profiler, meta, context, sourceProtection, generation);
+    stats = await writeMarkdownTranscript(renderMeta, path.join(outputDir, markdownRel), copyRaw ? rawRel : "", profiler, meta, context, sourceProtection, generation, assetStore, assetSnapshot);
   } else {
     const title = neutralSessionTitle(meta);
     renderMeta = { ...meta, title, displayTitle: title, titleSource: "neutral_unclassified_snapshot", indexedTitleStatus: "NOT_EVALUATED", sessionKind: SESSION_KIND.UNKNOWN };
@@ -846,6 +911,7 @@ async function readAndEnrichSession(entry, titleIndex, profiler, profilePhaseNam
   const parseStart = performance.now();
   const meta = await readSessionMeta(entry.file, {
     collectAttachmentMetrics: Boolean(profiler),
+    calculateSha256: true,
     readerImplementation: context.readerImplementation,
     readerOptions: context.readerOptions,
   });
@@ -1946,6 +2012,7 @@ async function inspectPreviousExportGeneration(outputRoot, sourceProtection) {
       const candidate = await assertSeparatedOutputPath(path.join(outputRoot, name), sourceProtection, { allowMissing: true, requireRegularFile: true, requireReliableIdentity: true });
       if (candidate.exists) throw new ExportError("UNOWNED_EXPORT_FILE", `Refusing to overwrite ${name} because no valid previous manifest assigns it to an exporter generation`);
     }
+    await verifyPreviousAssetDirectoryOwnership(outputRoot, new Map(), sourceProtection);
     return { describedPaths: new Map(), generatedAt: new Date().toISOString(), rawSessions: new Map() };
   }
 
@@ -1960,13 +2027,15 @@ async function inspectPreviousExportGeneration(outputRoot, sourceProtection) {
     throw new ExportError("INVALID_PREVIOUS_MANIFEST", "The previous manifest changed while it was being validated");
   }
 
-  const describedPaths = collectPreviousGenerationPaths(manifest);
+  const assetManifest = await readPreviousAssetManifest(outputRoot, manifest, sourceProtection);
+  const describedPaths = collectPreviousGenerationPaths(manifest, assetManifest);
   for (const name of GENERATION_ROOT_FILES) {
     const candidate = await assertSeparatedOutputPath(path.join(outputRoot, name), sourceProtection, { allowMissing: true, requireRegularFile: true, requireReliableIdentity: true });
     if (candidate.exists && !describedPaths.has(generationPathKey(name))) {
       throw new ExportError("UNOWNED_EXPORT_FILE", `Refusing to reuse ${name} because the previous manifest does not describe it`);
     }
   }
+  await verifyPreviousAssetDirectoryOwnership(outputRoot, describedPaths, sourceProtection);
   const rawSessions = new Map();
   for (const session of manifest.sessions) {
     if (!session.raw_export_file) continue;
@@ -1979,7 +2048,42 @@ async function inspectPreviousExportGeneration(outputRoot, sourceProtection) {
   };
 }
 
-function collectPreviousGenerationPaths(manifest) {
+async function readPreviousAssetManifest(outputRoot, manifest, sourceProtection) {
+  if (manifest.assets_manifest === undefined) return null;
+  const relativePath = validatedGenerationRelativePath(manifest.assets_manifest, "asset_manifest");
+  const manifestPath = path.join(outputRoot, ...relativePath.split("/"));
+  const before = await assertSeparatedOutputPath(manifestPath, sourceProtection, { allowMissing: true, requireRegularFile: true, requireReliableIdentity: true });
+  if (!before.exists) throw new ExportError("INVALID_PREVIOUS_MANIFEST", "The previous root manifest points to a missing asset manifest");
+  let assetManifest;
+  try {
+    assetManifest = JSON.parse(await fsp.readFile(manifestPath, "utf8"));
+  } catch (error) {
+    throw new ExportError("INVALID_PREVIOUS_MANIFEST", `The previous asset manifest is not valid JSON: ${error?.message || error}`);
+  }
+  const after = await assertSeparatedOutputPath(manifestPath, sourceProtection, { requireRegularFile: true, requireReliableIdentity: true });
+  if (!sameReliableFileIdentity(before, after) || !sameFileVersion(before.stat, after.stat)) {
+    throw new ExportError("INVALID_PREVIOUS_MANIFEST", "The previous asset manifest changed while it was being validated");
+  }
+  return assetManifest;
+}
+
+async function verifyPreviousAssetDirectoryOwnership(outputRoot, describedPaths, sourceProtection) {
+  const assetsDirectory = path.join(outputRoot, "assets");
+  const inspected = await inspectSeparatedPath(assetsDirectory, { allowMissing: true, rejectAliases: true, requireDirectory: true, requireReliableIdentity: true });
+  assertSeparatedFromSources(inspected, sourceProtection);
+  if (!inspected.exists) return;
+  const entries = await fsp.readdir(assetsDirectory, { withFileTypes: true });
+  for (const entry of entries) {
+    if (!entry.isFile() || entry.isSymbolicLink()) throw new ExportError("UNOWNED_EXPORT_FILE", `Refusing to reuse an unowned or non-regular assets entry: ${entry.name}`);
+    const relativePath = validatedGenerationRelativePath(`assets/${entry.name}`, entry.name === "manifest.json" ? "asset_manifest" : "asset");
+    if (!describedPaths.has(generationPathKey(relativePath))) throw new ExportError("UNOWNED_EXPORT_FILE", `Refusing to reuse ${relativePath} because the previous manifests do not describe it`);
+    await assertSeparatedOutputPath(path.join(assetsDirectory, entry.name), sourceProtection, { requireRegularFile: true, requireReliableIdentity: true });
+  }
+  const after = await inspectSeparatedPath(assetsDirectory, { rejectAliases: true, requireDirectory: true, requireReliableIdentity: true });
+  if (!sameReliableFileIdentity(inspected, after)) throw new ExportError("UNSAFE_EXPORT_PATH", "The assets directory changed while previous-generation ownership was validated");
+}
+
+function collectPreviousGenerationPaths(manifest, assetManifest = null) {
   if (!manifest || manifest.archive_format_version !== ARCHIVE_FORMAT_VERSION || !Array.isArray(manifest.sessions) || !manifest.formats || typeof manifest.formats !== "object") {
     throw new ExportError("INVALID_PREVIOUS_MANIFEST", "The previous manifest does not match archive format version 1");
   }
@@ -1988,12 +2092,95 @@ function collectPreviousGenerationPaths(manifest) {
   addAuthorizedGenerationPath(authorized, "README.txt", "root");
   if (manifest.formats.html === true) addAuthorizedGenerationPath(authorized, "index.html", "root");
   if (manifest.formats.markdown === true) addAuthorizedGenerationPath(authorized, "index.md", "root");
+  if ((manifest.formats.attachments === true) !== Boolean(assetManifest)) throw new ExportError("INVALID_PREVIOUS_MANIFEST", "The previous root and asset manifest attachment declarations disagree");
+  if (assetManifest) {
+    if (manifest.assets_manifest !== ASSET_MANIFEST_PATH || assetManifest.schema_version !== 1 || assetManifest.hash_algorithm !== "sha256" || !Array.isArray(assetManifest.assets)) {
+      throw new ExportError("INVALID_PREVIOUS_MANIFEST", "The previous asset manifest does not match schema version 1");
+    }
+    addAuthorizedGenerationPath(authorized, ASSET_MANIFEST_PATH, "asset_manifest");
+    const sortedAssetHashes = assetManifest.assets.map((asset) => asset?.sha256);
+    const lexicalAssetHashes = [...sortedAssetHashes].sort((left, right) => String(left) < String(right) ? -1 : String(left) > String(right) ? 1 : 0);
+    if (JSON.stringify(sortedAssetHashes) !== JSON.stringify(lexicalAssetHashes)) throw new ExportError("INVALID_PREVIOUS_MANIFEST", "The previous asset manifest is not sorted by SHA-256");
+    const sessionOrder = new Map();
+    for (let index = 0; index < manifest.sessions.length; index += 1) {
+      const sessionId = manifest.sessions[index]?.session_id;
+      if (typeof sessionId !== "string" || sessionOrder.has(sessionId)) throw new ExportError("INVALID_PREVIOUS_MANIFEST", "The previous manifest cannot establish a unique asset session order");
+      sessionOrder.set(sessionId, index);
+    }
+    for (const asset of assetManifest.assets) {
+      if (!isValidPreviousAssetEntry(asset, sessionOrder)) throw new ExportError("INVALID_PREVIOUS_MANIFEST", "The previous asset manifest contains an invalid asset record");
+      addAuthorizedGenerationPath(authorized, asset.path, "asset");
+    }
+    const occurrences = assetManifest.assets.reduce((sum, asset) => sum + asset.uses.length, 0);
+    const uniqueBytes = assetManifest.assets.reduce((sum, asset) => sum + asset.bytes, 0);
+    const occurrenceBytes = assetManifest.assets.reduce((sum, asset) => sum + asset.bytes * asset.uses.length, 0);
+    if (manifest.asset_occurrences !== occurrences || manifest.unique_assets !== assetManifest.assets.length || manifest.unique_asset_bytes !== uniqueBytes || manifest.deduplicated_asset_bytes_saved !== occurrenceBytes - uniqueBytes) {
+      throw new ExportError("INVALID_PREVIOUS_MANIFEST", "The previous root manifest asset summaries do not match its asset manifest");
+    }
+  }
   for (const session of manifest.sessions) {
     if (!session || typeof session !== "object") throw new ExportError("INVALID_PREVIOUS_MANIFEST", "The previous manifest contains an invalid session record");
     if (session.raw_export_file) addAuthorizedGenerationPath(authorized, session.raw_export_file, "raw");
     if (session.markdown_file) addAuthorizedGenerationPath(authorized, session.markdown_file, "markdown");
   }
   return authorized;
+}
+
+function isValidPreviousAssetEntry(asset, sessionOrder) {
+  if (!asset || typeof asset !== "object" || !isLowerHexSha256Text(asset.sha256) || !ASSET_EXTENSIONS.includes(asset.extension)) return false;
+  if (asset.path !== `assets/${asset.sha256}.${asset.extension}` || !Number.isSafeInteger(asset.bytes) || asset.bytes < 0 || typeof asset.renderable !== "boolean" || !Array.isArray(asset.uses)) return false;
+  const expectedMime = { bin: "application/octet-stream", gif: "image/gif", jpg: "image/jpeg", png: "image/png", webp: "image/webp" }[asset.extension];
+  const allowedKeys = new Set(["sha256", "path", "mime_type", "extension", "bytes", "renderable", "uses"]);
+  if (Object.keys(asset).some((key) => !allowedKeys.has(key)) || !asset.uses.every((use) => isValidPreviousAssetUse(use, expectedMime, sessionOrder))) return false;
+  for (let index = 1; index < asset.uses.length; index += 1) {
+    if (compareAssetUses(asset.uses[index - 1], asset.uses[index], sessionOrder) > 0) return false;
+  }
+  return asset.mime_type === expectedMime && asset.renderable === (asset.extension !== "bin");
+}
+
+function isValidPreviousAssetUse(use, canonicalMime, sessionOrder) {
+  if (!use || typeof use !== "object" || !isSafeAssetSessionReference(use.session_id) || !sessionOrder.has(use.session_id) || !Number.isSafeInteger(use.record_ordinal) || use.record_ordinal <= 0 || !Number.isSafeInteger(use.attachment_ordinal) || use.attachment_ordinal <= 0) return false;
+  const hasMime = Object.hasOwn(use, "declared_mime");
+  const allowedKeys = hasMime
+    ? new Set(["attachment_ordinal", "record_ordinal", "session_id", "declared_mime", "mime_mismatch"])
+    : new Set(["attachment_ordinal", "record_ordinal", "session_id"]);
+  if (Object.keys(use).some((key) => !allowedKeys.has(key))) return false;
+  return !hasMime || (isSafeDeclaredMime(use.declared_mime) && use.mime_mismatch === (use.declared_mime !== canonicalMime));
+}
+
+function compareAssetUses(left, right, sessionOrder) {
+  return sessionOrder.get(left.session_id) - sessionOrder.get(right.session_id)
+    || left.record_ordinal - right.record_ordinal
+    || left.attachment_ordinal - right.attachment_ordinal;
+}
+
+function isSafeAssetSessionReference(value) {
+  const text = typeof value === "string" ? value : "";
+  if (!text || text.length > 256 || text !== text.trim()) return false;
+  for (const character of text) {
+    const code = character.charCodeAt(0);
+    if (code < 0x20 || code === 0x7f || "/\\:".includes(character)) return false;
+  }
+  return true;
+}
+
+function isSafeDeclaredMime(value) {
+  if (typeof value !== "string" || !value || value.length > 127 || value !== value.toLowerCase() || value.split("/").length !== 2) return false;
+  for (const character of value) {
+    const code = character.charCodeAt(0);
+    const alphanumeric = (code >= 48 && code <= 57) || (code >= 97 && code <= 122);
+    if (!alphanumeric && !"!#$&^_.+-/".includes(character)) return false;
+  }
+  return true;
+}
+
+function isLowerHexSha256Text(value) {
+  if (typeof value !== "string" || value.length !== 64) return false;
+  for (const character of value) {
+    const code = character.charCodeAt(0);
+    if (!((code >= 48 && code <= 57) || (code >= 97 && code <= 102))) return false;
+  }
+  return true;
 }
 
 function addAuthorizedGenerationPath(authorized, value, kind) {
@@ -2016,10 +2203,19 @@ function validatedGenerationRelativePath(value, kind = "any") {
   const validRoot = GENERATION_ROOT_FILES.includes(normalized);
   const validRaw = normalized.startsWith("raw/") && normalized.toLowerCase().endsWith(".jsonl");
   const validMarkdown = (normalized.startsWith("md/") || normalized.startsWith("markdown/")) && normalized.toLowerCase().endsWith(".md");
-  if ((kind === "root" && !validRoot) || (kind === "raw" && !validRaw) || (kind === "markdown" && !validMarkdown) || (kind === "any" && !validRoot && !validRaw && !validMarkdown)) {
+  const validAssetManifest = normalized === ASSET_MANIFEST_PATH;
+  const validAsset = isCanonicalAssetPath(normalized);
+  if ((kind === "root" && !validRoot) || (kind === "raw" && !validRaw) || (kind === "markdown" && !validMarkdown) || (kind === "asset_manifest" && !validAssetManifest) || (kind === "asset" && !validAsset) || (kind === "any" && !validRoot && !validRaw && !validMarkdown && !validAssetManifest && !validAsset)) {
     throw new ExportError("INVALID_PREVIOUS_MANIFEST", `The previous manifest contains an unexpected export path: ${normalized}`);
   }
   return normalized;
+}
+
+function isCanonicalAssetPath(value) {
+  const segments = String(value).split("/");
+  if (segments.length !== 2 || segments[0] !== "assets") return false;
+  const nameParts = segments[1].split(".");
+  return nameParts.length === 2 && isLowerHexSha256Text(nameParts[0]) && ASSET_EXTENSIONS.includes(nameParts[1]);
 }
 
 function generationPathKey(value) {
@@ -2191,11 +2387,12 @@ function readableProjectDir(projectDirs, cwd) {
   return projectDirs.get(key);
 }
 
-async function writeMarkdownTranscript(meta, outputPath, rawRel, profiler = null, profileSession = meta, context, sourceProtection, generation) {
+async function writeMarkdownTranscript(meta, outputPath, rawRel, profiler = null, profileSession = meta, context, sourceProtection, generation, assetStore, assetSnapshot) {
   const { redactMarkdown, includeTools } = context;
   const renderStart = performance.now();
   let writeStart = renderStart;
   const stats = { userMessages: 0, assistantMessages: 0, subagentInputs: 0, runtimeContexts: 0, unclassifiedUserRoleRecords: 0, toolEvents: 0, model: meta.model || "", updatedAt: meta.latestTimestamp || meta.updatedAt || meta.timestamp || "" };
+  const readerSummary = createSessionReaderSummary();
   await writeSeparatedOutputFile(outputPath, sourceProtection, async (handle) => {
   const out = fs.createWriteStream(outputPath, { fd: handle.fd, encoding: "utf8", autoClose: false });
   writeLine(out, `# ${meta.displayTitle || meta.title || "Codex Project Chat Export"}`);
@@ -2214,7 +2411,9 @@ async function writeMarkdownTranscript(meta, outputPath, rawRel, profiler = null
 
   for await (const { item, recordNumber } of streamSessionRecords(meta.file, {
     ...context.readerOptions,
+    calculateSha256: true,
     implementation: context.readerImplementation,
+    summary: readerSummary,
   })) {
     if (item.timestamp && (!stats.updatedAt || item.timestamp > stats.updatedAt)) stats.updatedAt = item.timestamp;
     if (item.type === "turn_context" && item.payload?.model && !stats.model) stats.model = item.payload.model;
@@ -2222,35 +2421,46 @@ async function writeMarkdownTranscript(meta, outputPath, rawRel, profiler = null
     const payload = item.payload;
     if (payload.type === "message" && payload.role === "user") {
       const text = extractText(payload.content);
-      if (!text.trim()) continue;
+      const attachments = collectAttachmentDescriptorsInOrder(payload.content);
+      if (!text.trim() && !attachments.length) continue;
       const classification = meta.eventAnalysis?.classifications?.get(recordNumber) || { kind: USER_RECORD_KIND.UNCLASSIFIED_USER_ROLE_RECORD, runtimeContextTypes: [] };
       if (classification.kind === USER_RECORD_KIND.DIRECT_USER_TURN) {
         stats.userMessages += 1;
         writeLine(out, `## User${formatDerivedTimestampSuffix(item.timestamp)}`);
         writeLine(out, "");
-        writeLine(out, redactMarkdown ? redactSecrets(text) : text);
-        writeLine(out, "");
+        if (text.trim()) {
+          writeLine(out, redactMarkdown ? redactSecrets(text) : text);
+          writeLine(out, "");
+        }
+        writeAssetReferences(out, attachments, assetStore, outputPath);
       } else if (classification.kind === USER_RECORD_KIND.SUBAGENT_INPUT) {
         stats.subagentInputs += 1;
-        writeClassifiedContext(out, "Subagent input / parent-agent handoff", text, item.timestamp, redactMarkdown);
+        if (text.trim()) writeClassifiedContext(out, "Subagent input / parent-agent handoff", text, item.timestamp, redactMarkdown);
+        writeAssetReferences(out, attachments, assetStore, outputPath);
       } else if (classification.kind === USER_RECORD_KIND.AUTOMATIC_RUNTIME_CONTEXT) {
         stats.runtimeContexts += 1;
         const suffix = classification.runtimeContextTypes.length ? ` – ${classification.runtimeContextTypes.join(" / ")}` : "";
-        writeClassifiedContext(out, `Automatic runtime context${suffix}`, text, item.timestamp, redactMarkdown);
+        if (text.trim()) writeClassifiedContext(out, `Automatic runtime context${suffix}`, text, item.timestamp, redactMarkdown);
+        writeAssetReferences(out, attachments, assetStore, outputPath);
       } else {
         stats.unclassifiedUserRoleRecords += 1;
-        writeClassifiedContext(out, "Unclassified user-role record", text, item.timestamp, redactMarkdown);
+        if (text.trim()) writeClassifiedContext(out, "Unclassified user-role record", text, item.timestamp, redactMarkdown);
+        writeAssetReferences(out, attachments, assetStore, outputPath);
       }
       continue;
     }
     if (payload.type === "message" && payload.role === "assistant") {
       const text = extractText(payload.content);
-      if (!text.trim()) continue;
+      const attachments = collectAttachmentDescriptorsInOrder(payload.content);
+      if (!text.trim() && !attachments.length) continue;
       stats.assistantMessages += 1;
       writeLine(out, `## Assistant${formatDerivedTimestampSuffix(item.timestamp)}`);
       writeLine(out, "");
-      writeLine(out, redactMarkdown ? redactSecrets(text) : text);
-      writeLine(out, "");
+      if (text.trim()) {
+        writeLine(out, redactMarkdown ? redactSecrets(text) : text);
+        writeLine(out, "");
+      }
+      writeAssetReferences(out, attachments, assetStore, outputPath);
       continue;
     }
     if (["function_call", "custom_tool_call", "function_call_output", "custom_tool_call_output"].includes(payload.type)) {
@@ -2265,9 +2475,11 @@ async function writeMarkdownTranscript(meta, outputPath, rawRel, profiler = null
         writeLine(out, renderedToolText);
         writeLine(out, fence);
         writeLine(out, "");
+        writeAssetReferences(out, collectAttachmentDescriptorsInOrder(payload), assetStore, outputPath);
       }
     }
   }
+  if (!readerSummary.stable || readerSummary.fileSha256 !== assetSnapshot?.sha256) throw new ExportError("SOURCE_CHANGED_DURING_EXPORT", "Session content changed between asset collection and Markdown rendering");
   const renderMs = performance.now() - renderStart;
   profiler?.addPhase("markdown_rendering", renderMs, meta.fileSize || 0, 0);
   profiler?.recordSession(profileSession, "markdown_render_ms", renderMs, meta.fileSize || 0, 0);
@@ -2329,7 +2541,7 @@ function redactSecrets(text) {
   return result;
 }
 
-async function writeIndexFiles(dir, rows, profiler = null, context, sourceProtection, generation) {
+async function writeIndexFiles(dir, rows, profiler = null, context, sourceProtection, generation, assetSummary, assetStore) {
   const { diagnosticReporter, exportFormats, exportProfile, copyRaw, codexHome, sessionsDir, includeArchived, archivedSessionsDir, sessionIndexPath, pathStyle } = context;
   const generatedAt = generation?.generatedAt || new Date().toISOString();
   const indexRows = [...rows].sort((a, b) => (b.updated_at || b.started_at || "").localeCompare(a.updated_at || a.started_at || ""));
@@ -2346,13 +2558,13 @@ async function writeIndexFiles(dir, rows, profiler = null, context, sourceProtec
     indexBytes += Buffer.byteLength(markdownIndex);
   }
   if (exportFormats.html) {
-    const htmlIndex = renderHtmlIndex(indexRows, generatedAt, { reducedMetadata: exportProfile === EXPORT_PROFILE.SOURCE_SNAPSHOTS });
+    const htmlIndex = renderHtmlIndex(indexRows, generatedAt, { assetStore, reducedMetadata: exportProfile === EXPORT_PROFILE.SOURCE_SNAPSHOTS });
     await writeSeparatedOutputFile(path.join(dir, "index.html"), sourceProtection, (handle) => handle.writeFile(htmlIndex, "utf8"), generation);
     indexBytes += Buffer.byteLength(htmlIndex);
   }
   profiler?.addPhase("indexes", performance.now() - indexStart, 0, indexBytes);
   diagnosticReporter("index_end", { duration_ms: roundMs(performance.now() - indexStart), bytes_written: indexBytes });
-  const manifest = `${JSON.stringify({ archive_format_version: ARCHIVE_FORMAT_VERSION, canonical_representation: "raw_jsonl", canonical_representation_included: copyRaw, export_profile: exportProfile, formats: exportFormats, generated_at: generatedAt, codex_home: codexHome, sessions_dir: sessionsDir, archived_sessions_dir: includeArchived ? archivedSessionsDir : "", session_index: sessionIndexPath, path_style: pathStyle, sessions: rows }, null, 2)}\n`;
+  const manifest = `${JSON.stringify({ archive_format_version: ARCHIVE_FORMAT_VERSION, canonical_representation: "raw_jsonl", canonical_representation_included: copyRaw, export_profile: exportProfile, formats: exportFormats, generated_at: generatedAt, codex_home: codexHome, sessions_dir: sessionsDir, archived_sessions_dir: includeArchived ? archivedSessionsDir : "", session_index: sessionIndexPath, path_style: pathStyle, assets_manifest: ASSET_MANIFEST_PATH, asset_occurrences: assetSummary.assetOccurrences, unique_assets: assetSummary.uniqueAssets, unique_asset_bytes: assetSummary.uniqueAssetBytes, deduplicated_asset_bytes_saved: assetSummary.deduplicatedBytesSaved, sessions: rows }, null, 2)}\n`;
   return manifest;
 }
 
@@ -2376,6 +2588,33 @@ function createAttachmentMetrics() {
   };
   attachmentSequenceHashes.set(metrics, createHash("sha256"));
   return metrics;
+}
+
+function collectAttachmentDescriptorsInOrder(value, output = []) {
+  if (isAttachmentDescriptor(value)) {
+    output.push(value);
+    return output;
+  }
+  if (Array.isArray(value)) {
+    for (const child of value) collectAttachmentDescriptorsInOrder(child, output);
+  } else if (value && typeof value === "object") {
+    for (const child of Object.values(value)) collectAttachmentDescriptorsInOrder(child, output);
+  }
+  return output;
+}
+
+function writeAssetReferences(stream, descriptors, assetStore, outputPath) {
+  let ordinal = 0;
+  for (const descriptor of descriptors) {
+    ordinal += 1;
+    const asset = assetStore?.assetForDescriptor(descriptor);
+    if (!asset) throw new ExportError("ASSET_REFERENCE_MISSING", "A rendered attachment has no published local asset");
+    const absoluteAsset = path.join(assetStore.exportRoot, ...asset.path.split("/"));
+    const relativeAsset = toPosixPath(path.relative(path.dirname(outputPath), absoluteAsset));
+    const target = encodeURI(relativeAsset);
+    writeLine(stream, asset.renderable ? `![Attachment ${ordinal}](${target})` : `[Attachment ${ordinal} (file)](${target})`);
+    writeLine(stream, "");
+  }
 }
 
 function observeAttachmentMetrics(item, metrics) {
@@ -2546,6 +2785,7 @@ function createPerformanceProfiler({ rawEnabled, scope, profile }) {
     "parse_and_classify",
     "raw_snapshot_copy",
     "snapshot_stability_checks",
+    "assets",
     "source_hashing",
     "export_hashing",
     "markdown_rendering",
@@ -2696,17 +2936,18 @@ function roundMs(value) {
   return Math.round(Number(value || 0) * 1000) / 1000;
 }
 
-async function writeSummary(dir, rows, context, sourceProtection, generation) {
+async function writeSummary(dir, rows, context, sourceProtection, generation, assetSummary) {
   const { codexHome, sessionsDir, includeArchived, archivedSessionsDir, exportProfile, pathStyle, exportFormats, markdownDirName, copyRaw } = context;
   const projects = new Map();
   for (const row of rows) projects.set(row.project || "unknown", (projects.get(row.project || "unknown") || 0) + 1);
   const activeCount = rows.filter((row) => row.storage === "active").length;
   const archivedCount = rows.filter((row) => row.storage === "archived").length;
-  const lines = ["Codex Project Chat Export", "=========================", "", `Generated: ${generation?.generatedAt || new Date().toISOString()}`, `Codex home: ${codexHome}`, `Sessions dir: ${sessionsDir}`, `Archived sessions dir: ${includeArchived ? archivedSessionsDir : "disabled"}`, `Export profile: ${exportProfile}`, `Path style: ${pathStyle}`, `Sessions exported: ${rows.length}`, `Active sessions: ${activeCount}`, `Archived sessions: ${archivedCount}`, "", "Projects:", ...Array.from(projects.entries()).map(([project, count]) => `- ${project}: ${count}`), "", "Notes:"];
+  const lines = ["Codex Project Chat Export", "=========================", "", `Generated: ${generation?.generatedAt || new Date().toISOString()}`, `Codex home: ${codexHome}`, `Sessions dir: ${sessionsDir}`, `Archived sessions dir: ${includeArchived ? archivedSessionsDir : "disabled"}`, `Export profile: ${exportProfile}`, `Path style: ${pathStyle}`, `Sessions exported: ${rows.length}`, `Active sessions: ${activeCount}`, `Archived sessions: ${archivedCount}`, `Attachment occurrences: ${assetSummary.assetOccurrences}`, `Unique assets: ${assetSummary.uniqueAssets}`, `Unique asset bytes: ${assetSummary.uniqueAssetBytes}`, `Deduplicated asset bytes saved: ${assetSummary.deduplicatedBytesSaved}`, "", "Projects:", ...Array.from(projects.entries()).map(([project, count]) => `- ${project}: ${count}`), "", "Notes:"];
   if (exportFormats.markdown) lines.push(`- ${markdownDirName}/ contains classified, derived reading views.`);
   else lines.push("- This profile intentionally does not create human-readable session transcripts or classify session events.");
   if (copyRaw) lines.push("- raw/ contains canonical byte-preserving session JSONL snapshots.");
   else lines.push("- This profile does not include canonical raw JSONL snapshots.");
+  lines.push("- assets/ contains content-addressed decoded attachments; assets/manifest.json records validated types and every stable usage occurrence.");
   lines.push("- Raw export file names may be collision-safe archive names; manifest.json preserves the original name and portable restore path.", "- raw_copy_status=VERIFIED_AT_EXPORT means the export-time hash check completed at raw_verified_at and the bytes read from the published Raw path matched raw_sha256 during that check; Raw files remain mutable afterward.", "- A future importer must hash the current Raw file again and reject any mismatch; no Codex import path is implemented or validated.", "- Event order is the physical line order inside each canonical raw JSONL file; the manifest does not duplicate that sequence.");
   if (exportFormats.html && exportProfile === EXPORT_PROFILE.SOURCE_SNAPSHOTS) lines.push("- index.html uses only project, storage, start time, session ID, and Raw links because this profile intentionally skips complete readable metadata.");
   else if (exportFormats.html) lines.push("- index.html can be filtered by project, title, date, model, or storage location.");
@@ -2716,7 +2957,7 @@ async function writeSummary(dir, rows, context, sourceProtection, generation) {
 
 async function verifyExport(dir, rows, profiler = null, context, options = {}) {
   const { exportFormats } = context;
-  const required = ["README.txt"];
+  const required = ["README.txt", ASSET_MANIFEST_PATH];
   if (options.includeManifest) required.push("manifest.json");
   if (exportFormats.html) required.push("index.html");
   if (exportFormats.markdown) required.push("index.md");
@@ -2741,6 +2982,9 @@ async function verifyExport(dir, rows, profiler = null, context, options = {}) {
       if (row.source_snapshot_before_size_bytes !== row.source_snapshot_after_size_bytes || row.source_snapshot_before_mtime_ms !== row.source_snapshot_after_mtime_ms) throw new ExportError("EXPORT_VERIFICATION_FAILED", `Source changed while its raw snapshot was copied: ${row.raw_export_file}`);
     }
   }
+  const publishedAssetManifest = await fsp.readFile(path.join(dir, ...ASSET_MANIFEST_PATH.split("/")), "utf8");
+  if (!options.assetManifest || publishedAssetManifest !== options.assetManifest) throw new ExportError("EXPORT_VERIFICATION_FAILED", "Published asset manifest bytes differ from the verified in-memory generation");
+  await options.assetStore?.verifyPublishedAssets();
   if (options.includeManifest) {
     const publishedManifest = await fsp.readFile(path.join(dir, "manifest.json"), "utf8");
     if (!options.expectedManifest || publishedManifest !== options.expectedManifest) throw new ExportError("EXPORT_VERIFICATION_FAILED", "Published manifest bytes differ from the verified in-memory generation");
@@ -2908,8 +3152,19 @@ function mdLink(relPath) { const link = toPosixPath(relPath); return `[${mdCell(
 function toPosixPath(value) { return String(value || "").replace(/\\/g, "/"); }
 function htmlEscape(value) { return String(value ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"); }
 function htmlLink(relPath, label) { const link = toPosixPath(relPath); return link ? `<a href="${htmlEscape(encodeURI(link))}">${htmlEscape(label || path.posix.basename(link))}</a>` : ""; }
+function renderHtmlAssetReferences(references) {
+  if (!references.length) return "";
+  return `<div class="assets">${references.map((reference, index) => {
+    const target = htmlEscape(encodeURI(toPosixPath(reference.path)));
+    const label = `Attachment ${index + 1}`;
+    return reference.renderable
+      ? `<a href="${target}"><img src="${target}" alt="${label}" loading="lazy"></a>`
+      : `<a href="${target}">${label} (file)</a>`;
+  }).join("")}</div>`;
+}
 function renderHtmlIndex(rows, generatedAt, options = {}) {
   const reducedMetadata = Boolean(options.reducedMetadata);
+  const assetStore = options.assetStore;
   const includeRawColumn = rows.some((row) => Boolean(row.raw_export_file));
   const includeMarkdownColumn = rows.some((row) => Boolean(row.markdown_file));
   const bodyRows = rows.map((row) => {
@@ -2920,14 +3175,15 @@ function renderHtmlIndex(rows, generatedAt, options = {}) {
       : [row.project_name || row.project, row.title || row.session_id, row.storage, startedAt, updatedAt, row.model].join(" ").toLowerCase();
     const rawCell = includeRawColumn ? `<td>${row.raw_export_file ? htmlLink(row.raw_export_file, path.posix.basename(toPosixPath(row.raw_export_file))) : ""}</td>` : "";
     const markdownCell = includeMarkdownColumn ? `<td>${row.markdown_file ? htmlLink(row.markdown_file, path.posix.basename(toPosixPath(row.markdown_file))) : ""}</td>` : "";
-    if (reducedMetadata) return `      <tr data-search="${htmlEscape(searchable)}"><td>${htmlEscape(row.project_name || row.project)}</td><td>${htmlEscape(row.storage || "active")}</td><td>${htmlEscape(startedAt)}</td><td>${htmlEscape(row.session_id)}</td>${rawCell}</tr>`;
-    return `      <tr data-search="${htmlEscape(searchable)}"><td>${htmlEscape(row.project_name || row.project)}</td><td>${htmlEscape(row.title || row.session_id)}</td><td>${htmlEscape(row.storage || "active")}</td><td>${htmlEscape(startedAt)}</td><td>${htmlEscape(row.model || "")}</td>${markdownCell}${rawCell}</tr>`;
+    const assetsCell = `<td>${renderHtmlAssetReferences(assetStore?.referencesForSession(row.session_id) || [])}</td>`;
+    if (reducedMetadata) return `      <tr data-search="${htmlEscape(searchable)}"><td>${htmlEscape(row.project_name || row.project)}</td><td>${htmlEscape(row.storage || "active")}</td><td>${htmlEscape(startedAt)}</td><td>${htmlEscape(row.session_id)}</td>${assetsCell}${rawCell}</tr>`;
+    return `      <tr data-search="${htmlEscape(searchable)}"><td>${htmlEscape(row.project_name || row.project)}</td><td>${htmlEscape(row.title || row.session_id)}</td><td>${htmlEscape(row.storage || "active")}</td><td>${htmlEscape(startedAt)}</td><td>${htmlEscape(row.model || "")}</td>${assetsCell}${markdownCell}${rawCell}</tr>`;
   }).join("\n");
   const filterPlaceholder = reducedMetadata ? "Project, storage, date, or session ID" : "Project, title, date, model, active or archived";
   const profileNote = reducedMetadata ? "\n  <p class=\"meta\">Source snapshots intentionally use a reduced index and do not inspect complete readable metadata.</p>" : "";
   const header = reducedMetadata
-    ? `<th>Project</th><th>Storage</th><th>Started</th><th>Session ID</th>${includeRawColumn ? "<th>Raw</th>" : ""}`
-    : `<th>Project</th><th>Title</th><th>Storage</th><th>Started</th><th>Model</th>${includeMarkdownColumn ? "<th>Markdown</th>" : ""}${includeRawColumn ? "<th>Raw</th>" : ""}`;
+    ? `<th>Project</th><th>Storage</th><th>Started</th><th>Session ID</th><th>Assets</th>${includeRawColumn ? "<th>Raw</th>" : ""}`
+    : `<th>Project</th><th>Title</th><th>Storage</th><th>Started</th><th>Model</th><th>Assets</th>${includeMarkdownColumn ? "<th>Markdown</th>" : ""}${includeRawColumn ? "<th>Raw</th>" : ""}`;
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -2945,6 +3201,8 @@ function renderHtmlIndex(rows, generatedAt, options = {}) {
     th, td { border-bottom: 1px solid #e5e7eb; padding: 0.55rem 0.65rem; text-align: left; vertical-align: top; }
     th { background: #f9fafb; font-weight: 650; }
     a { color: #075985; }
+    .assets { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: flex-start; }
+    .assets img { display: block; max-width: 8rem; max-height: 6rem; object-fit: contain; border: 1px solid #e5e7eb; border-radius: 0.25rem; }
   </style>
 </head>
 <body>

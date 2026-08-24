@@ -11,6 +11,12 @@ import { promisify } from "node:util";
 const execFileAsync = promisify(execFile);
 const MIB = 1024 * 1024;
 const DEFAULT_SIZE_MIB = 16;
+const PNG_HEADER = Buffer.from([
+  0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+  0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+  0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+  0x08, 0x06, 0x00, 0x00, 0x00,
+]);
 const prefix = '{"timestamp":"2026-01-01T00:00:00.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"large-line diagnostic"},{"type":"input_image","image_url":"data:image/png;base64,';
 const suffix = '"}],"nested":{"array":[{"escaped":"quote \\\" slash \\\\ unicode π"}]}}}\n';
 
@@ -38,7 +44,7 @@ async function writeLargeJsonl(file, requestedMiB) {
       const size = Math.min(decodedBytesRemaining, 48 * 1024);
       const chunk = Buffer.alloc(size, 0x41);
       if (firstChunk) {
-        Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(chunk);
+        PNG_HEADER.copy(chunk);
         firstChunk = false;
       }
       decodedHash.update(chunk);
@@ -88,6 +94,10 @@ async function main() {
       exitStatus = 1;
       stderr += `${stderr ? "\n" : ""}Written attachment SHA-256 mismatch`;
     }
+    if (exitStatus === 0 && workerResult.raw_sha256 !== sourceSha256Before) {
+      exitStatus = 1;
+      stderr += `${stderr ? "\n" : ""}Worker Raw SHA-256 mismatch`;
+    }
     if (exitStatus === 0 && workerResult.records !== 1) {
       exitStatus = 1;
       stderr += `${stderr ? "\n" : ""}Expected exactly one completed JSONL record`;
@@ -95,6 +105,10 @@ async function main() {
     if (exitStatus === 0 && workerResult.decoded_bytes !== expectedDecodedBytes) {
       exitStatus = 1;
       stderr += `${stderr ? "\n" : ""}Decoded byte count mismatch`;
+    }
+    if (exitStatus === 0 && (workerResult.asset_files !== 1 || workerResult.asset_uses !== 1 || workerResult.asset_extension !== "png" || workerResult.asset_renderable !== true || workerResult.unique_asset_bytes !== expectedDecodedBytes || workerResult.temporary_residue_count !== 0)) {
+      exitStatus = 1;
+      stderr += `${stderr ? "\n" : ""}Asset publication, usage list, byte count, or temporary cleanup mismatch`;
     }
     if (exitStatus === 0 && (!Number.isSafeInteger(workerResult.max_decoded_block_bytes)
       || !Number.isSafeInteger(workerResult.max_write_block_bytes)
@@ -125,6 +139,12 @@ async function main() {
       expected_decoded_sha256: decodedSha256,
       max_decoded_block_bytes: workerResult.max_decoded_block_bytes ?? null,
       max_write_block_bytes: workerResult.max_write_block_bytes ?? null,
+      asset_files: workerResult.asset_files ?? null,
+      asset_uses: workerResult.asset_uses ?? null,
+      asset_extension: workerResult.asset_extension ?? null,
+      asset_renderable: workerResult.asset_renderable ?? null,
+      unique_asset_bytes: workerResult.unique_asset_bytes ?? null,
+      temporary_residue_count: workerResult.temporary_residue_count ?? null,
       source_sha256_before: sourceSha256Before,
       source_sha256_after: sourceSha256After,
       source_byte_identical: sourceSha256After === sourceSha256Before,
