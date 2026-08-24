@@ -1,9 +1,11 @@
 #!/usr/bin/env node
+import { createHash, randomUUID } from "node:crypto";
+import fsSync from "node:fs";
+import fs from "node:fs/promises";
 import { performance } from "node:perf_hooks";
 import path from "node:path";
 
-import { writeBase64ChunksToFile } from "../../lib/bounded-base64.mjs";
-import { streamJsonlTokens } from "../../lib/jsonl-token-adapter.mjs";
+import { readSessionMeta } from "../../bin/export-codex-project-chats.mjs";
 
 const inputPath = process.argv[2];
 if (!inputPath) throw new Error("Expected a JSONL input path");
@@ -16,59 +18,62 @@ function sampleMemory() {
   peakHeap = Math.max(peakHeap, memory.heapUsed);
 }
 
-const started = performance.now();
-let records = 0;
-sampleMemory();
-
-const targetPath = ["payload", "content", 1, "image_url"];
-function samePath(candidate) {
-  return candidate.length === targetPath.length && candidate.every((segment, index) => segment === targetPath[index]);
-}
-
-async function* imagePayloadChunks() {
-  const dataUrlPrefix = "data:image/png;base64,";
-  let prefixOffset = 0;
-  let inTarget = false;
-  let completed = false;
-  for await (const token of streamJsonlTokens(inputPath)) {
-    sampleMemory();
-    if (token.type === "record_end") records += 1;
-    if (!samePath(token.path)) continue;
-    if (token.type === "string_start") {
-      if (inTarget || completed) throw new Error("Duplicate diagnostic image value");
-      inTarget = true;
-      continue;
-    }
-    if (token.type === "string_chunk" && inTarget) {
-      let offset = 0;
-      while (prefixOffset < dataUrlPrefix.length && offset < token.value.length) {
-        if (token.value[offset] !== dataUrlPrefix[prefixOffset]) throw new Error("Unexpected diagnostic image prefix");
-        offset += 1;
-        prefixOffset += 1;
-      }
-      if (offset < token.value.length) yield token.value.slice(offset);
-      continue;
-    }
-    if (token.type === "string_end" && inTarget) {
-      if (prefixOffset !== dataUrlPrefix.length) throw new Error("Incomplete diagnostic image prefix");
-      inTarget = false;
-      completed = true;
-    }
+async function writeAll(handle, buffer) {
+  let offset = 0;
+  while (offset < buffer.length) {
+    const { bytesWritten } = await handle.write(buffer, offset, buffer.length - offset, null);
+    if (bytesWritten <= 0) throw new Error("Diagnostic attachment write made no progress");
+    offset += bytesWritten;
   }
-  if (!completed || inTarget) throw new Error("Diagnostic image value was not completed");
 }
 
+async function sha256File(file) {
+  const hash = createHash("sha256");
+  for await (const chunk of fsSync.createReadStream(file)) hash.update(chunk);
+  return hash.digest("hex");
+}
+
+const started = performance.now();
 const outputPath = path.join(path.dirname(inputPath), "decoded-image.bin");
-const decoded = await writeBase64ChunksToFile(imagePayloadChunks(), outputPath);
+const temporaryPath = path.join(path.dirname(inputPath), `.decoded-image.${randomUUID()}.partial`);
+let handle;
+let maxWriteBlockBytes = 0;
 sampleMemory();
-const maxRss = process.resourceUsage().maxRSS * 1024;
-console.log(JSON.stringify({
-  runtime_ms: Math.round((performance.now() - started) * 1000) / 1000,
-  peak_rss_bytes: Math.max(peakRss, maxRss),
-  peak_heap_bytes: peakHeap,
-  records,
-  decoded_bytes: decoded.decodedBytes,
-  sha256: decoded.sha256,
-  max_decoded_block_bytes: decoded.maxDecodedBlockBytes,
-  max_write_block_bytes: decoded.maxDecodedBlockBytes,
-}));
+try {
+  handle = await fs.open(temporaryPath, "wx");
+  const meta = await readSessionMeta(inputPath, {
+    collectAttachmentMetrics: true,
+    readerOptions: {
+      onAttachmentDecodedChunk: async (chunk) => {
+        maxWriteBlockBytes = Math.max(maxWriteBlockBytes, chunk.length);
+        await writeAll(handle, chunk);
+        sampleMemory();
+      },
+    },
+  });
+  if (meta.attachmentMetrics.embeddedCount !== 1 || meta.attachmentMetrics.embeddedHashes.size !== 1) throw new Error("Expected exactly one diagnostic attachment");
+  const [decodedSha256] = meta.attachmentMetrics.embeddedHashes;
+  await handle.sync();
+  await handle.close();
+  handle = null;
+  await fs.link(temporaryPath, outputPath);
+  await fs.unlink(temporaryPath);
+  const writtenSha256 = await sha256File(outputPath);
+  if (writtenSha256 !== decodedSha256) throw new Error("Written diagnostic attachment SHA-256 mismatch");
+  sampleMemory();
+  const maxRss = process.resourceUsage().maxRSS * 1024;
+  console.log(JSON.stringify({
+    runtime_ms: Math.round((performance.now() - started) * 1000) / 1000,
+    peak_rss_bytes: Math.max(peakRss, maxRss),
+    peak_heap_bytes: peakHeap,
+    records: meta.parsedEventCount,
+    decoded_bytes: meta.attachmentMetrics.embeddedBytes,
+    sha256: decodedSha256,
+    written_sha256: writtenSha256,
+    max_decoded_block_bytes: meta.attachmentMetrics.maxDecodedBlockBytes,
+    max_write_block_bytes: maxWriteBlockBytes,
+  }));
+} finally {
+  await handle?.close().catch(() => {});
+  await fs.unlink(temporaryPath).catch((error) => { if (error?.code !== "ENOENT") throw error; });
+}

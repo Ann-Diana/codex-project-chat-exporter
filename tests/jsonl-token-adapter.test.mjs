@@ -214,9 +214,51 @@ test("rejects malformed Base64 and forwards sink failures", async () => {
   await assert.rejects(() => decodeBase64Chunks((async function* () { yield "A"; })(), async () => {}), (error) => error.code === "BASE64_INVALID_LENGTH");
   await assert.rejects(() => decodeBase64Chunks((async function* () { yield "YQ==extra"; })(), async () => {}), (error) => error.code === "BASE64_TRAILING_DATA");
   await assert.rejects(() => decodeBase64Chunks((async function* () { yield "YQ=="; })(), async () => { throw new Error("synthetic write failure"); }), (error) => error.code === "BASE64_WRITE_ERROR");
+  await assert.rejects(() => decodeBase64Chunks((async function* () { yield "YQ=="; })(), async () => {}, {
+    hashFactory: () => ({ update() { throw new Error("synthetic hash failure"); }, digest() { return ""; } }),
+  }), (error) => error.code === "BASE64_HASH_ERROR");
   const unpadded = [];
   await decodeBase64Chunks((async function* () { yield "Y"; yield "WI"; })(), async (chunk) => unpadded.push(chunk));
   assert.equal(Buffer.concat(unpadded).toString("utf8"), "ab");
+});
+
+test("file sink fails closed for write and unsupported hard-link errors", async () => {
+  const temp = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "codex-bounded-base64-io-")));
+  try {
+    const unsupported = path.join(temp, "unsupported.bin");
+    await assert.rejects(() => writeBase64ChunksToFile((async function* () { yield "YQ=="; })(), unsupported, {
+      io: { link: async () => { const error = new Error("synthetic unsupported hard link"); error.code = "ENOTSUP"; throw error; } },
+    }), (error) => error.code === "BASE64_FILE_ERROR");
+    assert.equal(await fs.stat(unsupported).then(() => true, () => false), false);
+    assert.deepEqual(await fs.readdir(temp), []);
+
+    const writeFailure = path.join(temp, "write-failure.bin");
+    await assert.rejects(() => writeBase64ChunksToFile((async function* () { yield "YQ=="; })(), writeFailure, {
+      io: {
+        open: async (...args) => {
+          const handle = await fs.open(...args);
+          return {
+            close: () => handle.close(),
+            sync: () => handle.sync(),
+            write: async () => { const error = new Error("synthetic full disk"); error.code = "ENOSPC"; throw error; },
+          };
+        },
+      },
+    }), (error) => error.code === "BASE64_WRITE_ERROR");
+    assert.equal(await fs.stat(writeFailure).then(() => true, () => false), false);
+    assert.deepEqual(await fs.readdir(temp), []);
+
+    const denied = path.join(temp, "permission-denied.bin");
+    await assert.rejects(() => writeBase64ChunksToFile((async function* () { yield "YQ=="; })(), denied, {
+      io: {
+        open: async () => { const error = new Error("synthetic permission denial"); error.code = "EACCES"; throw error; },
+      },
+    }), (error) => error.code === "BASE64_FILE_ERROR");
+    assert.equal(await fs.stat(denied).then(() => true, () => false), false);
+    assert.deepEqual(await fs.readdir(temp), []);
+  } finally {
+    await fs.rm(temp, { recursive: true, force: true });
+  }
 });
 
 test("publishes decoded files atomically and cleans temporary files on success and failure", async () => {

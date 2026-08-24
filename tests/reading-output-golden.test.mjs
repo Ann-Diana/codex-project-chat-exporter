@@ -7,6 +7,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { exportArchive, INCOMPLETE_MARKER_NAME } from "../bin/export-codex-project-chats.mjs";
+import { SESSION_READER_IMPLEMENTATION } from "../lib/session-record-reader.mjs";
 import {
   ACTIVE_SESSION_ID,
   FALLBACK_SESSION_ID,
@@ -18,6 +19,7 @@ import {
 
 const fixtureRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "reading-output");
 const profiles = ["complete", "readable", "source-snapshots"];
+const readerImplementations = Object.values(SESSION_READER_IMPLEMENTATION);
 
 async function pathExists(candidate) {
   return fs.stat(candidate).then(() => true, () => false);
@@ -98,20 +100,22 @@ function assertOrdered(text, fragments) {
   }
 }
 
-test("version 0.2.0 reading output remains stable across all profiles", async () => {
+test("version 0.3.0 reference and streaming readers preserve all profile golden outputs", async () => {
   const temp = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "codex-reading-golden-")));
   try {
     const codexHome = path.join(temp, ".codex");
     const fixturePaths = await writeReadingOutputFixture(codexHome);
 
     for (const profile of profiles) {
-      const outputDir = path.join(temp, `output-${profile}`);
+      for (const readerImplementation of readerImplementations) {
+      const outputDir = path.join(temp, `output-${profile}-${readerImplementation}`);
       await exportArchive({
         codexHome,
         scope: "all",
         outputDirectory: outputDir,
         exportProfile: profile,
         includeTools: true,
+        _readerImplementation: readerImplementation,
       });
 
       const manifest = JSON.parse(await fs.readFile(path.join(outputDir, "manifest.json"), "utf8"));
@@ -182,6 +186,7 @@ test("version 0.2.0 reading output remains stable across all profiles", async ()
       const expectedPath = path.join(fixtureRoot, `${profile}.golden.json`);
       const expected = JSON.parse(await fs.readFile(expectedPath, "utf8"));
       assert.deepEqual(actual, expected);
+      }
     }
   } finally {
     await fs.rm(temp, { recursive: true, force: true });

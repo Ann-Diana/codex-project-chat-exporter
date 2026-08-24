@@ -54,6 +54,8 @@ If Windows blocks the launcher, see the [FAQ](FAQ.md#windows-blocks-the-cmd-laun
 
 The launcher and CLI do not require administrator rights. Exporter 0.3.0 requires Node.js 22 or newer; the Windows launcher can also use one known bundled Codex Desktop Node runtime when that runtime meets the same requirement. Exporter 0.2.x is the final line for older Node.js versions, and Node.js 18 and 20 are no longer in the supported test matrix.
 
+Exporter 0.3.0 uses a bounded streaming JSONL reader for CLI and Visual Studio Code exports. Embedded Base64 images are decoded and hashed incrementally instead of being rebuilt as complete strings or buffers. Invalid or truncated session records fail the export before a completed manifest is published; remote image references are never downloaded.
+
 ## CLI quick start
 
 Export all detected local sessions:

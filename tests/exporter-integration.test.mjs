@@ -8,6 +8,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
 import { beginExportGeneration, completeExportGeneration, copyStableRawSnapshot, exportArchive, INCOMPLETE_MARKER_NAME, readSessionRoutingMeta, sha256File } from "../bin/export-codex-project-chats.mjs";
+import { SESSION_READER_IMPLEMENTATION } from "../lib/session-record-reader.mjs";
 
 const execFileAsync = promisify(execFile);
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -108,7 +109,7 @@ await fs.writeFile(path.join(codexHome, "session_index.jsonl"), [
 ].join("\n") + "\n");
 
 const version = await execFileAsync(process.execPath, [script, "--version"], { cwd: temp });
-assert.equal(version.stdout.trim(), "0.2.0");
+assert.equal(version.stdout.trim(), "0.3.0");
 
 const projectList = await execFileAsync(process.execPath, [script, "--codex-home", codexHome, "--list"], { cwd: temp });
 assert.match(projectList.stdout, /C:\\Projects\\alpha \(5: 3 active, 2 archived\)/);
@@ -589,7 +590,8 @@ const routerLines = [
   JSON.stringify({ timestamp: "2026-08-16T12:00:02.000Z", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "Router differential control." }] }, type: "response_item" }),
 ];
 await fs.writeFile(routerSource, `${routerLines.join("\n")}\n`, "utf8");
-const routedMeta = await readSessionRoutingMeta(routerSource);
+await assert.rejects(() => readSessionRoutingMeta(routerSource), (error) => error?.code === "SESSION_JSONL_INVALID" && error?.recordNumber === 1);
+const routedMeta = await readSessionRoutingMeta(routerSource, { implementation: SESSION_READER_IMPLEMENTATION.LEGACY_REFERENCE });
 assert.equal(routedMeta.id, "router-session");
 assert.equal(routedMeta.cwd, "C:\\Projects\\router");
 const fallbackSource = path.join(temp, "router-json-parse-fallback.jsonl");
@@ -598,7 +600,13 @@ const fallbackMeta = await readSessionRoutingMeta(fallbackSource);
 assert.equal(fallbackMeta.id, "fallback-session", "an uncertain structured scan must fall back to full JSON parsing");
 assert.equal(fallbackMeta.cwd, "C:\\Projects\\fallback");
 const routerOutput = path.join(temp, "router-output");
-const routerResult = await exportArchive({ codexHome: routerHome, scope: "all", outputDirectory: routerOutput, exportProfile: "complete" });
+const streamingInvalidOutput = path.join(temp, "router-streaming-invalid-output");
+await assert.rejects(
+  () => exportArchive({ codexHome: routerHome, scope: "all", outputDirectory: streamingInvalidOutput, exportProfile: "complete" }),
+  (error) => error?.code === "SESSION_JSONL_INVALID" && error?.recordNumber === 1,
+);
+assert.equal(await pathExists(path.join(streamingInvalidOutput, "manifest.json")), false, "the streaming reader must reject invalid JSONL before publishing visible output");
+const routerResult = await exportArchive({ codexHome: routerHome, scope: "all", outputDirectory: routerOutput, exportProfile: "complete", _readerImplementation: SESSION_READER_IMPLEMENTATION.LEGACY_REFERENCE });
 const routerManifest = JSON.parse(await fs.readFile(routerResult.manifestPath, "utf8"));
 assert.equal(routerManifest.sessions[0].session_id, routedMeta.id, "structured routing and full selected-session parsing must agree on session identity");
 assert.equal(routerManifest.sessions[0].project, routedMeta.cwd, "structured routing and full selected-session parsing must agree on project routing");

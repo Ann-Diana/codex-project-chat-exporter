@@ -8,7 +8,15 @@ import { performance } from "node:perf_hooks";
 import readline from "node:readline";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-const VERSION = "0.2.0";
+import {
+  SESSION_READER_IMPLEMENTATION,
+  attachmentIdentity,
+  createSessionReaderSummary,
+  isAttachmentDescriptor,
+  streamSessionRecords,
+} from "../lib/session-record-reader.mjs";
+
+const VERSION = "0.3.0";
 const ARCHIVE_FORMAT_VERSION = 1;
 const EXPORT_PROFILE = Object.freeze({
   COMPLETE: "complete",
@@ -28,6 +36,7 @@ const INCOMPLETE_MARKER_NAME = "EXPORT_INCOMPLETE.txt";
 const GENERATION_ROOT_FILES = Object.freeze(["manifest.json", "README.txt", "index.html", "index.md"]);
 const FUTURE_EXPORT_FORMATS = Object.freeze({ docx: false, pdf: false, attachments: false });
 const MIRRORED_USER_EVENT_MAX_DELAY_MS = 100;
+const attachmentSequenceHashes = new WeakMap();
 const USER_RECORD_KIND = Object.freeze({
   DIRECT_USER_TURN: "DIRECT_USER_TURN",
   SUBAGENT_INPUT: "SUBAGENT_INPUT",
@@ -124,6 +133,8 @@ async function exportArchive(options = {}) {
     onProgress: options.onProgress,
     progressThrottleMs: options.progressThrottleMs,
     onDiagnostic: options.onDiagnostic,
+    readerImplementation: options._readerImplementation,
+    readerOptions: options._readerOptions,
   });
   return runCommand(context, { print: false });
 }
@@ -189,6 +200,8 @@ function createExportContext(args = {}, cwd = process.cwd(), runtimeOptions = {}
     exportFormats,
     progressReporter: createProgressReporter(runtimeOptions.onProgress, runtimeOptions.progressThrottleMs),
     diagnosticReporter: createDiagnosticReporter(runtimeOptions.onDiagnostic),
+    readerImplementation: runtimeOptions.readerImplementation || SESSION_READER_IMPLEMENTATION.STREAMING,
+    readerOptions: runtimeOptions.readerOptions || Object.freeze({}),
   });
 }
 
@@ -346,7 +359,7 @@ async function runCommandInternal(context, { print, profiler, runState }) {
     for (let routingIndex = 0; routingIndex < files.length; routingIndex += 1) {
       const entry = files[routingIndex];
       const routingStart = performance.now();
-      let routing = await readSessionRoutingMeta(entry.file);
+      let routing = await readSessionRoutingMeta(entry.file, { implementation: context.readerImplementation, readerOptions: context.readerOptions });
       const routingMs = performance.now() - routingStart;
       diagnosticReporter("routing_hash_end", {
         ordinal: routingIndex + 1,
@@ -457,6 +470,8 @@ async function runCommandInternal(context, { print, profiler, runState }) {
               fallbackTimestamp: meta.timestamp,
               collectAttachmentMetrics: Boolean(profiler),
               calculateSha256: true,
+              readerImplementation: context.readerImplementation,
+              readerOptions: context.readerOptions,
             });
             const parseMs = performance.now() - parseStart;
             profiler?.addPhase("parse_and_classify", parseMs, parsedMeta.fileSize, 0);
@@ -630,10 +645,17 @@ async function readSessionIndex(indexPath, profiler = null) {
   return result;
 }
 
-async function readSessionMeta(file, { fallbackSessionId = "", fallbackTimestamp = "", collectAttachmentMetrics = false, calculateSha256 = false } = {}) {
+async function readSessionMeta(file, {
+  fallbackSessionId = "",
+  fallbackTimestamp = "",
+  collectAttachmentMetrics = false,
+  calculateSha256 = false,
+  readerImplementation = SESSION_READER_IMPLEMENTATION.STREAMING,
+  readerOptions = {},
+} = {}) {
   const filenameId = extractSessionIdFromFilename(file);
   const stat = await fsp.stat(file).catch(() => null);
-  const fileHash = calculateSha256 ? createHash("sha256") : null;
+  const readerSummary = createSessionReaderSummary();
   const classifier = createSessionEventClassifier();
   const meta = {
     file,
@@ -665,23 +687,14 @@ async function readSessionMeta(file, { fallbackSessionId = "", fallbackTimestamp
     fileReadAfterMtimeMs: null,
     fileReadStable: false,
   };
-  const input = fs.createReadStream(file);
-  if (fileHash) input.on("data", (chunk) => fileHash.update(chunk));
-  const rl = readline.createInterface({ input, crlfDelay: Infinity });
-  for await (const line of rl) {
-    meta.parsedLines += 1;
-    if (!line.trim()) continue;
-    meta.jsonlLineCount += 1;
-    let item;
-    try {
-      item = JSON.parse(line);
-    } catch {
-      meta.invalidJsonLines += 1;
-      continue;
-    }
-    meta.parsedEventCount += 1;
+  for await (const { item, recordNumber } of streamSessionRecords(file, {
+    ...readerOptions,
+    calculateSha256,
+    implementation: readerImplementation,
+    summary: readerSummary,
+  })) {
     if (meta.attachmentMetrics) observeAttachmentMetrics(item, meta.attachmentMetrics);
-    classifier.observe(item, meta.jsonlLineCount);
+    classifier.observe(item, recordNumber);
     if (item.timestamp && (!meta.latestTimestamp || item.timestamp > meta.latestTimestamp)) meta.latestTimestamp = item.timestamp;
     if (item.type === "session_meta" && item.payload) {
       const payloadId = item.payload.id || item.payload.session_id || "";
@@ -713,6 +726,11 @@ async function readSessionMeta(file, { fallbackSessionId = "", fallbackTimestamp
       meta.firstCwdText = extractText(item.payload.content);
     }
   }
+  if (meta.attachmentMetrics) finishAttachmentMetrics(meta.attachmentMetrics);
+  meta.parsedLines = readerSummary.physicalLineCount;
+  meta.jsonlLineCount = readerSummary.nonEmptyLineCount;
+  meta.parsedEventCount = readerSummary.recordCount;
+  meta.invalidJsonLines = readerSummary.invalidRecordCount;
   const eventAnalysis = classifier.finish();
   meta.eventAnalysis = eventAnalysis;
   meta.firstUserText = eventAnalysis.firstDirectUserText;
@@ -720,12 +738,11 @@ async function readSessionMeta(file, { fallbackSessionId = "", fallbackTimestamp
   if (!meta.cwd && meta.firstCwdText) meta.cwd = extractCwdFromText(meta.firstCwdText) || meta.cwd;
   if (!meta.timestamp) meta.timestamp = fallbackTimestamp || (stat ? stat.mtime.toISOString() : "");
   if (!meta.latestTimestamp) meta.latestTimestamp = meta.timestamp;
-  if (fileHash) {
-    const afterRead = await fsp.stat(file);
-    meta.fileSha256 = fileHash.digest("hex");
-    meta.fileReadAfterSizeBytes = afterRead.size;
-    meta.fileReadAfterMtimeMs = afterRead.mtimeMs;
-    meta.fileReadStable = Boolean(stat && sameFileVersion(stat, afterRead));
+  if (calculateSha256) {
+    meta.fileSha256 = readerSummary.fileSha256;
+    meta.fileReadAfterSizeBytes = readerSummary.afterSizeBytes;
+    meta.fileReadAfterMtimeMs = readerSummary.afterMtimeMs;
+    meta.fileReadStable = readerSummary.stable;
   }
   return meta;
 }
@@ -746,6 +763,8 @@ async function processExportTask(task, titleIndex, profiler, context, sourceProt
         fallbackSessionId: meta.id,
         fallbackTimestamp: meta.timestamp,
         collectAttachmentMetrics: Boolean(profiler),
+        readerImplementation: context.readerImplementation,
+        readerOptions: context.readerOptions,
       });
       const parseMs = performance.now() - parseStart;
       profiler?.addPhase("parse_and_classify", parseMs, parsedMeta.fileSize, 0);
@@ -825,7 +844,11 @@ async function processExportTask(task, titleIndex, profiler, context, sourceProt
 async function readAndEnrichSession(entry, titleIndex, profiler, profilePhaseName, context) {
   const { redactMarkdown } = context;
   const parseStart = performance.now();
-  const meta = await readSessionMeta(entry.file, { collectAttachmentMetrics: Boolean(profiler) });
+  const meta = await readSessionMeta(entry.file, {
+    collectAttachmentMetrics: Boolean(profiler),
+    readerImplementation: context.readerImplementation,
+    readerOptions: context.readerOptions,
+  });
   const parseMs = performance.now() - parseStart;
   profiler?.addPhase("parse_and_classify", parseMs, meta.fileSize, 0);
   profiler?.recordSession(meta, profilePhaseName, parseMs, meta.fileSize, 0);
@@ -845,10 +868,13 @@ async function readAndEnrichSession(entry, titleIndex, profiler, profilePhaseNam
   };
 }
 
-async function readSessionRoutingMeta(file) {
+async function readSessionRoutingMeta(file, {
+  implementation = SESSION_READER_IMPLEMENTATION.STREAMING,
+  readerOptions = {},
+} = {}) {
   const filenameId = extractSessionIdFromFilename(file);
   const stat = await fsp.stat(file).catch(() => null);
-  const fileHash = createHash("sha256");
+  const readerSummary = createSessionReaderSummary();
   const meta = {
     file,
     id: filenameId,
@@ -864,27 +890,14 @@ async function readSessionRoutingMeta(file) {
     hasSessionMeta: false,
     fileSize: stat?.size || 0,
   };
-  const input = fs.createReadStream(file);
-  input.on("data", (chunk) => fileHash.update(chunk));
-  const rl = readline.createInterface({ input, crlfDelay: Infinity });
-  for await (const line of rl) {
-    if (!line.trim()) continue;
-    const typeScan = readTopLevelJsonEventType(line);
-    let type = typeScan.status === "FOUND" ? typeScan.value : "";
-    let item;
-    if (typeScan.status === "UNCERTAIN") {
-      try {
-        item = JSON.parse(line);
-        type = item?.type || "";
-      } catch {
-        continue;
-      }
-    }
-    if (typeScan.status === "NOT_FOUND") continue;
+  for await (const { item } of streamSessionRecords(file, {
+    ...readerOptions,
+    calculateSha256: true,
+    implementation,
+    summary: readerSummary,
+  })) {
+    const type = item?.type || "";
     if (type !== "session_meta" && type !== "turn_context") continue;
-    if (!item) {
-      try { item = JSON.parse(line); } catch { continue; }
-    }
     if (type === "session_meta" && item.payload) {
       const payloadId = item.payload.id || item.payload.session_id || "";
       if (!meta.hasSessionMeta) {
@@ -910,14 +923,13 @@ async function readSessionRoutingMeta(file) {
     if (type === "turn_context" && item.payload) meta.cwd = item.payload.cwd || meta.cwd;
   }
   if (!meta.timestamp && stat) meta.timestamp = stat.mtime.toISOString();
-  const afterRead = await fsp.stat(file);
   meta.routingSnapshot = {
-    sha256: fileHash.digest("hex"),
-    beforeSizeBytes: stat?.size ?? null,
-    beforeMtimeMs: stat?.mtimeMs ?? null,
-    afterSizeBytes: afterRead.size,
-    afterMtimeMs: afterRead.mtimeMs,
-    stable: Boolean(stat && sameFileVersion(stat, afterRead)),
+    sha256: readerSummary.fileSha256,
+    beforeSizeBytes: readerSummary.beforeSizeBytes,
+    beforeMtimeMs: readerSummary.beforeMtimeMs,
+    afterSizeBytes: readerSummary.afterSizeBytes,
+    afterMtimeMs: readerSummary.afterMtimeMs,
+    stable: readerSummary.stable,
   };
   return meta;
 }
@@ -1196,7 +1208,7 @@ function mirroredUserAttachmentsMatch(content, eventPayload) {
   const eventLocalImages = Array.isArray(eventPayload?.local_images) ? eventPayload.local_images : [];
   const eventAttachments = [...eventImages, ...eventLocalImages];
   return responseImages.length === eventAttachments.length
-    && responseImages.every((image, index) => image === eventAttachments[index]);
+    && responseImages.every((image, index) => attachmentIdentity(image) === attachmentIdentity(eventAttachments[index]));
 }
 
 function classifyRuntimeContextTypes(text) {
@@ -1231,19 +1243,6 @@ function extractCwdFromText(text) {
   if (xml) return xml[1].trim();
   const line = value.match(/(?:current working directory|working directory|cwd)\s*[:=]\s*([^\r\n]+)/i);
   return line ? line[1].trim() : "";
-}
-
-async function readLatestTimestamp(file, fallback = "") {
-  let latest = fallback;
-  const rl = readline.createInterface({ input: fs.createReadStream(file, { encoding: "utf8" }), crlfDelay: Infinity });
-  for await (const line of rl) {
-    if (!line.trim()) continue;
-    try {
-      const item = JSON.parse(line);
-      if (item.timestamp && (!latest || item.timestamp > latest)) latest = item.timestamp;
-    } catch {}
-  }
-  return latest;
 }
 
 async function copyStableRawSnapshot(sourcePath, destinationPath, options = {}) {
@@ -1361,9 +1360,14 @@ async function copyStableRawSnapshot(sourcePath, destinationPath, options = {}) 
             const exportHashStart = performance.now();
             const exportHashStage = options.verifyPublishedSnapshot ? "snapshot_parse" : "snapshot";
             diagnostic("export_hash_start", { ...diagnosticContext, attempt, stage: exportHashStage });
-            const verification = options.verifyPublishedSnapshot
-              ? await options.verifyPublishedSnapshot(destinationPath)
-              : { sha256: await io.hashFile(destinationPath), sizeBytes: exportedBeforeVerification.size, stable: true, value: null };
+            let verification;
+            try {
+              verification = options.verifyPublishedSnapshot
+                ? await options.verifyPublishedSnapshot(destinationPath)
+                : { sha256: await io.hashFile(destinationPath), sizeBytes: exportedBeforeVerification.size, stable: true, value: null };
+            } catch (error) {
+              throw new ExportError("EXPORT_DESTINATION_COLLISION", `Refusing to replace an existing Raw file that cannot be verified as the stable source: ${path.basename(destinationPath)}`);
+            }
             const exportHashMs = performance.now() - exportHashStart;
             diagnostic("export_hash_end", { ...diagnosticContext, attempt, stage: exportHashStage, duration_ms: roundMs(exportHashMs), bytes: verification.sizeBytes ?? exportedBeforeVerification.size });
             if (!options.verifyPublishedSnapshot) {
@@ -2208,13 +2212,10 @@ async function writeMarkdownTranscript(meta, outputPath, rawRel, profiler = null
   if (redactMarkdown) writeLine(out, "> Known token-shaped secrets are masked when detected in this reading view; the raw snapshot remains unchanged.");
   writeLine(out, "");
 
-  const rl = readline.createInterface({ input: fs.createReadStream(meta.file, { encoding: "utf8" }), crlfDelay: Infinity });
-  let recordNumber = 0;
-  for await (const line of rl) {
-    if (!line.trim()) continue;
-    recordNumber += 1;
-    let item;
-    try { item = JSON.parse(line); } catch { continue; }
+  for await (const { item, recordNumber } of streamSessionRecords(meta.file, {
+    ...context.readerOptions,
+    implementation: context.readerImplementation,
+  })) {
     if (item.timestamp && (!stats.updatedAt || item.timestamp > stats.updatedAt)) stats.updatedAt = item.timestamp;
     if (item.type === "turn_context" && item.payload?.model && !stats.model) stats.model = item.payload.model;
     if (item.type !== "response_item" || !item.payload) continue;
@@ -2356,7 +2357,7 @@ async function writeIndexFiles(dir, rows, profiler = null, context, sourceProtec
 }
 
 function createAttachmentMetrics() {
-  return {
+  const metrics = {
     embeddedCount: 0,
     embeddedBytes: 0,
     dataUrlCount: 0,
@@ -2369,7 +2370,12 @@ function createAttachmentMetrics() {
     referencedCount: 0,
     referencedKnownBytes: 0,
     referencedUnknownSizeCount: 0,
+    embeddedHashes: new Set(),
+    embeddedSequenceSha256: "",
+    maxDecodedBlockBytes: 0,
   };
+  attachmentSequenceHashes.set(metrics, createHash("sha256"));
+  return metrics;
 }
 
 function observeAttachmentMetrics(item, metrics) {
@@ -2378,6 +2384,10 @@ function observeAttachmentMetrics(item, metrics) {
 
   function visit(value, attachmentContext) {
     if (value === null || value === undefined) return;
+    if (isAttachmentDescriptor(value)) {
+      if (attachmentContext) recordAttachmentValue(value, null, metrics);
+      return;
+    }
     if (typeof value === "string") {
       if (attachmentContext) recordAttachmentValue(value, null, metrics);
       return;
@@ -2405,6 +2415,21 @@ function observeAttachmentMetrics(item, metrics) {
 }
 
 function recordAttachmentValue(value, knownBytes, metrics) {
+  if (isAttachmentDescriptor(value)) {
+    metrics.embeddedCount += 1;
+    metrics.embeddedBytes += value.decodedBytes;
+    metrics.embeddedHashes.add(value.sha256);
+    attachmentSequenceHashes.get(metrics)?.update(value.sha256, "ascii");
+    metrics.maxDecodedBlockBytes = Math.max(metrics.maxDecodedBlockBytes, value.maxDecodedBlockBytes || 0);
+    if (value.sourceKind === "data_url") {
+      metrics.dataUrlCount += 1;
+      metrics.dataUrlBytes += value.decodedBytes;
+    } else {
+      metrics.unprefixedEmbeddedCount += 1;
+      metrics.unprefixedEmbeddedBytes += value.decodedBytes;
+    }
+    return;
+  }
   const text = typeof value === "string" ? value : "";
   if (text.startsWith("data:") && text.includes(",")) {
     const payloadStart = text.indexOf(",") + 1;
@@ -2433,6 +2458,13 @@ function recordAttachmentValue(value, knownBytes, metrics) {
     if (Number.isFinite(knownBytes) && knownBytes >= 0) metrics.referencedKnownBytes += knownBytes;
     else metrics.referencedUnknownSizeCount += 1;
   }
+}
+
+function finishAttachmentMetrics(metrics) {
+  const hash = attachmentSequenceHashes.get(metrics);
+  if (!hash) return;
+  metrics.embeddedSequenceSha256 = hash.digest("hex");
+  attachmentSequenceHashes.delete(metrics);
 }
 
 function classifyAttachmentReference(value) {

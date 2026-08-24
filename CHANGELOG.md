@@ -8,6 +8,7 @@ All notable changes to this project are documented here.
 
 - Raised the exporter minimum runtime to Node.js 22 and the experimental extension minimum to Visual Studio Code 1.101. Exporter 0.2.x remains the final line for older Node.js versions; Node.js 18 and 20 are no longer tested.
 - Added the bounded streaming JSONL foundation for processing large string values without materializing complete records.
+- Integrated the bounded reader into the shared CLI and VS Code export core, with committed-record projections, incremental attachment hashing, differential legacy-reference tests, and fail-closed invalid-input handling.
 
 ## 0.2.0 – 2026-08-20
 

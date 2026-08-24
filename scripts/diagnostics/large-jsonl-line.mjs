@@ -84,6 +84,10 @@ async function main() {
       exitStatus = 1;
       stderr += `${stderr ? "\n" : ""}Decoded SHA-256 mismatch`;
     }
+    if (exitStatus === 0 && workerResult.written_sha256 !== decodedSha256) {
+      exitStatus = 1;
+      stderr += `${stderr ? "\n" : ""}Written attachment SHA-256 mismatch`;
+    }
     if (exitStatus === 0 && workerResult.records !== 1) {
       exitStatus = 1;
       stderr += `${stderr ? "\n" : ""}Expected exactly one completed JSONL record`;
@@ -117,6 +121,7 @@ async function main() {
       decoded_bytes: workerResult.decoded_bytes ?? null,
       expected_decoded_bytes: expectedDecodedBytes,
       decoded_sha256: workerResult.sha256 ?? null,
+      written_sha256: workerResult.written_sha256 ?? null,
       expected_decoded_sha256: decodedSha256,
       max_decoded_block_bytes: workerResult.max_decoded_block_bytes ?? null,
       max_write_block_bytes: workerResult.max_write_block_bytes ?? null,
