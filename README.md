@@ -52,7 +52,7 @@ All screenshots contain synthetic demo data only.
 
 If Windows blocks the launcher, see the [FAQ](FAQ.md#windows-blocks-the-cmd-launcher-does-it-need-administrator-rights).
 
-The launcher and CLI do not require administrator rights. The CLI requires Node.js 18 or newer; the Windows launcher can also use one known bundled Codex Desktop Node runtime when available.
+The launcher and CLI do not require administrator rights. Exporter 0.3.0 requires Node.js 22 or newer; the Windows launcher can also use one known bundled Codex Desktop Node runtime when that runtime meets the same requirement. Exporter 0.2.x is the final line for older Node.js versions, and Node.js 18 and 20 are no longer in the supported test matrix.
 
 ## CLI quick start
 
@@ -148,6 +148,8 @@ The optional Visual Studio Code extension calls the same export core as the CLI.
 - `Codex Export: Open Export Folder`
 
 The experimental extension is tested on Windows in local VS Code Desktop `file:` workspaces. Export and open commands reject untrusted windows, web, Remote SSH, WSL, Dev Container, and other non-local extension hosts. Other local desktop platforms are not explicitly blocked but remain unverified.
+
+The extension requires Visual Studio Code 1.101 or newer.
 
 Installation, settings, limitations, and packaged-candidate checks are documented in the [VS Code extension README](integrations/vscode/README.md) and [packaged VSIX test plan](integrations/vscode/PACKAGED_TEST_PLAN.md).
 

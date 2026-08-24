@@ -4,6 +4,8 @@ Experimental Visual Studio Code interface for Codex Project Chat Exporter.
 
 The exporter remains IDE-agnostic. The extension only provides native VS Code commands and calls the same local export core used by the CLI.
 
+Exporter 0.3.0 requires Node.js 22 or newer. The extension requires Visual Studio Code 1.101 or newer. Exporter 0.2.x remains the final line for older Node.js versions; Node.js 18 and 20 are no longer part of the supported test matrix.
+
 Unlike Codex's native TUI `/export`, the extension can export the current VS Code workspace or all detected local sessions through a native VS Code workflow.
 
 ## Features

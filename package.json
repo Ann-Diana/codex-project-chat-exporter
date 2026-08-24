@@ -1,17 +1,20 @@
 {
   "name": "codex-project-chat-exporter",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "description": "IDE-agnostic, project-aware local bulk export for active and archived Codex sessions.",
   "type": "module",
   "scripts": {
-    "test": "node ./tests/exporter-helpers.test.mjs && node ./tests/event-classification.test.mjs && node ./tests/exporter-integration.test.mjs && node ./integrations/vscode/tests/extension-adapter.test.mjs",
-    "test:cli": "node ./tests/exporter-helpers.test.mjs && node ./tests/event-classification.test.mjs && node ./tests/exporter-integration.test.mjs",
+    "test": "node ./tests/exporter-helpers.test.mjs && node ./tests/event-classification.test.mjs && node ./tests/exporter-integration.test.mjs && node ./tests/jsonl-token-adapter.test.mjs && node ./integrations/vscode/tests/extension-adapter.test.mjs",
+    "test:cli": "node ./tests/exporter-helpers.test.mjs && node ./tests/event-classification.test.mjs && node ./tests/exporter-integration.test.mjs && node ./tests/jsonl-token-adapter.test.mjs",
     "test:vscode": "node ./integrations/vscode/tests/extension-adapter.test.mjs",
     "package:vscode": "node ./integrations/vscode/scripts/build-vsix.mjs"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=22.0.0"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "dependencies": {
+    "stream-json": "3.5.0"
+  }
 }

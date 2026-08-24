@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
+import fsSync from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -25,8 +27,10 @@ async function writeLargeJsonl(file, requestedMiB) {
   const fixedBytes = Buffer.byteLength(prefix) + Buffer.byteLength(suffix);
   const payloadCharacters = Math.floor((targetBytes - fixedBytes) / 4) * 4;
   if (payloadCharacters < 12) throw new Error("Requested input is too small for the diagnostic record");
-  let decodedBytesRemaining = (payloadCharacters / 4) * 3;
+  const expectedDecodedBytes = (payloadCharacters / 4) * 3;
+  let decodedBytesRemaining = expectedDecodedBytes;
   let firstChunk = true;
+  const decodedHash = createHash("sha256");
   const handle = await fs.open(file, "wx");
   try {
     await handle.write(prefix, null, "utf8");
@@ -37,6 +41,7 @@ async function writeLargeJsonl(file, requestedMiB) {
         Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(chunk);
         firstChunk = false;
       }
+      decodedHash.update(chunk);
       await handle.write(chunk.toString("base64"), null, "ascii");
       decodedBytesRemaining -= size;
     }
@@ -44,7 +49,13 @@ async function writeLargeJsonl(file, requestedMiB) {
   } finally {
     await handle.close();
   }
-  return (await fs.stat(file)).size;
+  return { decodedSha256: decodedHash.digest("hex"), expectedDecodedBytes, inputBytes: (await fs.stat(file)).size };
+}
+
+async function sha256File(file) {
+  const hash = createHash("sha256");
+  for await (const chunk of fsSync.createReadStream(file)) hash.update(chunk);
+  return hash.digest("hex");
 }
 
 async function main() {
@@ -52,7 +63,8 @@ async function main() {
   const temp = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "codex-large-line-")));
   try {
     const input = path.join(temp, "large-line.jsonl");
-    const inputBytes = await writeLargeJsonl(input, requestedMiB);
+    const { decodedSha256, expectedDecodedBytes, inputBytes } = await writeLargeJsonl(input, requestedMiB);
+    const sourceSha256Before = await sha256File(input);
     const worker = path.join(path.dirname(fileURLToPath(import.meta.url)), "large-jsonl-line-worker.mjs");
     let stdout = "";
     let stderr = "";
@@ -67,6 +79,34 @@ async function main() {
       exitStatus = Number.isInteger(error.code) ? error.code : 1;
     }
     const workerResult = stdout.trim() ? JSON.parse(stdout) : {};
+    const sourceSha256After = await sha256File(input);
+    if (exitStatus === 0 && workerResult.sha256 !== decodedSha256) {
+      exitStatus = 1;
+      stderr += `${stderr ? "\n" : ""}Decoded SHA-256 mismatch`;
+    }
+    if (exitStatus === 0 && workerResult.records !== 1) {
+      exitStatus = 1;
+      stderr += `${stderr ? "\n" : ""}Expected exactly one completed JSONL record`;
+    }
+    if (exitStatus === 0 && workerResult.decoded_bytes !== expectedDecodedBytes) {
+      exitStatus = 1;
+      stderr += `${stderr ? "\n" : ""}Decoded byte count mismatch`;
+    }
+    if (exitStatus === 0 && (!Number.isSafeInteger(workerResult.max_decoded_block_bytes)
+      || !Number.isSafeInteger(workerResult.max_write_block_bytes)
+      || workerResult.max_decoded_block_bytes > 3072
+      || workerResult.max_write_block_bytes > 3072)) {
+      exitStatus = 1;
+      stderr += `${stderr ? "\n" : ""}Decoded or write block exceeds 3072 bytes`;
+    }
+    if (exitStatus === 0 && workerResult.peak_rss_bytes > 192 * MIB) {
+      exitStatus = 1;
+      stderr += `${stderr ? "\n" : ""}Peak RSS exceeds 192 MiB`;
+    }
+    if (exitStatus === 0 && sourceSha256After !== sourceSha256Before) {
+      exitStatus = 1;
+      stderr += `${stderr ? "\n" : ""}Source JSONL changed during the diagnostic`;
+    }
     console.log(JSON.stringify({
       input_bytes: inputBytes,
       input_mib: Math.round((inputBytes / MIB) * 1000) / 1000,
@@ -74,6 +114,16 @@ async function main() {
       peak_rss_bytes: workerResult.peak_rss_bytes ?? null,
       peak_heap_bytes: workerResult.peak_heap_bytes ?? null,
       records: workerResult.records ?? 0,
+      decoded_bytes: workerResult.decoded_bytes ?? null,
+      expected_decoded_bytes: expectedDecodedBytes,
+      decoded_sha256: workerResult.sha256 ?? null,
+      expected_decoded_sha256: decodedSha256,
+      max_decoded_block_bytes: workerResult.max_decoded_block_bytes ?? null,
+      max_write_block_bytes: workerResult.max_write_block_bytes ?? null,
+      source_sha256_before: sourceSha256Before,
+      source_sha256_after: sourceSha256After,
+      source_byte_identical: sourceSha256After === sourceSha256Before,
+      peak_rss_limit_mib: 192,
       exit_status: exitStatus,
       stderr: stderr.trim(),
     }, null, 2));
