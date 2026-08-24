@@ -22,8 +22,9 @@ Core behavior:
 - Markdown reading views distinguish direct user turns, assistant responses, subagent inputs, automatic runtime contexts, and unclassified user-role records. Canonical Raw events remain unchanged.
 - A filterable local HTML index and a machine-readable manifest.
 - A per-export content-addressed `assets/` store for decoded embedded attachments, with one file per unique SHA-256 and a complete usage manifest.
+- Optional deterministic DOCX reading views, with exactly one document per exported session.
 - Optional byte-preserving raw JSONL snapshots with an export-time SHA-256 verification.
-- Recorded tool-call inputs and outputs can optionally be included in Markdown transcripts.
+- Recorded tool-call inputs and outputs can optionally be included in Markdown and selected DOCX reading views.
 - Short Windows-friendly paths by default, with a readable-path option.
 
 Codex Project Chat Exporter reads the project association stored in each session's `cwd`; the original project folder does not need to remain present.
@@ -85,6 +86,12 @@ Show all CLI options:
 node .\bin\export-codex-project-chats.mjs --help
 ```
 
+Add one DOCX per exported session to any profile:
+
+```powershell
+node .\bin\export-codex-project-chats.mjs --all --profile readable --format docx --out C:\cx\codex-export
+```
+
 For local performance diagnosis without message text or full paths, add `--performance-profile C:\cx\export-profile.json`. This diagnostic performs additional analysis, can substantially slow the export, and is not intended for normal exports.
 
 The Node.js script runs on Windows, macOS, and Linux. The included `.cmd` launcher is Windows-only.
@@ -105,6 +112,9 @@ cx-YYYYMMDD-HHMMSS\
 ├─ md\
 │  ├─ p001-project-a\s0001.md
 │  └─ p002-project-b\s0002.md
+├─ docx\                         # only with --format docx
+│  ├─ p001-project-a\s0001.docx
+│  └─ p002-project-b\s0002.docx
 └─ raw\
    ├─ p001-project-a\s0001.jsonl
    └─ p002-project-b\s0002.jsonl
@@ -112,7 +122,7 @@ cx-YYYYMMDD-HHMMSS\
 
 `raw/` is omitted when raw export is disabled and the destination is new and empty. Reusing an output folder does not delete older files, so use a new empty destination for a clean result.
 
-Future Word and PDF formats are not implemented or selectable.
+DOCX is omitted unless `--format docx` is selected. PDF is not implemented or selectable.
 
 Readable-path exports use `markdown/` and longer timestamp/title-based filenames. Short paths remain the safer default for copying and unzipping on Windows.
 
@@ -125,7 +135,7 @@ When included, raw JSONL is the canonical byte-preserving representation. `raw_c
 - The application sends no telemetry, performs no built-in upload, and makes no application-level HTTP, web, or API calls.
 - Configured filesystem paths can still point to network-backed storage. Mapped network drives cannot be identified reliably in every configuration.
 - Markdown masking covers only some common token-shaped secrets and long base64-like values; it is best effort, not complete redaction.
-- Markdown, raw JSONL, HTML, both manifests, and files below `assets/` can contain confidential chats, local paths, names, runtime contexts, tool output, source code, and attachment data or references.
+- Markdown, DOCX, raw JSONL, HTML, both manifests, and files below `assets/` can contain confidential chats, local paths, names, runtime contexts, tool output, source code, and attachment data or references.
 - Raw JSONL and the manifest are not share-safe by default.
 - Review every generated file manually before sharing it.
 
@@ -164,6 +174,8 @@ Installation, settings, limitations, and packaged-candidate checks are documente
 - [FAQ](FAQ.md) – launcher troubleshooting, session discovery, privacy, and operational details.
 - [Archive format v1](docs/archive-format-v1.md) – canonical data, manifest, snapshots, classification, and import limits.
 - [Deduplicated asset store](docs/asset-store.md) – type allowlist, manifest schema, publication, links, and failure behavior.
+- [Shared document model and DOCX](docs/document-model-and-docx.md) – opt-in selection, OOXML safety, assets, reproducibility, and performance diagnostics.
+- [DOCX dependency review](docs/docx-dependency-review.md) – exact package tree, licenses, runtime compatibility, scripts, network guard, and audit result.
 - [Packaged VSIX test plan](integrations/vscode/PACKAGED_TEST_PLAN.md) – installation and manual Extension Host checks.
 - [Tests](tests) – synthetic helper, classification, integration, and adapter coverage.
 - [Changelog](CHANGELOG.md) – release history.

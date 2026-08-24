@@ -21,6 +21,16 @@ import {
   DeduplicatedAssetStore,
   probeHardLinkSupport,
 } from "../lib/asset-store.mjs";
+import {
+  DOCUMENT_ROLE,
+  createDocumentMessage,
+  createSessionDocumentHeader,
+} from "../lib/document-model.mjs";
+import {
+  buildDeterministicDocx,
+  resolveVerifiedAsset,
+  validateCanonicalDocx,
+} from "../lib/docx-renderer.mjs";
 
 const VERSION = "0.3.0";
 const ARCHIVE_FORMAT_VERSION = 1;
@@ -41,7 +51,7 @@ const RAW_COPY_STATUS = Object.freeze({
 const INCOMPLETE_MARKER_NAME = "EXPORT_INCOMPLETE.txt";
 const GENERATION_ROOT_FILES = Object.freeze(["manifest.json", "README.txt", "index.html", "index.md"]);
 const ASSET_MANIFEST_PATH = "assets/manifest.json";
-const ADDITIONAL_EXPORT_FORMATS = Object.freeze({ docx: false, pdf: false, attachments: true });
+const ADDITIONAL_EXPORT_FORMATS = Object.freeze({ pdf: false, attachments: true });
 const MIRRORED_USER_EVENT_MAX_DELAY_MS = 100;
 const attachmentSequenceHashes = new WeakMap();
 const USER_RECORD_KIND = Object.freeze({
@@ -143,6 +153,7 @@ async function exportArchive(options = {}) {
     readerImplementation: options._readerImplementation,
     readerOptions: options._readerOptions,
     assetStoreOptions: options._assetStoreOptions,
+    docxOptions: options._docxOptions,
   });
   return runCommand(context, { print: false });
 }
@@ -165,6 +176,12 @@ function argsFromExportOptions(options) {
   if (options.includeArchived === false) next["no-archived"] = true;
   if (options.allowOutputInToolDir) next["allow-output-in-tool-dir"] = true;
   if (options.performanceProfilePath) next["performance-profile"] = options.performanceProfilePath;
+  if (options.documentFormats !== undefined) {
+    if (!Array.isArray(options.documentFormats)) throw new ExportError("INVALID_EXPORT_FORMAT", "documentFormats must be an array");
+    const unique = new Set(options.documentFormats);
+    if (unique.size !== options.documentFormats.length || [...unique].some((format) => format !== "docx")) throw new ExportError("INVALID_EXPORT_FORMAT", `Unsupported document format selection: ${options.documentFormats.join(", ")}`);
+    if (unique.has("docx")) next.format = "docx";
+  }
   return next;
 }
 
@@ -181,7 +198,8 @@ function createExportContext(args = {}, cwd = process.cwd(), runtimeOptions = {}
   const projectFilter = args.project || "";
   const exportAll = args.all || !projectFilter;
   const exportProfile = resolveExportProfile(args.profile, Boolean(args["no-raw"]));
-  const exportFormats = Object.freeze({ ...EXPORT_PROFILES[exportProfile], ...ADDITIONAL_EXPORT_FORMATS });
+  const documentFormats = resolveDocumentFormats(args.format);
+  const exportFormats = Object.freeze({ ...EXPORT_PROFILES[exportProfile], docx: documentFormats.includes("docx"), ...ADDITIONAL_EXPORT_FORMATS });
   return Object.freeze({
     args: Object.freeze({ ...args }),
     codexHome,
@@ -205,13 +223,21 @@ function createExportContext(args = {}, cwd = process.cwd(), runtimeOptions = {}
     allowOutputInToolDir: Boolean(args["allow-output-in-tool-dir"]),
     performanceProfilePath: args["performance-profile"] ? path.resolve(args["performance-profile"]) : "",
     exportProfile,
+    documentFormats,
     exportFormats,
     progressReporter: createProgressReporter(runtimeOptions.onProgress, runtimeOptions.progressThrottleMs),
     diagnosticReporter: createDiagnosticReporter(runtimeOptions.onDiagnostic),
     readerImplementation: runtimeOptions.readerImplementation || SESSION_READER_IMPLEMENTATION.STREAMING,
     readerOptions: runtimeOptions.readerOptions || Object.freeze({}),
     assetStoreOptions: runtimeOptions.assetStoreOptions || Object.freeze({}),
+    docxOptions: runtimeOptions.docxOptions || Object.freeze({}),
   });
+}
+
+function resolveDocumentFormats(requestedFormat) {
+  if (!requestedFormat) return Object.freeze([]);
+  if (requestedFormat !== "docx") throw new ExportError("INVALID_EXPORT_FORMAT", `Unsupported export format: ${requestedFormat}`);
+  return Object.freeze(["docx"]);
 }
 
 function resolveExportProfile(requestedProfile, legacyNoRaw = false) {
@@ -450,6 +476,7 @@ async function runCommandInternal(context, { print, profiler, runState }) {
   const generation = await beginExportGeneration(outputDir, sourceProtection, { plannedPaths });
 
   if (exportFormats.markdown) await ensureSeparatedOutputDirectory(path.join(outputDir, markdownDirName), sourceProtection);
+  if (exportFormats.docx) await ensureSeparatedOutputDirectory(path.join(outputDir, "docx"), sourceProtection);
   if (copyRaw) await ensureSeparatedOutputDirectory(path.join(outputDir, "raw"), sourceProtection);
   await ensureSeparatedOutputDirectory(path.join(outputDir, "assets"), sourceProtection);
   assetStore = await DeduplicatedAssetStore.create({
@@ -485,7 +512,7 @@ async function runCommandInternal(context, { print, profiler, runState }) {
     if (copyRaw) {
       await ensureSeparatedOutputDirectory(path.join(outputDir, "raw", projectDir), sourceProtection);
       const rawPath = path.join(outputDir, rawRel);
-      const verifyPublishedSnapshot = exportFormats.markdown && !needsCompleteInventory
+      const verifyPublishedSnapshot = (exportFormats.markdown || exportFormats.docx) && !needsCompleteInventory
         ? async (publishedPath) => {
             const parseStart = performance.now();
             const parsedMeta = await readSessionMeta(publishedPath, {
@@ -536,7 +563,7 @@ async function runCommandInternal(context, { print, profiler, runState }) {
   profiler?.addPhase("assets", performance.now() - assetsStartedAt);
   diagnosticReporter("assets_end", { duration_ms: runtimeTimings.assets_ms, sessions: tasks.length });
 
-  if (exportFormats.markdown) progressReporter({ phase: "rendering", message: "Rendering reading views" });
+  if (exportFormats.markdown || exportFormats.docx) progressReporter({ phase: "rendering", message: "Rendering reading views" });
   const processingStartedAt = performance.now();
   const rows = [];
   for (const task of tasks) rows.push(await processExportTask(task, titleIndex, profiler, context, sourceProtection, generation, assetStore));
@@ -634,7 +661,7 @@ function printExportResult(result, context) {
 function parseArgs(argv) {
   const parsed = {};
   const flagArgs = new Set(["all", "include-tools", "no-raw", "no-redact-markdown", "no-archived", "list", "list-sessions", "diagnose", "help", "version", "readable-paths", "allow-output-in-tool-dir"]);
-  const valueArgs = new Set(["project", "out", "codex-home", "sessions-dir", "archived-dir", "session-index", "performance-profile", "profile"]);
+  const valueArgs = new Set(["project", "out", "codex-home", "sessions-dir", "archived-dir", "session-index", "performance-profile", "profile", "format"]);
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === "-h") {
@@ -816,8 +843,10 @@ async function processExportTask(task, titleIndex, profiler, context, sourceProt
   let renderMeta = meta;
   let stats = { userMessages: 0, assistantMessages: 0, subagentInputs: 0, runtimeContexts: 0, unclassifiedUserRoleRecords: 0, toolEvents: 0, model: meta.model || "", updatedAt: meta.updatedAt || meta.timestamp || "" };
   let markdownRel = "";
+  let docxRel = "";
+  const documentViewEnabled = exportFormats.markdown || exportFormats.docx;
 
-  if (exportFormats.markdown) {
+  if (documentViewEnabled) {
     const parsePath = copyRaw ? path.join(outputDir, rawRel) : meta.file;
     let parsedMeta = parsedSnapshotMeta || meta;
     if (!metadataAlreadyParsed && !parsedSnapshotMeta) {
@@ -854,10 +883,20 @@ async function processExportTask(task, titleIndex, profiler, context, sourceProt
     const sessionSlug = slug(renderMeta.displayTitle || renderMeta.title || renderMeta.id || sourceOriginalFilename).slice(0, 80);
     const start = renderMeta.timestamp ? stampForName(new Date(renderMeta.timestamp)) : stampForName(new Date());
     const baseName = pathStyle === "readable" ? `${start}-${sessionSlug || "codex-session"}-${sessionCode}` : sessionCode;
-    markdownRel = path.join(markdownDirName, projectDir, `${baseName}.md`);
-    await ensureSeparatedOutputDirectory(path.join(outputDir, markdownDirName, projectDir), sourceProtection);
+    if (exportFormats.markdown) {
+      markdownRel = path.join(markdownDirName, projectDir, `${baseName}.md`);
+      await ensureSeparatedOutputDirectory(path.join(outputDir, markdownDirName, projectDir), sourceProtection);
+    }
+    if (exportFormats.docx) {
+      docxRel = path.join("docx", projectDir, `${baseName}.docx`);
+      await ensureSeparatedOutputDirectory(path.join(outputDir, "docx", projectDir), sourceProtection);
+    }
     profiler?.recordAttachments(renderMeta.attachmentMetrics);
-    stats = await writeMarkdownTranscript(renderMeta, path.join(outputDir, markdownRel), copyRaw ? rawRel : "", profiler, meta, context, sourceProtection, generation, assetStore, assetSnapshot);
+    stats = await writeSessionDocuments(renderMeta, {
+      markdownPath: markdownRel ? path.join(outputDir, markdownRel) : "",
+      docxPath: docxRel ? path.join(outputDir, docxRel) : "",
+      rawRel: copyRaw ? rawRel : "",
+    }, profiler, meta, context, sourceProtection, generation, assetStore, assetSnapshot);
   } else {
     const title = neutralSessionTitle(meta);
     renderMeta = { ...meta, title, displayTitle: title, titleSource: "neutral_unclassified_snapshot", indexedTitleStatus: "NOT_EVALUATED", sessionKind: SESSION_KIND.UNKNOWN };
@@ -878,17 +917,18 @@ async function processExportTask(task, titleIndex, profiler, context, sourceProt
     started_at: renderMeta.timestamp || "",
     updated_at: stats.updatedAt || renderMeta.updatedAt || "",
     model: stats.model || renderMeta.model || "",
-    user_messages: exportFormats.markdown ? stats.userMessages : null,
-    assistant_messages: exportFormats.markdown ? stats.assistantMessages : null,
-    subagent_inputs: exportFormats.markdown ? stats.subagentInputs : null,
-    automatic_runtime_contexts: exportFormats.markdown ? stats.runtimeContexts : null,
-    unclassified_user_role_records: exportFormats.markdown ? stats.unclassifiedUserRoleRecords : null,
-    tool_events: exportFormats.markdown ? stats.toolEvents : null,
+    user_messages: documentViewEnabled ? stats.userMessages : null,
+    assistant_messages: documentViewEnabled ? stats.assistantMessages : null,
+    subagent_inputs: documentViewEnabled ? stats.subagentInputs : null,
+    automatic_runtime_contexts: documentViewEnabled ? stats.runtimeContexts : null,
+    unclassified_user_role_records: documentViewEnabled ? stats.unclassifiedUserRoleRecords : null,
+    tool_events: documentViewEnabled ? stats.toolEvents : null,
     source_jsonl: meta.file,
     source_original_filename: sourceOriginalFilename,
     source_root: sourceRoot,
     source_relative_path: sourceRelativePath,
     markdown_file: markdownRel,
+    ...(exportFormats.docx ? { docx_file: docxRel } : {}),
     raw_export_file: copyRaw ? rawRel : "",
     raw_export_name: copyRaw ? rawExportName : "",
     raw_sha256: snapshot?.sha256 || "",
@@ -900,9 +940,9 @@ async function processExportTask(task, titleIndex, profiler, context, sourceProt
     source_snapshot_before_mtime_ms: snapshot?.sourceBeforeMtimeMs ?? null,
     source_snapshot_after_size_bytes: snapshot?.sourceAfterSizeBytes ?? null,
     source_snapshot_after_mtime_ms: snapshot?.sourceAfterMtimeMs ?? null,
-    jsonl_line_count: exportFormats.markdown ? renderMeta.jsonlLineCount : null,
-    parsed_event_count: exportFormats.markdown ? renderMeta.parsedEventCount : null,
-    invalid_jsonl_line_count: exportFormats.markdown ? renderMeta.invalidJsonLines : null,
+    jsonl_line_count: documentViewEnabled ? renderMeta.jsonlLineCount : null,
+    parsed_event_count: documentViewEnabled ? renderMeta.parsedEventCount : null,
+    invalid_jsonl_line_count: documentViewEnabled ? renderMeta.invalidJsonLines : null,
   };
 }
 
@@ -2122,6 +2162,10 @@ function collectPreviousGenerationPaths(manifest, assetManifest = null) {
     if (!session || typeof session !== "object") throw new ExportError("INVALID_PREVIOUS_MANIFEST", "The previous manifest contains an invalid session record");
     if (session.raw_export_file) addAuthorizedGenerationPath(authorized, session.raw_export_file, "raw");
     if (session.markdown_file) addAuthorizedGenerationPath(authorized, session.markdown_file, "markdown");
+    if (session.docx_file) {
+      if (manifest.formats.docx !== true) throw new ExportError("INVALID_PREVIOUS_MANIFEST", "The previous manifest contains a DOCX path without declaring the DOCX format");
+      addAuthorizedGenerationPath(authorized, session.docx_file, "docx");
+    }
   }
   return authorized;
 }
@@ -2203,9 +2247,10 @@ function validatedGenerationRelativePath(value, kind = "any") {
   const validRoot = GENERATION_ROOT_FILES.includes(normalized);
   const validRaw = normalized.startsWith("raw/") && normalized.toLowerCase().endsWith(".jsonl");
   const validMarkdown = (normalized.startsWith("md/") || normalized.startsWith("markdown/")) && normalized.toLowerCase().endsWith(".md");
+  const validDocx = normalized.startsWith("docx/") && normalized.toLowerCase().endsWith(".docx");
   const validAssetManifest = normalized === ASSET_MANIFEST_PATH;
   const validAsset = isCanonicalAssetPath(normalized);
-  if ((kind === "root" && !validRoot) || (kind === "raw" && !validRaw) || (kind === "markdown" && !validMarkdown) || (kind === "asset_manifest" && !validAssetManifest) || (kind === "asset" && !validAsset) || (kind === "any" && !validRoot && !validRaw && !validMarkdown && !validAssetManifest && !validAsset)) {
+  if ((kind === "root" && !validRoot) || (kind === "raw" && !validRaw) || (kind === "markdown" && !validMarkdown) || (kind === "docx" && !validDocx) || (kind === "asset_manifest" && !validAssetManifest) || (kind === "asset" && !validAsset) || (kind === "any" && !validRoot && !validRaw && !validMarkdown && !validDocx && !validAssetManifest && !validAsset)) {
     throw new ExportError("INVALID_PREVIOUS_MANIFEST", `The previous manifest contains an unexpected export path: ${normalized}`);
   }
   return normalized;
@@ -2387,109 +2432,175 @@ function readableProjectDir(projectDirs, cwd) {
   return projectDirs.get(key);
 }
 
-async function writeMarkdownTranscript(meta, outputPath, rawRel, profiler = null, profileSession = meta, context, sourceProtection, generation, assetStore, assetSnapshot) {
+async function writeSessionDocuments(meta, paths, profiler = null, profileSession = meta, context, sourceProtection, generation, assetStore, assetSnapshot) {
   const { redactMarkdown, includeTools } = context;
+  const { markdownPath, docxPath, rawRel } = paths;
   const renderStart = performance.now();
-  let writeStart = renderStart;
   const stats = { userMessages: 0, assistantMessages: 0, subagentInputs: 0, runtimeContexts: 0, unclassifiedUserRoleRecords: 0, toolEvents: 0, model: meta.model || "", updatedAt: meta.latestTimestamp || meta.updatedAt || meta.timestamp || "" };
   const readerSummary = createSessionReaderSummary();
-  await writeSeparatedOutputFile(outputPath, sourceProtection, async (handle) => {
-  const out = fs.createWriteStream(outputPath, { fd: handle.fd, encoding: "utf8", autoClose: false });
-  writeLine(out, `# ${meta.displayTitle || meta.title || "Codex Project Chat Export"}`);
-  writeLine(out, "");
-  writeLine(out, `- Project: ${meta.cwd || ""}`);
-  writeLine(out, `- Storage: ${meta.storage || "active"}`);
-  writeLine(out, `- Session ID: ${meta.id || ""}`);
-  writeLine(out, `- Started: ${formatDerivedTimestamp(meta.timestamp)}`);
-  writeLine(out, `- Updated: ${formatDerivedTimestamp(stats.updatedAt)}`);
-  if (meta.model) writeLine(out, `- Model: ${meta.model}`);
-  if (rawRel) writeLine(out, `- Raw JSONL: ${rawRel.replace(/\\/g, "/")}`);
-  writeLine(out, "");
-  writeLine(out, "> Markdown is a classified, derived reading view. The raw JSONL file is the canonical lossless session snapshot.");
-  if (redactMarkdown) writeLine(out, "> Known token-shaped secrets are masked when detected in this reading view; the raw snapshot remains unchanged.");
-  writeLine(out, "");
+  const documentMessages = [];
 
-  for await (const { item, recordNumber } of streamSessionRecords(meta.file, {
-    ...context.readerOptions,
-    calculateSha256: true,
-    implementation: context.readerImplementation,
-    summary: readerSummary,
-  })) {
-    if (item.timestamp && (!stats.updatedAt || item.timestamp > stats.updatedAt)) stats.updatedAt = item.timestamp;
-    if (item.type === "turn_context" && item.payload?.model && !stats.model) stats.model = item.payload.model;
-    if (item.type !== "response_item" || !item.payload) continue;
-    const payload = item.payload;
-    if (payload.type === "message" && payload.role === "user") {
-      const text = extractText(payload.content);
-      const attachments = collectAttachmentDescriptorsInOrder(payload.content);
-      if (!text.trim() && !attachments.length) continue;
-      const classification = meta.eventAnalysis?.classifications?.get(recordNumber) || { kind: USER_RECORD_KIND.UNCLASSIFIED_USER_ROLE_RECORD, runtimeContextTypes: [] };
-      if (classification.kind === USER_RECORD_KIND.DIRECT_USER_TURN) {
-        stats.userMessages += 1;
-        writeLine(out, `## User${formatDerivedTimestampSuffix(item.timestamp)}`);
-        writeLine(out, "");
-        if (text.trim()) {
-          writeLine(out, redactMarkdown ? redactSecrets(text) : text);
-          writeLine(out, "");
-        }
-        writeAssetReferences(out, attachments, assetStore, outputPath);
-      } else if (classification.kind === USER_RECORD_KIND.SUBAGENT_INPUT) {
-        stats.subagentInputs += 1;
-        if (text.trim()) writeClassifiedContext(out, "Subagent input / parent-agent handoff", text, item.timestamp, redactMarkdown);
-        writeAssetReferences(out, attachments, assetStore, outputPath);
-      } else if (classification.kind === USER_RECORD_KIND.AUTOMATIC_RUNTIME_CONTEXT) {
-        stats.runtimeContexts += 1;
-        const suffix = classification.runtimeContextTypes.length ? ` – ${classification.runtimeContextTypes.join(" / ")}` : "";
-        if (text.trim()) writeClassifiedContext(out, `Automatic runtime context${suffix}`, text, item.timestamp, redactMarkdown);
-        writeAssetReferences(out, attachments, assetStore, outputPath);
-      } else {
-        stats.unclassifiedUserRoleRecords += 1;
-        if (text.trim()) writeClassifiedContext(out, "Unclassified user-role record", text, item.timestamp, redactMarkdown);
-        writeAssetReferences(out, attachments, assetStore, outputPath);
-      }
-      continue;
-    }
-    if (payload.type === "message" && payload.role === "assistant") {
-      const text = extractText(payload.content);
-      const attachments = collectAttachmentDescriptorsInOrder(payload.content);
-      if (!text.trim() && !attachments.length) continue;
-      stats.assistantMessages += 1;
-      writeLine(out, `## Assistant${formatDerivedTimestampSuffix(item.timestamp)}`);
+  const addDocumentMessage = (role, label, text, attachments, timestamp, recordNumber) => {
+    if (!docxPath) return;
+    documentMessages.push(createDocumentMessage({
+      sessionId: meta.id,
+      recordOrdinal: recordNumber,
+      role,
+      label,
+      text,
+      attachments,
+      timestamp: formatDerivedTimestamp(timestamp),
+    }));
+  };
+
+  const processRecords = async (out) => {
+    if (out) {
+      writeLine(out, `# ${meta.displayTitle || meta.title || "Codex Project Chat Export"}`);
       writeLine(out, "");
-      if (text.trim()) {
-        writeLine(out, redactMarkdown ? redactSecrets(text) : text);
-        writeLine(out, "");
-      }
-      writeAssetReferences(out, attachments, assetStore, outputPath);
-      continue;
+      writeLine(out, `- Project: ${meta.cwd || ""}`);
+      writeLine(out, `- Storage: ${meta.storage || "active"}`);
+      writeLine(out, `- Session ID: ${meta.id || ""}`);
+      writeLine(out, `- Started: ${formatDerivedTimestamp(meta.timestamp)}`);
+      writeLine(out, `- Updated: ${formatDerivedTimestamp(stats.updatedAt)}`);
+      if (meta.model) writeLine(out, `- Model: ${meta.model}`);
+      if (rawRel) writeLine(out, `- Raw JSONL: ${rawRel.replace(/\\/g, "/")}`);
+      writeLine(out, "");
+      writeLine(out, "> Markdown is a classified, derived reading view. The raw JSONL file is the canonical lossless session snapshot.");
+      if (redactMarkdown) writeLine(out, "> Known token-shaped secrets are masked when detected in this reading view; the raw snapshot remains unchanged.");
+      writeLine(out, "");
     }
-    if (["function_call", "custom_tool_call", "function_call_output", "custom_tool_call_output"].includes(payload.type)) {
-      stats.toolEvents += 1;
-      if (includeTools) {
-        writeLine(out, `## Tool ${payload.type}${payload.name ? ` - ${payload.name}` : ""}${formatDerivedTimestampSuffix(item.timestamp)}`);
-        writeLine(out, "");
-        const toolText = payload.arguments || payload.input || payload.output || JSON.stringify(payload, null, 2);
-        const renderedToolText = redactMarkdown ? redactSecrets(String(toolText)) : String(toolText);
-        const fence = markdownFence(renderedToolText);
-        writeLine(out, `${fence}text`);
-        writeLine(out, renderedToolText);
-        writeLine(out, fence);
-        writeLine(out, "");
-        writeAssetReferences(out, collectAttachmentDescriptorsInOrder(payload), assetStore, outputPath);
+
+    for await (const { item, recordNumber } of streamSessionRecords(meta.file, {
+      ...context.readerOptions,
+      calculateSha256: true,
+      implementation: context.readerImplementation,
+      summary: readerSummary,
+    })) {
+      if (item.timestamp && (!stats.updatedAt || item.timestamp > stats.updatedAt)) stats.updatedAt = item.timestamp;
+      if (item.type === "turn_context" && item.payload?.model && !stats.model) stats.model = item.payload.model;
+      if (item.type !== "response_item" || !item.payload) continue;
+      const payload = item.payload;
+      if (payload.type === "message" && payload.role === "user") {
+        const text = extractText(payload.content);
+        const renderedText = redactMarkdown ? redactSecrets(text) : text;
+        const attachments = collectAttachmentDescriptorsInOrder(payload.content);
+        if (!text.trim() && !attachments.length) continue;
+        const classification = meta.eventAnalysis?.classifications?.get(recordNumber) || { kind: USER_RECORD_KIND.UNCLASSIFIED_USER_ROLE_RECORD, runtimeContextTypes: [] };
+        if (classification.kind === USER_RECORD_KIND.DIRECT_USER_TURN) {
+          stats.userMessages += 1;
+          if (out) {
+            writeLine(out, `## User${formatDerivedTimestampSuffix(item.timestamp)}`);
+            writeLine(out, "");
+            if (text.trim()) { writeLine(out, renderedText); writeLine(out, ""); }
+            writeAssetReferences(out, attachments, assetStore, markdownPath);
+          }
+          addDocumentMessage(DOCUMENT_ROLE.USER, "User", renderedText, attachments, item.timestamp, recordNumber);
+        } else if (classification.kind === USER_RECORD_KIND.SUBAGENT_INPUT) {
+          stats.subagentInputs += 1;
+          if (out) {
+            if (text.trim()) writeClassifiedContext(out, "Subagent input / parent-agent handoff", text, item.timestamp, redactMarkdown);
+            writeAssetReferences(out, attachments, assetStore, markdownPath);
+          }
+          addDocumentMessage(DOCUMENT_ROLE.SUBAGENT, "Subagent input / parent-agent handoff", renderedText, attachments, item.timestamp, recordNumber);
+        } else if (classification.kind === USER_RECORD_KIND.AUTOMATIC_RUNTIME_CONTEXT) {
+          stats.runtimeContexts += 1;
+          const suffix = classification.runtimeContextTypes.length ? ` – ${classification.runtimeContextTypes.join(" / ")}` : "";
+          const label = `Automatic runtime context${suffix}`;
+          if (out) {
+            if (text.trim()) writeClassifiedContext(out, label, text, item.timestamp, redactMarkdown);
+            writeAssetReferences(out, attachments, assetStore, markdownPath);
+          }
+          addDocumentMessage(DOCUMENT_ROLE.RUNTIME_CONTEXT, label, renderedText, attachments, item.timestamp, recordNumber);
+        } else {
+          stats.unclassifiedUserRoleRecords += 1;
+          if (out) {
+            if (text.trim()) writeClassifiedContext(out, "Unclassified user-role record", text, item.timestamp, redactMarkdown);
+            writeAssetReferences(out, attachments, assetStore, markdownPath);
+          }
+          addDocumentMessage(DOCUMENT_ROLE.UNCLASSIFIED, "Unclassified user-role record", renderedText, attachments, item.timestamp, recordNumber);
+        }
+        continue;
+      }
+      if (payload.type === "message" && payload.role === "assistant") {
+        const text = extractText(payload.content);
+        const renderedText = redactMarkdown ? redactSecrets(text) : text;
+        const attachments = collectAttachmentDescriptorsInOrder(payload.content);
+        if (!text.trim() && !attachments.length) continue;
+        stats.assistantMessages += 1;
+        if (out) {
+          writeLine(out, `## Assistant${formatDerivedTimestampSuffix(item.timestamp)}`);
+          writeLine(out, "");
+          if (text.trim()) { writeLine(out, renderedText); writeLine(out, ""); }
+          writeAssetReferences(out, attachments, assetStore, markdownPath);
+        }
+        addDocumentMessage(DOCUMENT_ROLE.ASSISTANT, "Assistant", renderedText, attachments, item.timestamp, recordNumber);
+        continue;
+      }
+      if (["function_call", "custom_tool_call", "function_call_output", "custom_tool_call_output"].includes(payload.type)) {
+        stats.toolEvents += 1;
+        if (includeTools) {
+          const toolText = payload.arguments || payload.input || payload.output || JSON.stringify(payload, null, 2);
+          const renderedToolText = redactMarkdown ? redactSecrets(String(toolText)) : String(toolText);
+          const attachments = collectAttachmentDescriptorsInOrder(payload);
+          const label = `Tool ${payload.type}${payload.name ? ` - ${payload.name}` : ""}`;
+          const fence = markdownFence(renderedToolText);
+          if (out) {
+            writeLine(out, `## ${label}${formatDerivedTimestampSuffix(item.timestamp)}`);
+            writeLine(out, "");
+            writeLine(out, `${fence}text`);
+            writeLine(out, renderedToolText);
+            writeLine(out, fence);
+            writeLine(out, "");
+            writeAssetReferences(out, attachments, assetStore, markdownPath);
+          }
+          addDocumentMessage(DOCUMENT_ROLE.TOOL, label, `${fence}text\n${renderedToolText}\n${fence}`, attachments, item.timestamp, recordNumber);
+        }
       }
     }
+  };
+
+  if (markdownPath) {
+    const writeStart = performance.now();
+    await writeSeparatedOutputFile(markdownPath, sourceProtection, async (handle) => {
+      const out = fs.createWriteStream(markdownPath, { fd: handle.fd, encoding: "utf8", autoClose: false });
+      await processRecords(out);
+      await new Promise((resolve, reject) => { out.end(resolve); out.on("error", reject); });
+    }, generation);
+    const writeMs = performance.now() - writeStart;
+    const outputSize = (await fsp.stat(markdownPath)).size;
+    profiler?.addPhase("markdown_writing", writeMs, 0, outputSize);
+    profiler?.recordSession(profileSession, "markdown_write_ms", writeMs, 0, outputSize);
+  } else {
+    await processRecords(null);
   }
-  if (!readerSummary.stable || readerSummary.fileSha256 !== assetSnapshot?.sha256) throw new ExportError("SOURCE_CHANGED_DURING_EXPORT", "Session content changed between asset collection and Markdown rendering");
+
+  if (!readerSummary.stable || readerSummary.fileSha256 !== assetSnapshot?.sha256) {
+    const renderingLabel = markdownPath ? "Markdown rendering" : "DOCX rendering";
+    throw new ExportError("SOURCE_CHANGED_DURING_EXPORT", `Session content changed between asset collection and ${renderingLabel}`);
+  }
   const renderMs = performance.now() - renderStart;
-  profiler?.addPhase("markdown_rendering", renderMs, meta.fileSize || 0, 0);
-  profiler?.recordSession(profileSession, "markdown_render_ms", renderMs, meta.fileSize || 0, 0);
-  writeStart = performance.now();
-  await new Promise((resolve, reject) => { out.end(resolve); out.on("error", reject); });
-  }, generation);
-  const writeMs = performance.now() - writeStart;
-  const outputSize = (await fsp.stat(outputPath)).size;
-  profiler?.addPhase("markdown_writing", writeMs, 0, outputSize);
-  profiler?.recordSession(profileSession, "markdown_write_ms", writeMs, 0, outputSize);
+  if (markdownPath) {
+    profiler?.addPhase("markdown_rendering", renderMs, meta.fileSize || 0, 0);
+    profiler?.recordSession(profileSession, "markdown_render_ms", renderMs, meta.fileSize || 0, 0);
+  }
+
+  if (docxPath) {
+    const docxStart = performance.now();
+    const header = createSessionDocumentHeader({
+      ...meta,
+      latestTimestamp: stats.updatedAt,
+      model: stats.model,
+      rawReference: rawRel ? rawRel.replace(/\\/g, "/") : "",
+    });
+    const resolveAsset = context.docxOptions.resolveAsset || ((attachment) => resolveVerifiedAsset(assetStore, context.outputDir, attachment));
+    const buffer = await buildDeterministicDocx({ header, messages: documentMessages, resolveAsset, packer: context.docxOptions.packer });
+    const writeBuffer = context.docxOptions.writeBuffer || ((handle, value) => handle.writeFile(value));
+    await writeSeparatedOutputFile(docxPath, sourceProtection, (handle) => writeBuffer(handle, buffer), generation);
+    const docxMs = performance.now() - docxStart;
+    const outputSize = (await fsp.stat(docxPath)).size;
+    profiler?.addPhase("docx_rendering", docxMs, meta.fileSize || 0, outputSize);
+    profiler?.recordSession(profileSession, "docx_render_ms", docxMs, meta.fileSize || 0, outputSize);
+  }
   return stats;
 }
 
@@ -2546,19 +2657,26 @@ async function writeIndexFiles(dir, rows, profiler = null, context, sourceProtec
   const generatedAt = generation?.generatedAt || new Date().toISOString();
   const indexRows = [...rows].sort((a, b) => (b.updated_at || b.started_at || "").localeCompare(a.updated_at || a.started_at || ""));
   const includeRawColumn = indexRows.some((row) => Boolean(row.raw_export_file));
+  const includeDocxColumn = indexRows.some((row) => Boolean(row.docx_file));
   const indexStart = performance.now();
   diagnosticReporter("index_start", { rows: indexRows.length, html: Boolean(exportFormats.html), markdown: Boolean(exportFormats.markdown) });
   let indexBytes = 0;
   if (exportFormats.markdown) {
-    const md = ["# Codex Project Chat Export Index", "", `Generated: ${generatedAt}`, "", includeRawColumn ? "| Project | Title | Storage | Started | Markdown | Raw |" : "| Project | Title | Storage | Started | Markdown |", includeRawColumn ? "| --- | --- | --- | --- | --- | --- |" : "| --- | --- | --- | --- | --- |"];
-    for (const row of indexRows) md.push(includeRawColumn ? `| ${mdCell(row.project_name || row.project)} | ${mdCell(row.title || row.session_id)} | ${mdCell(row.storage)} | ${mdCell(formatDerivedTimestamp(row.started_at))} | ${mdLink(row.markdown_file)} | ${row.raw_export_file ? mdLink(row.raw_export_file) : ""} |` : `| ${mdCell(row.project_name || row.project)} | ${mdCell(row.title || row.session_id)} | ${mdCell(row.storage)} | ${mdCell(formatDerivedTimestamp(row.started_at))} | ${mdLink(row.markdown_file)} |`);
+    const md = ["# Codex Project Chat Export Index", "", `Generated: ${generatedAt}`, ""];
+    if (includeDocxColumn) {
+      md.push(includeRawColumn ? "| Project | Title | Storage | Started | Markdown | DOCX | Raw |" : "| Project | Title | Storage | Started | Markdown | DOCX |", includeRawColumn ? "| --- | --- | --- | --- | --- | --- | --- |" : "| --- | --- | --- | --- | --- | --- |");
+      for (const row of indexRows) md.push(includeRawColumn ? `| ${mdCell(row.project_name || row.project)} | ${mdCell(row.title || row.session_id)} | ${mdCell(row.storage)} | ${mdCell(formatDerivedTimestamp(row.started_at))} | ${mdLink(row.markdown_file)} | ${mdLink(row.docx_file)} | ${row.raw_export_file ? mdLink(row.raw_export_file) : ""} |` : `| ${mdCell(row.project_name || row.project)} | ${mdCell(row.title || row.session_id)} | ${mdCell(row.storage)} | ${mdCell(formatDerivedTimestamp(row.started_at))} | ${mdLink(row.markdown_file)} | ${mdLink(row.docx_file)} |`);
+    } else {
+      md.push(includeRawColumn ? "| Project | Title | Storage | Started | Markdown | Raw |" : "| Project | Title | Storage | Started | Markdown |", includeRawColumn ? "| --- | --- | --- | --- | --- | --- |" : "| --- | --- | --- | --- | --- |");
+      for (const row of indexRows) md.push(includeRawColumn ? `| ${mdCell(row.project_name || row.project)} | ${mdCell(row.title || row.session_id)} | ${mdCell(row.storage)} | ${mdCell(formatDerivedTimestamp(row.started_at))} | ${mdLink(row.markdown_file)} | ${row.raw_export_file ? mdLink(row.raw_export_file) : ""} |` : `| ${mdCell(row.project_name || row.project)} | ${mdCell(row.title || row.session_id)} | ${mdCell(row.storage)} | ${mdCell(formatDerivedTimestamp(row.started_at))} | ${mdLink(row.markdown_file)} |`);
+    }
     md.push("");
     const markdownIndex = `${md.join("\n")}\n`;
     await writeSeparatedOutputFile(path.join(dir, "index.md"), sourceProtection, (handle) => handle.writeFile(markdownIndex, "utf8"), generation);
     indexBytes += Buffer.byteLength(markdownIndex);
   }
   if (exportFormats.html) {
-    const htmlIndex = renderHtmlIndex(indexRows, generatedAt, { assetStore, reducedMetadata: exportProfile === EXPORT_PROFILE.SOURCE_SNAPSHOTS });
+    const htmlIndex = renderHtmlIndex(indexRows, generatedAt, { assetStore, reducedMetadata: exportProfile === EXPORT_PROFILE.SOURCE_SNAPSHOTS && !exportFormats.docx });
     await writeSeparatedOutputFile(path.join(dir, "index.html"), sourceProtection, (handle) => handle.writeFile(htmlIndex, "utf8"), generation);
     indexBytes += Buffer.byteLength(htmlIndex);
   }
@@ -2944,7 +3062,8 @@ async function writeSummary(dir, rows, context, sourceProtection, generation, as
   const archivedCount = rows.filter((row) => row.storage === "archived").length;
   const lines = ["Codex Project Chat Export", "=========================", "", `Generated: ${generation?.generatedAt || new Date().toISOString()}`, `Codex home: ${codexHome}`, `Sessions dir: ${sessionsDir}`, `Archived sessions dir: ${includeArchived ? archivedSessionsDir : "disabled"}`, `Export profile: ${exportProfile}`, `Path style: ${pathStyle}`, `Sessions exported: ${rows.length}`, `Active sessions: ${activeCount}`, `Archived sessions: ${archivedCount}`, `Attachment occurrences: ${assetSummary.assetOccurrences}`, `Unique assets: ${assetSummary.uniqueAssets}`, `Unique asset bytes: ${assetSummary.uniqueAssetBytes}`, `Deduplicated asset bytes saved: ${assetSummary.deduplicatedBytesSaved}`, "", "Projects:", ...Array.from(projects.entries()).map(([project, count]) => `- ${project}: ${count}`), "", "Notes:"];
   if (exportFormats.markdown) lines.push(`- ${markdownDirName}/ contains classified, derived reading views.`);
-  else lines.push("- This profile intentionally does not create human-readable session transcripts or classify session events.");
+  else if (!exportFormats.docx) lines.push("- This profile intentionally does not create human-readable session transcripts or classify session events.");
+  if (exportFormats.docx) lines.push("- docx/ contains one deterministic, classified DOCX reading view per exported session.");
   if (copyRaw) lines.push("- raw/ contains canonical byte-preserving session JSONL snapshots.");
   else lines.push("- This profile does not include canonical raw JSONL snapshots.");
   lines.push("- assets/ contains content-addressed decoded attachments; assets/manifest.json records validated types and every stable usage occurrence.");
@@ -2967,10 +3086,15 @@ async function verifyExport(dir, rows, profiler = null, context, options = {}) {
     if (!stat?.isFile() || stat.size === 0) throw new ExportError("EXPORT_VERIFICATION_FAILED", `Missing or empty output file: ${file}`);
   }
   for (const row of rows) {
-    for (const rel of [row.markdown_file, row.raw_export_file].filter(Boolean)) {
+    for (const rel of [row.markdown_file, row.docx_file, row.raw_export_file].filter(Boolean)) {
       const file = path.join(dir, rel);
       const stat = await fsp.stat(file).catch(() => null);
       if (!stat?.isFile() || stat.size === 0) throw new ExportError("EXPORT_VERIFICATION_FAILED", `Missing or empty session export: ${file}`);
+    }
+    if (row.docx_file) {
+      const docxPath = path.join(dir, row.docx_file);
+      const bytes = await fsp.readFile(docxPath);
+      await validateCanonicalDocx(bytes);
     }
     if (row.raw_export_file) {
       if (row.raw_copy_status !== RAW_COPY_STATUS.VERIFIED_AT_EXPORT || !isCanonicalIsoTimestamp(row.raw_verified_at) || row.snapshot_status !== "STABLE" || !row.raw_sha256) throw new ExportError("EXPORT_VERIFICATION_FAILED", `Raw snapshot verification metadata is incomplete: ${row.raw_export_file}`);
@@ -3015,6 +3139,7 @@ Options:
   --session-index <file>      Use a custom session_index.jsonl file.
   --include-tools             Include tool call input/output in Markdown.
   --profile <name>            Use complete, readable, or source-snapshots. Explicit profile wins over --no-raw.
+  --format docx               Add one deterministic DOCX reading view per exported session.
   --no-raw                    Legacy shorthand for the readable profile when --profile is omitted.
   --no-redact-markdown        Disable redaction in Markdown and derived display titles.
   --readable-paths            Use longer human-readable export file names.
@@ -3167,6 +3292,7 @@ function renderHtmlIndex(rows, generatedAt, options = {}) {
   const assetStore = options.assetStore;
   const includeRawColumn = rows.some((row) => Boolean(row.raw_export_file));
   const includeMarkdownColumn = rows.some((row) => Boolean(row.markdown_file));
+  const includeDocxColumn = rows.some((row) => Boolean(row.docx_file));
   const bodyRows = rows.map((row) => {
     const startedAt = formatDerivedTimestamp(row.started_at);
     const updatedAt = formatDerivedTimestamp(row.updated_at);
@@ -3175,15 +3301,16 @@ function renderHtmlIndex(rows, generatedAt, options = {}) {
       : [row.project_name || row.project, row.title || row.session_id, row.storage, startedAt, updatedAt, row.model].join(" ").toLowerCase();
     const rawCell = includeRawColumn ? `<td>${row.raw_export_file ? htmlLink(row.raw_export_file, path.posix.basename(toPosixPath(row.raw_export_file))) : ""}</td>` : "";
     const markdownCell = includeMarkdownColumn ? `<td>${row.markdown_file ? htmlLink(row.markdown_file, path.posix.basename(toPosixPath(row.markdown_file))) : ""}</td>` : "";
+    const docxCell = includeDocxColumn ? `<td>${row.docx_file ? htmlLink(row.docx_file, path.posix.basename(toPosixPath(row.docx_file))) : ""}</td>` : "";
     const assetsCell = `<td>${renderHtmlAssetReferences(assetStore?.referencesForSession(row.session_id) || [])}</td>`;
-    if (reducedMetadata) return `      <tr data-search="${htmlEscape(searchable)}"><td>${htmlEscape(row.project_name || row.project)}</td><td>${htmlEscape(row.storage || "active")}</td><td>${htmlEscape(startedAt)}</td><td>${htmlEscape(row.session_id)}</td>${assetsCell}${rawCell}</tr>`;
-    return `      <tr data-search="${htmlEscape(searchable)}"><td>${htmlEscape(row.project_name || row.project)}</td><td>${htmlEscape(row.title || row.session_id)}</td><td>${htmlEscape(row.storage || "active")}</td><td>${htmlEscape(startedAt)}</td><td>${htmlEscape(row.model || "")}</td>${assetsCell}${markdownCell}${rawCell}</tr>`;
+    if (reducedMetadata) return `      <tr data-search="${htmlEscape(searchable)}"><td>${htmlEscape(row.project_name || row.project)}</td><td>${htmlEscape(row.storage || "active")}</td><td>${htmlEscape(startedAt)}</td><td>${htmlEscape(row.session_id)}</td>${assetsCell}${docxCell}${rawCell}</tr>`;
+    return `      <tr data-search="${htmlEscape(searchable)}"><td>${htmlEscape(row.project_name || row.project)}</td><td>${htmlEscape(row.title || row.session_id)}</td><td>${htmlEscape(row.storage || "active")}</td><td>${htmlEscape(startedAt)}</td><td>${htmlEscape(row.model || "")}</td>${assetsCell}${markdownCell}${docxCell}${rawCell}</tr>`;
   }).join("\n");
   const filterPlaceholder = reducedMetadata ? "Project, storage, date, or session ID" : "Project, title, date, model, active or archived";
   const profileNote = reducedMetadata ? "\n  <p class=\"meta\">Source snapshots intentionally use a reduced index and do not inspect complete readable metadata.</p>" : "";
   const header = reducedMetadata
-    ? `<th>Project</th><th>Storage</th><th>Started</th><th>Session ID</th><th>Assets</th>${includeRawColumn ? "<th>Raw</th>" : ""}`
-    : `<th>Project</th><th>Title</th><th>Storage</th><th>Started</th><th>Model</th><th>Assets</th>${includeMarkdownColumn ? "<th>Markdown</th>" : ""}${includeRawColumn ? "<th>Raw</th>" : ""}`;
+    ? `<th>Project</th><th>Storage</th><th>Started</th><th>Session ID</th><th>Assets</th>${includeDocxColumn ? "<th>DOCX</th>" : ""}${includeRawColumn ? "<th>Raw</th>" : ""}`
+    : `<th>Project</th><th>Title</th><th>Storage</th><th>Started</th><th>Model</th><th>Assets</th>${includeMarkdownColumn ? "<th>Markdown</th>" : ""}${includeDocxColumn ? "<th>DOCX</th>" : ""}${includeRawColumn ? "<th>Raw</th>" : ""}`;
   return `<!doctype html>
 <html lang="en">
 <head>

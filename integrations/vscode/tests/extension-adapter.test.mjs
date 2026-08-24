@@ -418,7 +418,8 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
   assert.equal(lastOptions.scope, "project", "central quick pick should route Current Workspace to the project export");
   assert.equal(lastOptions.workspacePath, oneWorkspace);
   assert.equal(lastOptions.exportProfile, "complete");
-  assert.equal(fake.quickPicks.length, 2, "the central command should ask for scope and profile");
+  assert.equal(fake.quickPicks.length, 3, "the central command should ask for scope, profile, and optional document formats");
+  assert.deepEqual(lastOptions.documentFormats, [], "DOCX must remain opt-in");
   const diagnosticOutput = fake.output.filter((line) => line.startsWith("[DIAG] "));
   assert.match(diagnosticOutput[0], new RegExp(`Diagnostic build ${DIAGNOSTIC_BUILD_ID} \\| run_id export-\\d+ \\| command_start`), "the visible output must identify the diagnostic build and run immediately");
   const diagnosticLines = activation.getDiagnosticEvents();
@@ -437,7 +438,11 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
 
 {
   lastOptions = undefined;
-  const fake = createFakeVscode({ config: { outputDirectory }, quickPickSelector: (items, options) => options?.placeHolder === "Choose what to export" ? items.find((item) => item.label === "All Sessions") : items.find((item) => item.label === "Readable export") });
+  const fake = createFakeVscode({ config: { outputDirectory }, quickPickSelector: (items, options) => {
+    if (options?.placeHolder === "Choose what to export") return items.find((item) => item.label === "All Sessions");
+    if (options?.placeHolder === "Choose an export profile") return items.find((item) => item.label === "Readable export");
+    return items.find((item) => item.label === "Standard formats only");
+  } });
   const context = createContext(temp);
   const adapter = createExtensionAdapter(fake.vscode, { loadExporter: async () => exporter });
   await adapter.activate(context);
@@ -448,12 +453,30 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
 
 {
   lastOptions = undefined;
-  const fake = createFakeVscode({ config: { outputDirectory }, quickPickSelector: (items, options) => options?.placeHolder === "Choose what to export" ? items.find((item) => item.label === "All Sessions") : items.find((item) => item.label === "Source snapshots") });
+  const fake = createFakeVscode({ config: { outputDirectory }, quickPickSelector: (items, options) => {
+    if (options?.placeHolder === "Choose what to export") return items.find((item) => item.label === "All Sessions");
+    if (options?.placeHolder === "Choose an export profile") return items.find((item) => item.label === "Source snapshots");
+    return items.find((item) => item.label === "Standard formats only");
+  } });
   const context = createContext(temp);
   const adapter = createExtensionAdapter(fake.vscode, { loadExporter: async () => exporter });
   await adapter.activate(context);
   await fake.registered.get(COMMANDS.exportMenu)();
   assert.equal(lastOptions.exportProfile, "source-snapshots", "the source-snapshot profile must be selectable from the native Quick Pick");
+}
+
+{
+  lastOptions = undefined;
+  const fake = createFakeVscode({ config: { outputDirectory }, quickPickSelector: (items, options) => {
+    if (options?.placeHolder === "Choose what to export") return items.find((item) => item.label === "All Sessions");
+    if (options?.placeHolder === "Choose an export profile") return items.find((item) => item.label === "Readable export");
+    return items.find((item) => item.label === "Add DOCX");
+  } });
+  const context = createContext(temp);
+  const adapter = createExtensionAdapter(fake.vscode, { loadExporter: async () => exporter });
+  await adapter.activate(context);
+  await fake.registered.get(COMMANDS.exportMenu)();
+  assert.deepEqual(lastOptions.documentFormats, ["docx"], "the adapter must pass the shared explicit document-format contract");
 }
 
 {
@@ -477,6 +500,22 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
   assert.equal(exportCalled, false);
   assert.equal(fake.openDialogs.length, 0, "profile cancellation must not ask for or write an output folder");
   assert.equal(activation.getDiagnosticEvents().at(-1).status, "CANCELLED", "cancellation before profile selection must not be reported as completed");
+}
+
+{
+  let exportCalled = false;
+  const fake = createFakeVscode({ quickPickSelector: (items, options) => {
+    if (options?.placeHolder === "Choose what to export") return items[0];
+    if (options?.placeHolder === "Choose an export profile") return items[0];
+    return undefined;
+  }, config: { diagnosticOutput: true } });
+  const context = createContext(temp);
+  const adapter = createExtensionAdapter(fake.vscode, { loadExporter: async () => ({ exportArchive: async () => { exportCalled = true; } }) });
+  const activation = await adapter.activate(context);
+  assert.equal(await fake.registered.get(COMMANDS.exportMenu)(), undefined, "cancelling the document-format quick pick should stop cleanly");
+  assert.equal(exportCalled, false);
+  assert.equal(fake.openDialogs.length, 0, "format cancellation must happen before output selection");
+  assert.equal(activation.getDiagnosticEvents().at(-1).status, "CANCELLED");
 }
 
 {
@@ -532,6 +571,7 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
   assert.equal(lastOptions.exportProfile, "complete", "hidden compatibility commands use the complete profile");
   assert.equal(lastOptions.pathStyle, "readable");
   assert.equal(lastOptions.includeTools, true);
+  assert.deepEqual(lastOptions.documentFormats, [], "hidden compatibility commands must not enable DOCX");
   assert.equal(result.exportedSessionCount, 4);
 }
 
@@ -818,13 +858,13 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
   await fsp.writeFile(realSource, `${realItems.map((item) => JSON.stringify(item)).join("\n")}\n`, "utf8");
   const corePath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "bin", "export-codex-project-chats.mjs");
   const realExporter = await import(pathToFileURL(corePath).href);
-  const directResult = await realExporter.exportArchive({ codexHome: realCodexHome, scope: "all", outputDirectory: directOutput, pathStyle: "readable" });
+  const directResult = await realExporter.exportArchive({ codexHome: realCodexHome, scope: "all", outputDirectory: directOutput, pathStyle: "readable", documentFormats: ["docx"] });
 
   const fake = createFakeVscode({ config: { outputDirectory: adapterOutput, codexHome: realCodexHome, pathStyle: "readable" } });
   const context = createContext(temp);
   const adapter = createExtensionAdapter(fake.vscode, { loadExporter: async () => realExporter });
   await adapter.activate(context);
-  const adapterResult = await adapter.exportAllSessions(context);
+  const adapterResult = await adapter.exportAllSessions(context, undefined, ["docx"]);
   const directManifest = JSON.parse(await fsp.readFile(directResult.manifestPath, "utf8"));
   const adapterManifest = JSON.parse(await fsp.readFile(adapterResult.manifestPath, "utf8"));
   for (const manifest of [directManifest, adapterManifest]) {
@@ -835,6 +875,7 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
   for (const session of directManifest.sessions) {
     assert.equal(await fsp.readFile(path.join(adapterOutput, session.markdown_file), "utf8"), await fsp.readFile(path.join(directOutput, session.markdown_file), "utf8"));
     assert.deepEqual(await fsp.readFile(path.join(adapterOutput, session.raw_export_file)), await fsp.readFile(path.join(directOutput, session.raw_export_file)));
+    assert.deepEqual(await fsp.readFile(path.join(adapterOutput, session.docx_file)), await fsp.readFile(path.join(directOutput, session.docx_file)), "VS Code and direct shared-core DOCX bytes must match");
   }
 }
 

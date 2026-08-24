@@ -87,7 +87,7 @@
           "type": "boolean",
           "default": false,
           "scope": "application",
-          "description": "Include potentially sensitive tool call input and output in the derived Markdown reading views."
+          "description": "Include potentially sensitive tool call input and output in derived Markdown and selected DOCX reading views."
         },
         "codexProjectChatExporter.diagnosticOutput": {
           "type": "boolean",

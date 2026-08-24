@@ -14,7 +14,7 @@ Unlike Codex's native TUI `/export`, the extension can export the current VS Cod
 
 - **Current Workspace** exports detected active and archived sessions associated with the currently opened local workspace.
 - **All Sessions** exports all detected active and archived sessions from the configured Codex home.
-- Choose scope and export profile from two native Quick Picks.
+- Choose scope, export profile, and optional document formats from native Quick Picks.
 - Open the latest generated HTML index.
 - Open the folder from the last successfully completed and recorded export.
 - Show throttled phase and `Processing session X of Y` progress, success messages, warnings, and technical details in the `Codex Project Chat Exporter` output channel.
@@ -40,7 +40,7 @@ code --install-extension "C:\path\to\codex-project-chat-exporter-vscode-0.1.3.vs
 
 ## Commands
 
-- `Codex Export: Export…` – choose **Current Workspace** or **All Sessions**, then select an export profile.
+- `Codex Export: Export…` – choose **Current Workspace** or **All Sessions**, select an export profile, then keep standard formats or add one DOCX per session.
 - `Codex Export: Open Latest Export`
 - `Codex Export: Open Export Folder`
 
@@ -50,12 +50,14 @@ code --install-extension "C:\path\to\codex-project-chat-exporter-vscode-0.1.3.vs
 - **Readable export** creates deduplicated assets, Markdown reading views, indexes, and manifests without new Raw snapshots.
 - **Source snapshots** creates deduplicated assets, Raw snapshots verified at export time, a reduced HTML index, and manifests without Markdown transcripts.
 
+After the profile selection, **Standard formats only** preserves that profile exactly. **Add DOCX** adds one deterministic DOCX reading view per session through the same shared exporter contract. It does not create a combined document or enable PDF.
+
 ## Settings
 
 - **Output Directory** – local folder for generated exports. If empty, the extension asks on the first export.
 - **Codex Home** – optional location of the local Codex data. If empty, the extension uses `CODEX_HOME` or the default `.codex` folder.
 - **Path Style** – choose compact or longer readable filenames.
-- **Include Tools** – include recorded tool-call inputs and outputs in Markdown. This data can be sensitive.
+- **Include Tools** – include recorded tool-call inputs and outputs in Markdown and selected DOCX reading views. This data can be sensitive.
 - **Diagnostic Output** – add redacted timing details to the output channel for troubleshooting.
 
 Output Directory and Codex Home must be local absolute paths and must be configured as User settings. Network, device, Workspace, and Workspace Folder paths are not supported.

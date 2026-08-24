@@ -5,8 +5,8 @@
   "description": "IDE-agnostic, project-aware local bulk export for active and archived Codex sessions.",
   "type": "module",
   "scripts": {
-    "test": "node ./tests/exporter-helpers.test.mjs && node ./tests/event-classification.test.mjs && node ./tests/exporter-integration.test.mjs && node ./tests/jsonl-token-adapter.test.mjs && node ./tests/session-record-reader.test.mjs && node ./tests/asset-store.test.mjs && node ./tests/reading-output-golden.test.mjs && node ./integrations/vscode/tests/extension-adapter.test.mjs",
-    "test:cli": "node ./tests/exporter-helpers.test.mjs && node ./tests/event-classification.test.mjs && node ./tests/exporter-integration.test.mjs && node ./tests/jsonl-token-adapter.test.mjs && node ./tests/session-record-reader.test.mjs && node ./tests/asset-store.test.mjs && node ./tests/reading-output-golden.test.mjs",
+    "test": "node ./tests/exporter-helpers.test.mjs && node ./tests/event-classification.test.mjs && node ./tests/exporter-integration.test.mjs && node ./tests/jsonl-token-adapter.test.mjs && node ./tests/session-record-reader.test.mjs && node ./tests/asset-store.test.mjs && node ./tests/document-model.test.mjs && node ./tests/docx-renderer.test.mjs && node ./tests/docx-export-integration.test.mjs && node ./tests/reading-output-golden.test.mjs && node ./integrations/vscode/tests/extension-adapter.test.mjs",
+    "test:cli": "node ./tests/exporter-helpers.test.mjs && node ./tests/event-classification.test.mjs && node ./tests/exporter-integration.test.mjs && node ./tests/jsonl-token-adapter.test.mjs && node ./tests/session-record-reader.test.mjs && node ./tests/asset-store.test.mjs && node ./tests/document-model.test.mjs && node ./tests/docx-renderer.test.mjs && node ./tests/docx-export-integration.test.mjs && node ./tests/reading-output-golden.test.mjs",
     "test:vscode": "node ./integrations/vscode/tests/extension-adapter.test.mjs",
     "package:vscode": "node ./integrations/vscode/scripts/build-vsix.mjs"
   },
@@ -15,6 +15,9 @@
   },
   "license": "MIT",
   "dependencies": {
-    "stream-json": "3.5.0"
+    "docx": "9.7.1",
+    "jszip": "3.10.1",
+    "stream-json": "3.5.0",
+    "xml-js": "1.6.11"
   }
 }

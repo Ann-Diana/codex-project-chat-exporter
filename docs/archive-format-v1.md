@@ -51,7 +51,7 @@ Relevant top-level fields include:
 - `canonical_representation`: currently `raw_jsonl`.
 - `canonical_representation_included`: whether this export contains the canonical Raw JSONL snapshots.
 - `export_profile`: `complete`, `readable`, or `source-snapshots`.
-- `formats`: explicit current and reserved format flags. Deduplicated embedded attachments are always enabled; Word and PDF remain false and are not selectable.
+- `formats`: explicit current and reserved format flags. Deduplicated embedded attachments are always enabled; `docx` is true only after explicit format selection, while PDF remains false and is not selectable.
 - `generated_at`: export timestamp.
 - `codex_home`, `sessions_dir`, `archived_sessions_dir`, and `session_index`: local diagnostic paths.
 - `path_style`: `short` or `readable`.
@@ -210,7 +210,9 @@ Reasoning, internal events, invalid JSON lines, and other event types remain ava
 
 `index.html` and, where present, `index.md` provide metadata navigation. Complete and Readable HTML indexes filter project, title, date, model, and storage status; they are not transcript full-text search engines.
 
-The `source-snapshots` profile intentionally omits Markdown transcripts and `index.md`. Its reduced HTML metadata index links to Raw snapshots checked at export time and to any extracted assets, but it does not imply that event classification was performed; classification-derived counters are `null` in that profile.
+When DOCX is selected, each session manifest entry includes one `docx_file` export-relative path and the indexes link to that per-session document. DOCX is a classified derived view based on the shared document contract; it is never canonical and never combines sessions. PNG/JPEG media may be embedded, while conservative attachment references represent GIF, WebP, `.bin`, missing rendering support, or blocked local links. The package contains no external relationships or active content.
+
+Without DOCX selection, the `source-snapshots` profile intentionally omits Markdown transcripts and `index.md`. Its reduced HTML metadata index links to Raw snapshots checked at export time and to any extracted assets, but it does not imply that event classification was performed; classification-derived counters are `null`. Selecting DOCX explicitly adds the per-session classified document pass, populated counters, DOCX links, and the corresponding full metadata index while still omitting Markdown.
 
 ## Import boundary
 

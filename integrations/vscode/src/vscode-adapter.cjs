@@ -24,6 +24,10 @@ const EXPORT_PROFILES = Object.freeze([
   { label: "Readable export", description: "Markdown reading views and HTML index without Raw JSONL", profile: "readable" },
   { label: "Source snapshots", description: "Raw JSONL checked at export time and index without human-readable transcripts", profile: "source-snapshots" },
 ]);
+const DOCUMENT_FORMATS = Object.freeze([
+  { label: "Standard formats only", description: "Keep the selected profile unchanged", documentFormats: [] },
+  { label: "Add DOCX", description: "Create one deterministic DOCX reading view per exported session", documentFormats: ["docx"] },
+]);
 
 function createExtensionAdapter(vscode, injected = {}) {
   const deps = {
@@ -83,21 +87,24 @@ function createExtensionAdapter(vscode, injected = {}) {
     const pickedProfile = await vscode.window.showQuickPick(EXPORT_PROFILES, { placeHolder: "Choose an export profile" });
     if (!pickedProfile) return undefined;
     writeDiagnostic("profile_selected", { profile: pickedProfile.profile });
-    return picked.scope === "project" ? exportCurrentWorkspace(context, pickedProfile.profile) : exportAllSessions(context, pickedProfile.profile);
+    const pickedFormats = await vscode.window.showQuickPick(DOCUMENT_FORMATS, { placeHolder: "Choose optional document formats" });
+    if (!pickedFormats) return undefined;
+    writeDiagnostic("document_formats_selected", { document_formats: pickedFormats.documentFormats });
+    return picked.scope === "project" ? exportCurrentWorkspace(context, pickedProfile.profile, pickedFormats.documentFormats) : exportAllSessions(context, pickedProfile.profile, pickedFormats.documentFormats);
   }
 
-  async function exportCurrentWorkspace(context, explicitProfile) {
+  async function exportCurrentWorkspace(context, explicitProfile, documentFormats = []) {
     const workspacePath = await getLocalWorkspacePath();
     if (!workspacePath) return undefined;
-    return runExport(context, { scope: "project", workspacePath }, explicitProfile);
+    return runExport(context, { scope: "project", workspacePath }, explicitProfile, documentFormats);
   }
 
-  async function exportAllSessions(context, explicitProfile) {
+  async function exportAllSessions(context, explicitProfile, documentFormats = []) {
     ensureDesktopLocalExtensionHost();
-    return runExport(context, { scope: "all" }, explicitProfile);
+    return runExport(context, { scope: "all" }, explicitProfile, documentFormats);
   }
 
-  async function runExport(context, scopeOptions, explicitProfile) {
+  async function runExport(context, scopeOptions, explicitProfile, documentFormats) {
     ensureDesktopLocalExtensionHost();
     if (exportRunning) {
       vscode.window.showWarningMessage("A Codex export is already running. Wait for it to finish before starting another export.");
@@ -122,6 +129,7 @@ function createExtensionAdapter(vscode, injected = {}) {
         workspacePath: scopeOptions.workspacePath,
         outputDirectory,
         exportProfile: configuredProfile,
+        documentFormats: [...documentFormats],
         pathStyle: config.get("pathStyle", "short"),
         includeTools: getUserOnlyConfigValue("includeTools", false),
       };

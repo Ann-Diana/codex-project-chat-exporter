@@ -125,7 +125,13 @@ A previous manifest describes archive membership but is not trusted as proof tha
 
 Use **Readable** when the goal is reading or searching transcripts without creating new Raw snapshots. **Complete** and **Source snapshots** can be substantially larger and slower because they copy Raw JSONL and verify it with SHA-256.
 
-An explicit CLI `--profile` wins over the legacy switch. Without an explicit profile, CLI `--no-raw` is only a compatibility shorthand for `readable`. The VS Code extension asks for the profile on every export.
+An explicit CLI `--profile` wins over the legacy switch. Without an explicit profile, CLI `--no-raw` is only a compatibility shorthand for `readable`. The VS Code extension asks for the profile and optional document format on every central-menu export.
+
+## How do I create DOCX files?
+
+Add `--format docx` to a CLI export, or choose **Add DOCX** after the VS Code scope and profile selections. DOCX is opt-in and adds exactly one document per session; it never creates one combined document. PNG and JPEG assets are embedded, while GIF, WebP, and `.bin` files are shown as attachment references. PDF is not implemented or selectable.
+
+DOCX is a derived reading view, not a canonical snapshot. It contains no external relationships or active content, does not download remote resources, and blocks `file:` and UNC links. See [Shared document model and DOCX](docs/document-model-and-docx.md).
 
 ## How can I diagnose a slow export without logging chat content?
 
@@ -133,7 +139,7 @@ Add `--performance-profile <absolute-json-file>` to a CLI export only when diagn
 
 The optional VS Code diagnostic output follows the same message-free, path-redacted model and is disabled by default. The normal VS Code output channel is different: it records complete output, HTML-index, and manifest paths for usability and can therefore contain sensitive local paths.
 
-Processing is scoped one session at a time, but JSONL parsing still materializes one complete line. A single unusually large line, especially one containing an embedded image, can therefore determine peak memory. The current optimization deliberately avoids forced global garbage collection and a riskier full streaming-parser rewrite.
+Processing is scoped one session at a time. The bounded streaming reader incrementally decodes embedded attachments instead of materializing a complete Base64 value. Ordinary message text remains a complete string for the current record, so a single unusually large non-attachment text value can still determine peak memory.
 
 ## Why does the exporter refuse an output folder?
 
