@@ -131,7 +131,7 @@ An explicit CLI `--profile` wins over the legacy switch. Without an explicit pro
 
 Add `--format docx` to a CLI export, or choose **Add DOCX** after the VS Code scope and profile selections. DOCX is opt-in and adds exactly one document per session; it never creates one combined document. PNG and JPEG assets are embedded, while GIF, WebP, and `.bin` files are shown as attachment references. PDF is not implemented or selectable.
 
-DOCX is a derived reading view, not a canonical snapshot. It contains no external relationships or active content, does not download remote resources, and blocks `file:` and UNC links. See [Shared document model and DOCX](docs/document-model-and-docx.md).
+DOCX is a derived reading view, not a canonical snapshot. Valid bounded HTTP/HTTPS links use controlled external hyperlink relationships, but external image/media/resource relationships and active content are forbidden. The exporter does not download remote resources; `file:`, UNC/device, `javascript:`, `data:`, unsupported, invalid, and overlong targets remain non-clickable text. See [Shared document model and DOCX](docs/document-model-and-docx.md).
 
 ## How can I diagnose a slow export without logging chat content?
 

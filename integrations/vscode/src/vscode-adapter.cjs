@@ -417,16 +417,17 @@ function formatRuntimeSummary(timings = {}) {
 
 async function defaultLoadExporter(context) {
   const extensionRoot = await fs.promises.realpath(path.resolve(context.extensionPath));
-  const packagedPath = path.join(context.extensionPath, "vendor", "codex-project-chat-exporter", "bin", "export-codex-project-chats.mjs");
-  const integrityPath = path.join(context.extensionPath, "vendor", "codex-project-chat-exporter", "integrity.json");
-  const [packagedStat, integrityStat] = await Promise.all([fs.promises.lstat(packagedPath), fs.promises.lstat(integrityPath)]).catch((error) => {
+  const vendorRoot = path.join(context.extensionPath, "vendor", "codex-project-chat-exporter");
+  const packagedPath = path.join(vendorRoot, "bin", "export-codex-project-chats.mjs");
+  const integrityPath = path.join(vendorRoot, "integrity.json");
+  const [vendorStat, packagedStat, integrityStat] = await Promise.all([fs.promises.lstat(vendorRoot), fs.promises.lstat(packagedPath), fs.promises.lstat(integrityPath)]).catch((error) => {
     throw Object.assign(new Error(`The packaged Codex exporter core is missing or inaccessible: ${error?.message || error}`), { code: "PACKAGED_EXPORTER_MISSING" });
   });
-  if (!packagedStat.isFile() || packagedStat.isSymbolicLink() || !integrityStat.isFile() || integrityStat.isSymbolicLink()) {
+  if (!vendorStat.isDirectory() || vendorStat.isSymbolicLink() || !packagedStat.isFile() || packagedStat.isSymbolicLink() || !integrityStat.isFile() || integrityStat.isSymbolicLink()) {
     throw Object.assign(new Error("The packaged Codex exporter core or integrity record is not a regular package file"), { code: "PACKAGED_EXPORTER_INTEGRITY_FAILED" });
   }
-  const [canonicalModule, canonicalIntegrity] = await Promise.all([fs.promises.realpath(packagedPath), fs.promises.realpath(integrityPath)]);
-  if (!isOpenPathInside(canonicalModule, extensionRoot) || !isOpenPathInside(canonicalIntegrity, extensionRoot)) {
+  const [canonicalVendorRoot, canonicalModule, canonicalIntegrity] = await Promise.all([fs.promises.realpath(vendorRoot), fs.promises.realpath(packagedPath), fs.promises.realpath(integrityPath)]);
+  if (openPathKey(canonicalVendorRoot) !== openPathKey(vendorRoot) || !isOpenPathInside(canonicalVendorRoot, extensionRoot) || !isOpenPathInside(canonicalModule, canonicalVendorRoot) || !isOpenPathInside(canonicalIntegrity, canonicalVendorRoot)) {
     throw Object.assign(new Error("The packaged Codex exporter core resolves outside the installed extension"), { code: "PACKAGED_EXPORTER_INTEGRITY_FAILED" });
   }
   let integrity;
@@ -435,15 +436,49 @@ async function defaultLoadExporter(context) {
   } catch (error) {
     throw Object.assign(new Error(`The packaged Codex exporter integrity record cannot be read: ${error?.message || error}`), { code: "PACKAGED_EXPORTER_INTEGRITY_FAILED" });
   }
-  const expectedSha256 = integrity?.files?.["bin/export-codex-project-chats.mjs"];
-  if (!isLowerHexSha256(expectedSha256)) {
+  if (integrity?.format !== 1 || !integrity.files || typeof integrity.files !== "object" || Array.isArray(integrity.files)) {
     throw Object.assign(new Error("The packaged Codex exporter integrity record is invalid"), { code: "PACKAGED_EXPORTER_INTEGRITY_FAILED" });
   }
-  const actualSha256 = await sha256LocalFile(canonicalModule);
-  if (actualSha256 !== expectedSha256) {
-    throw Object.assign(new Error("The packaged Codex exporter core does not match its integrity record"), { code: "PACKAGED_EXPORTER_INTEGRITY_FAILED" });
+  const expectedFiles = Object.keys(integrity.files).sort(compareOpenPaths);
+  if (!expectedFiles.length || !expectedFiles.includes("bin/export-codex-project-chats.mjs") || expectedFiles.some((relative) => !isSafeIntegrityRelativePath(relative) || !isLowerHexSha256(integrity.files[relative]))) {
+    throw Object.assign(new Error("The packaged Codex exporter integrity file list is invalid"), { code: "PACKAGED_EXPORTER_INTEGRITY_FAILED" });
+  }
+  const actualFiles = [];
+  async function visit(directory) {
+    const entries = (await fs.promises.readdir(directory, { withFileTypes: true })).sort((left, right) => compareOpenPaths(left.name, right.name));
+    for (const entry of entries) {
+      const candidate = path.join(directory, entry.name);
+      const stat = await fs.promises.lstat(candidate);
+      if (stat.isSymbolicLink()) throw Object.assign(new Error(`Symbolic links are forbidden in the packaged exporter: ${entry.name}`), { code: "PACKAGED_EXPORTER_INTEGRITY_FAILED" });
+      const canonical = await fs.promises.realpath(candidate);
+      if (openPathKey(canonical) !== openPathKey(candidate) || !isOpenPathInside(canonical, canonicalVendorRoot)) throw Object.assign(new Error("The packaged exporter tree resolves through an alias or outside its root"), { code: "PACKAGED_EXPORTER_INTEGRITY_FAILED" });
+      if (stat.isDirectory()) await visit(candidate);
+      else if (stat.isFile()) {
+        const relative = path.relative(vendorRoot, candidate).replaceAll("\\", "/");
+        if (relative !== "integrity.json") actualFiles.push(relative);
+      } else throw Object.assign(new Error("Special files are forbidden in the packaged exporter"), { code: "PACKAGED_EXPORTER_INTEGRITY_FAILED" });
+    }
+  }
+  await visit(vendorRoot);
+  actualFiles.sort(compareOpenPaths);
+  if (JSON.stringify(actualFiles) !== JSON.stringify(expectedFiles)) {
+    throw Object.assign(new Error("The packaged exporter file tree does not exactly match its integrity record"), { code: "PACKAGED_EXPORTER_INTEGRITY_FAILED" });
+  }
+  for (const relative of expectedFiles) {
+    const actualSha256 = await sha256LocalFile(path.join(vendorRoot, ...relative.split("/")));
+    if (actualSha256 !== integrity.files[relative]) throw Object.assign(new Error(`The packaged exporter file does not match its integrity record: ${relative}`), { code: "PACKAGED_EXPORTER_INTEGRITY_FAILED" });
   }
   return import(pathToFileURL(canonicalModule).href);
+}
+
+function isSafeIntegrityRelativePath(value) {
+  if (typeof value !== "string" || !value || value.startsWith("/") || value.includes("\\")) return false;
+  const segments = value.split("/");
+  return segments.every((segment) => segment && segment !== "." && segment !== "..");
+}
+
+function compareOpenPaths(left, right) {
+  return left < right ? -1 : left > right ? 1 : 0;
 }
 
 async function sha256LocalFile(filePath) {

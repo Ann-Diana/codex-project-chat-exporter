@@ -12,12 +12,13 @@ All notable changes to this project are documented here.
 - Added an export-local, SHA-256-addressed asset store with deterministic schema-1 usage manifests, bounded type validation, Markdown and HTML links, and aggregate root-manifest fields.
 - Added an opt-in, deterministic per-session DOCX export backed by an exporter-independent document model shared by the CLI and VS Code adapter.
 - Added structural OOXML, cross-runtime reproducibility, failure-cleanup, and 16/115 MiB memory diagnostics for DOCX.
+- Added controlled HTTP/HTTPS OOXML hyperlinks with deterministic relationship IDs and repaired regular VSIX packaging so the complete production runtime, integrity inventory, and third-party license material are included automatically.
 
 ### Security
 
 - Added a target-filesystem hard-link capability probe before session reads; asset publication has no overwrite or copy fallback.
 - Unknown, active, truncated, or MIME-spoofed attachments are preserved as non-renderable `.bin` files, and existing targets are rehashed and type-checked before reuse.
-- DOCX packaging blocks external relationships, macros, embedded active content, `file:` and UNC links, rehashes local assets before embedding, and never downloads remote resources.
+- DOCX packaging allows only controlled HTTP/HTTPS hyperlink relationships; it blocks external resource relationships, macros, embedded active content, local/active/unsupported link schemes, rehashes local assets before embedding, and never downloads remote resources.
 
 ## 0.2.0 – 2026-08-20
 

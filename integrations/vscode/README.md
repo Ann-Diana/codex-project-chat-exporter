@@ -52,6 +52,8 @@ code --install-extension "C:\path\to\codex-project-chat-exporter-vscode-0.1.3.vs
 
 After the profile selection, **Standard formats only** preserves that profile exactly. **Add DOCX** adds one deterministic DOCX reading view per session through the same shared exporter contract. It does not create a combined document or enable PDF.
 
+Valid bounded HTTP/HTTPS links in DOCX are clickable without being fetched. External image/media/resource relationships, local or active schemes, macros, and other active content remain forbidden.
+
 ## Settings
 
 - **Output Directory** – local folder for generated exports. If empty, the extension asks on the first export.

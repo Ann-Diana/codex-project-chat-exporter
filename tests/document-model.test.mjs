@@ -4,6 +4,8 @@ import test from "node:test";
 import {
   DOCUMENT_BLOCK_KIND,
   DOCUMENT_ROLE,
+  MAX_DOCUMENT_LINK_TARGET_LENGTH,
+  classifyLinkTarget,
   createDocumentMessage,
   createSessionDocumentHeader,
 } from "../lib/document-model.mjs";
@@ -44,7 +46,7 @@ test("document model preserves roles, block structure, links, and stable origins
       "const xml = '<tag>&';",
       "```",
       "",
-      "[local](file:///C:/secret.txt), [drive](C:\\secret.txt), and [UNC](\\\\server\\share).",
+      "[local](file:///C:/secret.txt), [drive](C:\\secret.txt), [UNC](\\\\server\\share), [script](javascript:alert(1)), [data](data:text/plain,secret), and [mail](mailto:test@example.com).",
     ].join("\n"),
     attachments: [{ sha256: "a".repeat(64), sourceSha256: "b".repeat(64), mediaType: "image/png", decodedBytes: 68 }],
   });
@@ -71,9 +73,22 @@ test("document model preserves roles, block structure, links, and stable origins
     [true, "file-link", ""],
     [true, "file-link", ""],
     [true, "network-path", ""],
+    [true, "unsupported-protocol", ""],
+    [true, "unsupported-protocol", ""],
+    [true, "unsupported-protocol", ""],
   ]);
   assert.deepEqual(message.attachments[0].origin, { sessionId, recordOrdinal: 7, attachmentOrdinal: 1 });
   assert.ok(Object.isFrozen(message) && Object.isFrozen(message.blocks) && Object.isFrozen(message.attachments));
+});
+
+test("document model allows only canonical bounded HTTP and HTTPS targets", () => {
+  assert.deepEqual(classifyLinkTarget("https://openai.com/"), { allowed: true, reason: "", target: "https://openai.com/" });
+  assert.deepEqual(classifyLinkTarget("HTTP://Example.COM"), { allowed: true, reason: "", target: "http://example.com/" });
+  assert.equal(classifyLinkTarget("https://exa mple.com/").reason, "invalid-link");
+  assert.equal(classifyLinkTarget(`https://example.com/${"a".repeat(MAX_DOCUMENT_LINK_TARGET_LENGTH)}`).reason, "link-too-long");
+  for (const target of ["javascript:alert(1)", "data:text/plain,secret", "ftp://example.com/", "mailto:test@example.com", "file:///C:/secret.txt", "\\\\server\\share", "C:\\secret.txt"]) {
+    assert.equal(classifyLinkTarget(target).allowed, false, target);
+  }
 });
 
 test("document model rejects ambiguous origins and unknown roles", () => {

@@ -7,11 +7,25 @@ import test from "node:test";
 import { promisify } from "node:util";
 
 import JSZip from "jszip";
+import xmlJs from "xml-js";
 
 import { exportArchive, INCOMPLETE_MARKER_NAME } from "../bin/export-codex-project-chats.mjs";
 import { writeReadingOutputFixture } from "./fixtures/reading-output/sessions.mjs";
 
 const execFileAsync = promisify(execFile);
+const { xml2js } = xmlJs;
+
+function relationshipElements(xml) {
+  const parsed = xml2js(xml, { compact: false, alwaysChildren: true });
+  const result = [];
+  function visit(value) {
+    if (!value || typeof value !== "object") return;
+    if (value.type === "element" && value.name === "Relationship") result.push(value);
+    for (const child of value.elements || []) visit(child);
+  }
+  visit(parsed);
+  return result;
+}
 
 async function listFiles(root) {
   const output = [];
@@ -33,8 +47,8 @@ async function writeSingleSession(codexHome) {
   const file = path.join(directory, `rollout-2026-08-24T10-00-00-${sessionId}.jsonl`);
   const items = [
     { type: "session_meta", timestamp: "2026-08-24T10:00:00.000Z", payload: { id: sessionId, cwd: "C:\\Projects\\single", timestamp: "2026-08-24T10:00:00.000Z", source: "vscode", thread_source: "user" } },
-    { type: "response_item", timestamp: "2026-08-24T10:00:01.000Z", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "# Überschrift\n\nÄ & <XML>\n\n- eins\n- zwei\n\n[Link](https://example.invalid)\n\n```js\nconst x = '<&>';\n```" }], internal_chat_message_metadata_passthrough: { turn_id: "turn-1" } } },
-    { type: "event_msg", timestamp: "2026-08-24T10:00:01.001Z", payload: { type: "user_message", message: "# Überschrift\n\nÄ & <XML>\n\n- eins\n- zwei\n\n[Link](https://example.invalid)\n\n```js\nconst x = '<&>';\n```" } },
+    { type: "response_item", timestamp: "2026-08-24T10:00:01.000Z", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "# Überschrift\n\nÄ & <XML>\n\n- eins\n- zwei\n\nLink: [OpenAI](https://openai.com/).\n\n```js\nconst x = '<&>';\n```" }], internal_chat_message_metadata_passthrough: { turn_id: "turn-1" } } },
+    { type: "event_msg", timestamp: "2026-08-24T10:00:01.001Z", payload: { type: "user_message", message: "# Überschrift\n\nÄ & <XML>\n\n- eins\n- zwei\n\nLink: [OpenAI](https://openai.com/).\n\n```js\nconst x = '<&>';\n```" } },
     { type: "response_item", timestamp: "2026-08-24T10:00:02.000Z", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "Antwort äöü." }] } },
   ];
   await fs.writeFile(file, `${items.map((item) => JSON.stringify(item)).join("\n")}\n`, "utf8");
@@ -63,7 +77,8 @@ test("opt-in DOCX export creates exactly one deterministic document per session"
       assert.deepEqual(left, right, "equivalent exports into different folders must be byte-identical");
       const zip = await JSZip.loadAsync(left, { checkCRC32: true });
       assert.ok(zip.file("word/document.xml"));
-      assert.equal((await zip.file("word/_rels/document.xml.rels").async("string")).includes("TargetMode=\"External\""), false);
+      const relationships = relationshipElements(await zip.file("word/_rels/document.xml.rels").async("string"));
+      assert.ok(relationships.filter((relationship) => relationship.attributes?.TargetMode === "External").every((relationship) => relationship.attributes?.Type.endsWith("/hyperlink") && ["http:", "https:"].includes(new URL(relationship.attributes.Target).protocol)));
     }
     assert.equal(await fs.stat(path.join(firstOutput, INCOMPLETE_MARKER_NAME)).then(() => true, () => false), false);
     assert.equal((await listFiles(firstOutput)).some((file) => file.includes(".partial-") || file.includes(".previous-")), false);
@@ -72,7 +87,7 @@ test("opt-in DOCX export creates exactly one deterministic document per session"
   }
 });
 
-test("single-session DOCX preserves ordering and document constructs without active relationships", async () => {
+test("single-session DOCX preserves ordering, constructs, and controlled hyperlink relationships", async () => {
   const temp = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "docx-single-")));
   try {
     const codexHome = path.join(temp, ".codex");
@@ -91,7 +106,11 @@ test("single-session DOCX preserves ordering and document constructs without act
     assert.ok(xml.includes("Überschrift") && xml.includes("Ä &amp; &lt;XML&gt;") && xml.includes("Antwort äöü."));
     assert.ok(xml.includes("w:numPr"), "lists must use real OOXML numbering");
     assert.ok(xml.includes("Consolas"), "code blocks must use the code style");
-    assert.equal(rels.includes("TargetMode=\"External\""), false);
+    const externalRelationships = relationshipElements(rels).filter((relationship) => relationship.attributes?.TargetMode === "External");
+    assert.equal(externalRelationships.length, 1);
+    assert.equal(externalRelationships[0].attributes.Type, "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink");
+    assert.equal(externalRelationships[0].attributes.Target, "https://openai.com/");
+    assert.ok(xml.includes(`<w:hyperlink w:history="1" r:id="${externalRelationships[0].attributes.Id}">`));
     assert.equal(rels.toLowerCase().includes("file:"), false);
   } finally {
     await fs.rm(temp, { recursive: true, force: true });

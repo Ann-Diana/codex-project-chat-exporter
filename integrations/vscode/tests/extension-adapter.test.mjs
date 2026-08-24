@@ -314,6 +314,15 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
   const loaded = await defaultLoadExporter({ extensionPath: installedRoot });
   assert.equal(loaded.loadedFrom, "packaged", "installed extensions must ignore any external development core");
 
+  const unexpectedRuntimeFile = path.join(installedRoot, "vendor", "codex-project-chat-exporter", "unlisted.mjs");
+  await fsp.writeFile(unexpectedRuntimeFile, "export {};\n", "utf8");
+  await assert.rejects(() => defaultLoadExporter({ extensionPath: installedRoot }), (error) => error?.code === "PACKAGED_EXPORTER_INTEGRITY_FAILED");
+  await fsp.rm(unexpectedRuntimeFile);
+
+  await fsp.writeFile(integrityFile, JSON.stringify({ format: 1, files: { "bin/export-codex-project-chats.mjs": createHash("sha256").update(packagedBytes).digest("hex"), "lib/missing.mjs": "0".repeat(64) } }), "utf8");
+  await assert.rejects(() => defaultLoadExporter({ extensionPath: installedRoot }), (error) => error?.code === "PACKAGED_EXPORTER_INTEGRITY_FAILED");
+  await fsp.writeFile(integrityFile, JSON.stringify({ format: 1, files: { "bin/export-codex-project-chats.mjs": createHash("sha256").update(packagedBytes).digest("hex") } }), "utf8");
+
   const missingRoot = path.join(temp, "installed-extension-missing");
   await fsp.mkdir(missingRoot, { recursive: true });
   await assert.rejects(() => defaultLoadExporter({ extensionPath: missingRoot }), (error) => error?.code === "PACKAGED_EXPORTER_MISSING");

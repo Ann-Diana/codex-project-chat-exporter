@@ -18,7 +18,7 @@ The diagnostic exercises the productive session-record bridge and the active ded
 
 `real-asset-corpus.mjs --selection largest` and `--selection all` run the active asset store against the largest real session or the complete local corpus. The temporary export is removed after the run. Output is aggregate-only: session/record/occurrence counts, unique file and byte counts, saved bytes and ratio, allowlisted extension counts, runtime, memory, and residue count. It emits no paths, content, titles, source or asset hashes, payloads, or lists.
 
-`stream-json` is pinned to 3.5.0 and resolves `stream-chain` 4.2.5 transitively; both packages use BSD-3-Clause. A future VSIX packaging step must include the parser runtime and both dependency license notices. No VSIX packaging is implemented by this diagnostic.
+`stream-json` is pinned to 3.5.0 and resolves `stream-chain` 4.2.5 transitively; both packages use BSD-3-Clause. The regular VSIX builder derives the complete production runtime from `package-lock.json`, packages every required `lib` module, records every runtime file in `integrity.json`, and includes deterministic third-party license material. Missing imports, dependencies, or lock integrity abort the build.
 
 The opt-in DOCX path has separate end-to-end diagnostics:
 
@@ -28,3 +28,5 @@ node scripts/diagnostics/docx-large-line.mjs --size-mib 115
 ```
 
 They run the productive exporter in an isolated child, require exactly one session DOCX and one embedded media part, verify unchanged source bytes and zero temporary residue, and enforce Peak RSS below 384 MiB.
+
+The 2026-08-24 Windows/Node.js 24 hyperlink-correction run measured 1,510.810 ms and 125.953 MiB Peak RSS for 16 MiB, and 8,544.730 ms and 287.773 MiB Peak RSS for 115 MiB. Both runs reported unchanged source bytes and zero temporary residue.

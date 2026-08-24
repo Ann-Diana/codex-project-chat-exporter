@@ -15,12 +15,13 @@ Use this checklist for the uniquely named final candidate prepared during the la
 2. Open a local `file:` workspace matching one synthetic session.
 3. Create or select a new empty absolute output folder. Do not reuse an earlier export folder.
 4. Use the desired `short` or `readable` path style and leave `includeTools` disabled unless tool content is intentionally under review. The export command asks for the profile on every run.
-5. Run **Codex Export: Export…**, choose **Current Workspace**, and then choose **Complete export**.
+5. Run **Codex Export: Export…**, choose **Current Workspace**, choose **Complete export**, and then choose **Add DOCX**.
 6. Confirm that the success message uses the correct singular or plural session/project wording and that **Open HTML Index** and **Open Export Folder** open the newly created output.
 7. Confirm that progress advances through phases and shows at least one `Processing session X of Y` message.
 8. Confirm that the output channel records complete output-folder, HTML-index, and manifest paths.
 9. With `codexProjectChatExporter.diagnosticOutput` disabled, confirm one concise runtime summary and no `[DIAG]` stream. If enabled for one troubleshooting run, confirm message-free, path-redacted events may include short IDs, sizes, phases, status, and timing values.
 10. Confirm that `outputDirectory` and `codexHome` are machine-scoped settings, Workspace values are rejected, and UNC/device output paths are rejected. Mapped network drives remain a documented detection limit.
+11. Open the generated per-session DOCX and confirm a synthetic `Link: [OpenAI](https://openai.com/).` source appears as ordinary `Link: ` text, a clickable `OpenAI (https://openai.com/)`, and a final non-clickable period. Do not follow the link during the offline opening check.
 
 ## Check all profiles and cancellation
 

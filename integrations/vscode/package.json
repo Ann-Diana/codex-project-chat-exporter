@@ -98,7 +98,7 @@
     }
   },
   "scripts": {
-    "test": "node ./tests/extension-adapter.test.mjs",
+    "test": "node ./tests/extension-adapter.test.mjs && node ./tests/packaged-vsix.test.mjs",
     "package:vsix": "node ./scripts/build-vsix.mjs"
   },
   "devDependencies": {}

@@ -1,9 +1,14 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import dns from "node:dns";
 import fs from "node:fs/promises";
+import http from "node:http";
+import https from "node:https";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import tls from "node:tls";
 
 import JSZip from "jszip";
 import xmlJs from "xml-js";
@@ -21,6 +26,36 @@ function sha256(data) {
 
 function attachment(data, mediaType) {
   return { sha256: sha256(data), sourceSha256: sha256(Buffer.concat([data, Buffer.from("source")])), mediaType, decodedBytes: data.length };
+}
+
+function collectElements(value, name, result = []) {
+  if (!value || typeof value !== "object") return result;
+  if (value.type === "element" && value.name === name) result.push(value);
+  for (const child of value.elements || []) collectElements(child, name, result);
+  return result;
+}
+
+function elementText(value) {
+  if (!value || typeof value !== "object") return "";
+  if (value.type === "text") return String(value.text || "");
+  return (value.elements || []).map(elementText).join("");
+}
+
+async function withoutNetwork(action) {
+  const blocked = () => { throw new Error("unexpected network access"); };
+  const patches = [
+    [http, "get"], [http, "request"], [https, "get"], [https, "request"],
+    [net, "connect"], [net, "createConnection"], [tls, "connect"], [dns, "lookup"], [dns, "resolve"],
+  ].map(([owner, key]) => [owner, key, owner[key]]);
+  const previousFetch = globalThis.fetch;
+  try {
+    for (const [owner, key] of patches) owner[key] = blocked;
+    globalThis.fetch = blocked;
+    return await action();
+  } finally {
+    for (const [owner, key, value] of patches) owner[key] = value;
+    globalThis.fetch = previousFetch;
+  }
 }
 
 test("DOCX renderer creates deterministic safe OOXML with deduplicated PNG/JPEG media", async () => {
@@ -51,16 +86,17 @@ test("DOCX renderer creates deterministic safe OOXML with deduplicated PNG/JPEG 
       role: DOCUMENT_ROLE.USER,
       label: "User",
       timestamp: "2026-08-24T10:00:01.000Z",
-      text: "# Heading\n\nUmlaute äöü & < > with [remote](https://example.invalid/path).\n\n- one\n- two\n\n```js\nconst value = '<&>';\n```",
+      text: "# Heading\n\nUmlaute äöü & < >. Link: [OpenAI](https://openai.com/).\n\nUnsafe: [script](javascript:noop), [data](data:text/plain,secret), [file](file:///C:/secret.txt).\n\n- one\n- two\n\n```js\nconst value = '<&>';\n```",
       attachments: [png, png, jpeg, gif, webp, binary],
     }),
     createDocumentMessage({ sessionId, recordOrdinal: 3, role: DOCUMENT_ROLE.ASSISTANT, label: "Assistant", text: "Second message." }),
     createDocumentMessage({ sessionId, recordOrdinal: 4, role: DOCUMENT_ROLE.UNCLASSIFIED, label: "Unclassified user-role record", text: "Last message." }),
   ];
   const options = { header, messages, resolveAsset: async (reference) => assets.get(reference.sha256) };
-  const first = await buildDeterministicDocx(options);
-  const second = await buildDeterministicDocx(options);
+  const first = await withoutNetwork(() => buildDeterministicDocx(options));
+  const second = await withoutNetwork(() => buildDeterministicDocx(options));
   assert.deepEqual(first, second, "repeated exports must be byte-identical");
+  await withoutNetwork(() => validateCanonicalDocx(first));
 
   const zip = await JSZip.loadAsync(first, { checkCRC32: true });
   const files = Object.values(zip.files).filter((entry) => !entry.dir);
@@ -74,7 +110,13 @@ test("DOCX renderer creates deterministic safe OOXML with deduplicated PNG/JPEG 
   const media = files.filter((entry) => entry.name.startsWith("word/media/"));
   assert.equal(media.length, 2, "two uses of the same PNG must share one media part while JPEG remains distinct");
   assert.equal((relationships.split("/image\"").length - 1), 2, "each unique embedded image needs one relationship");
-  assert.equal(relationships.includes("TargetMode=\"External\""), false);
+  const parsedRelationships = xml2js(relationships, { compact: false, alwaysChildren: true });
+  const hyperlinkRelationships = collectElements(parsedRelationships, "Relationship")
+    .filter((element) => element.attributes?.Type === "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink");
+  assert.equal(hyperlinkRelationships.length, 1);
+  assert.equal(hyperlinkRelationships[0].attributes.TargetMode, "External");
+  assert.equal(hyperlinkRelationships[0].attributes.Target, "https://openai.com/");
+  assert.equal(hyperlinkRelationships[0].attributes.Id, "rIdHyperlink0001");
   assert.equal(relationships.toLowerCase().includes("file:"), false);
   assert.ok(documentXml.includes("Sitzung äöü &amp; &lt;XML&gt;"));
   assert.ok(documentXml.indexOf("User") < documentXml.indexOf("Assistant") && documentXml.indexOf("Assistant") < documentXml.indexOf("Unclassified user-role record"));
@@ -82,24 +124,40 @@ test("DOCX renderer creates deterministic safe OOXML with deduplicated PNG/JPEG 
   assert.ok(documentXml.includes(`assets/${gif.sha256}.gif`.split("/").at(-1)));
   assert.ok(documentXml.includes(`assets/${webp.sha256}.webp`.split("/").at(-1)));
   assert.ok(documentXml.includes(`assets/${binary.sha256}.bin`.split("/").at(-1)));
-  assert.equal(relationships.includes("example.invalid"), false, "plain-text links must not create external relationships");
+  const parsedDocument = xml2js(documentXml, { compact: false, alwaysChildren: true });
+  const hyperlinks = collectElements(parsedDocument, "w:hyperlink");
+  assert.equal(hyperlinks.length, 1);
+  assert.equal(hyperlinks[0].attributes["r:id"], hyperlinkRelationships[0].attributes.Id);
+  assert.equal(elementText(hyperlinks[0]), "OpenAI (https://openai.com/)");
+  assert.ok(documentXml.includes("script [blocked unsupported-protocol]") && documentXml.includes("data [blocked unsupported-protocol]") && documentXml.includes("file [blocked file-link]"));
+  const hyperlinkParagraph = collectElements(parsedDocument, "w:p").find((paragraph) => collectElements(paragraph, "w:hyperlink").length === 1);
+  const directChildren = hyperlinkParagraph.elements.filter((element) => element.type === "element");
+  const hyperlinkIndex = directChildren.findIndex((element) => element.name === "w:hyperlink");
+  assert.ok(elementText(directChildren[hyperlinkIndex - 1]).endsWith("Link: "), "Link prefix must remain ordinary text");
+  assert.equal(elementText(directChildren[hyperlinkIndex + 1]), ".", "final punctuation must remain outside the hyperlink");
   assert.equal(files.some((entry) => ["activex", "embeddings", "vbaproject"].some((part) => entry.name.toLowerCase().includes(part))), false);
 });
 
-test("DOCX normalization rejects external relationships and active content", async () => {
+test("DOCX normalization allows only controlled HTTP(S) hyperlinks and rejects external resources or active content", async () => {
   const header = createSessionDocumentHeader({ id: "session", title: "safe" });
   const safe = await buildDeterministicDocx({ header, messages: [], resolveAsset: async () => null });
   const externalZip = await JSZip.loadAsync(safe);
   const rels = await externalZip.file("word/_rels/document.xml.rels").async("string");
-  externalZip.file("word/_rels/document.xml.rels", rels.replace("</Relationships>", "<Relationship Id=\"rId999\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink\" Target=\"https://example.invalid\" TargetMode=\"External\"/></Relationships>"));
+  externalZip.file("word/_rels/document.xml.rels", rels.replace("</Relationships>", "<Relationship Id=\"rId999\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/image\" Target=\"https://example.invalid/pixel.png\" TargetMode=\"External\"/></Relationships>"));
   await assert.rejects(() => normalizeAndValidateDocx(externalZip.generateAsync({ type: "nodebuffer" })), (error) => error instanceof DocxExportError && error.code === "DOCX_EXTERNAL_RELATIONSHIP");
 
   const disguisedExternalZip = await JSZip.loadAsync(safe);
   disguisedExternalZip.file("word/_rels/document.xml.rels", rels.replace("</Relationships>", "<Relationship Id=\"rId998\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink\" Target=\"https://example.invalid/without-target-mode\"/></Relationships>"));
   await assert.rejects(() => normalizeAndValidateDocx(disguisedExternalZip.generateAsync({ type: "nodebuffer" })), (error) => error instanceof DocxExportError && error.code === "DOCX_EXTERNAL_RELATIONSHIP");
 
+  for (const [ordinal, target] of ["file:///C:/secret.txt", "javascript:alert(1)", "data:text/plain,secret", "ftp://example.invalid/file", "//server/share"].entries()) {
+    const unsafeZip = await JSZip.loadAsync(safe);
+    unsafeZip.file("word/_rels/document.xml.rels", rels.replace("</Relationships>", `<Relationship Id="rIdUnsafe${ordinal}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="${target}" TargetMode="External"/></Relationships>`));
+    await assert.rejects(() => normalizeAndValidateDocx(unsafeZip.generateAsync({ type: "nodebuffer" })), (error) => error instanceof DocxExportError && error.code === "DOCX_EXTERNAL_RELATIONSHIP", target);
+  }
+
   const drivePathZip = await JSZip.loadAsync(safe);
-  drivePathZip.file("word/_rels/document.xml.rels", rels.replace("</Relationships>", "<Relationship Id=\"rId997\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/image\" Target=\"C:\\secret.png\"/></Relationships>"));
+  drivePathZip.file("word/_rels/document.xml.rels", rels.replace("</Relationships>", "<Relationship Id=\"rId997\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/image\" Target=\"C:/secret.png\"/></Relationships>"));
   await assert.rejects(() => normalizeAndValidateDocx(drivePathZip.generateAsync({ type: "nodebuffer" })), (error) => error instanceof DocxExportError && error.code === "DOCX_EXTERNAL_RELATIONSHIP");
 
   const activeZip = await JSZip.loadAsync(safe);
@@ -117,6 +175,31 @@ test("DOCX normalization rejects external relationships and active content", asy
   const mediaName = Object.keys(missingMediaZip.files).find((name) => name.startsWith("word/media/") && !missingMediaZip.files[name].dir);
   missingMediaZip.remove(mediaName);
   await assert.rejects(() => validateCanonicalDocx(missingMediaZip.generateAsync({ type: "nodebuffer" })), (error) => error instanceof DocxExportError && error.code === "DOCX_MEDIA_MAPPING_INVALID");
+});
+
+test("DOCX hyperlink relationship IDs and order stay deterministic for multiple links", async () => {
+  const sessionId = "ordered-links";
+  const header = createSessionDocumentHeader({ id: sessionId, title: "Ordered links" });
+  const messages = [createDocumentMessage({
+    sessionId,
+    recordOrdinal: 1,
+    role: DOCUMENT_ROLE.USER,
+    label: "User",
+    text: "[First](https://openai.com/) then [Second](http://example.com/path).",
+  })];
+  const options = { header, messages, resolveAsset: async () => null };
+  const first = await buildDeterministicDocx(options);
+  const second = await buildDeterministicDocx(options);
+  assert.deepEqual(first, second);
+  const zip = await JSZip.loadAsync(first, { checkCRC32: true });
+  const relationships = collectElements(xml2js(await zip.file("word/_rels/document.xml.rels").async("string"), { compact: false, alwaysChildren: true }), "Relationship")
+    .filter((element) => element.attributes?.Type.endsWith("/hyperlink"));
+  assert.deepEqual(relationships.map((element) => [element.attributes.Id, element.attributes.Target]), [
+    ["rIdHyperlink0001", "https://openai.com/"],
+    ["rIdHyperlink0002", "http://example.com/path"],
+  ]);
+  const hyperlinks = collectElements(xml2js(await zip.file("word/document.xml").async("string"), { compact: false, alwaysChildren: true }), "w:hyperlink");
+  assert.deepEqual(hyperlinks.map((element) => element.attributes["r:id"]), ["rIdHyperlink0001", "rIdHyperlink0002"]);
 });
 
 test("verified asset resolution fails closed for missing and manipulated files", async () => {

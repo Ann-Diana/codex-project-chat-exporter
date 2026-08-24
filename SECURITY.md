@@ -16,6 +16,7 @@ The required invariants are:
 - cleanup removes only files proven to belong to that run;
 - the target filesystem passes an in-place exclusive hard-link identity/content probe before session streams are opened;
 - decoded asset filenames and types come only from decoded SHA-256 and a bounded internal raster allowlist; unknown or active content is never rendered automatically;
+- DOCX permits only bounded canonical HTTP/HTTPS hyperlink relationships; external image/media/resource relationships, local or active link schemes, macros, and other active content are rejected, and remote targets are never fetched;
 - existing asset targets are rehashed, size/type checked, and never overwritten;
 - invocation contexts never mix, and concurrent exports to one destination are rejected;
 - source changes cause a retry or fail-closed error;
