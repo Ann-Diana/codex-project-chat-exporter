@@ -51,7 +51,7 @@ Relevant top-level fields include:
 - `canonical_representation`: currently `raw_jsonl`.
 - `canonical_representation_included`: whether this export contains the canonical Raw JSONL snapshots.
 - `export_profile`: `complete`, `readable`, or `source-snapshots`.
-- `formats`: explicit current and reserved format flags. Deduplicated embedded attachments are always enabled; `docx` is true only after explicit format selection, while PDF remains false and is not selectable.
+- `formats`: explicit format flags. Deduplicated embedded attachments are always enabled; `docx` or `pdf` is true only after its explicit format selection.
 - `generated_at`: export timestamp.
 - `codex_home`, `sessions_dir`, `archived_sessions_dir`, and `session_index`: local diagnostic paths.
 - `path_style`: `short` or `readable`.
@@ -212,7 +212,9 @@ Reasoning, internal events, invalid JSON lines, and other event types remain ava
 
 When DOCX is selected, each session manifest entry includes one `docx_file` export-relative path and the indexes link to that per-session document. DOCX is a classified derived view based on the shared document contract; it is never canonical and never combines sessions. PNG/JPEG media may be embedded, while conservative attachment references represent GIF, WebP, `.bin`, missing rendering support, or blocked local links. Controlled HTTP/HTTPS hyperlink relationships are allowed; external image/media/resource relationships and active content are forbidden, and no remote target is fetched.
 
-Without DOCX selection, the `source-snapshots` profile intentionally omits Markdown transcripts and `index.md`. Its reduced HTML metadata index links to Raw snapshots checked at export time and to any extracted assets, but it does not imply that event classification was performed; classification-derived counters are `null`. Selecting DOCX explicitly adds the per-session classified document pass, populated counters, DOCX links, and the corresponding full metadata index while still omitting Markdown.
+When PDF is selected, each session entry similarly includes one `pdf_file` path. PDF is rendered directly from the same common document contract, not through DOCX. It embeds repository-local hash-verified fonts and PNG/JPEG assets, uses attachment references for GIF/WebP/`.bin`, and permits only controlled HTTP/HTTPS URI actions. File, launch, JavaScript, forms, embedded files, external images, and remote retrieval are forbidden.
+
+Without DOCX or PDF selection, the `source-snapshots` profile intentionally omits Markdown transcripts and `index.md`. Its reduced HTML metadata index links to Raw snapshots checked at export time and to any extracted assets, but it does not imply that event classification was performed; classification-derived counters are `null`. Selecting DOCX or PDF explicitly adds the per-session classified document pass, populated counters, document links, and the corresponding full metadata index while still omitting Markdown.
 
 ## Import boundary
 
@@ -222,4 +224,4 @@ A future importer must reject any generation containing `EXPORT_INCOMPLETE.txt` 
 
 ## Privacy boundary
 
-Raw JSONL, Markdown, HTML, both manifests, and decoded files below `assets/` can contain confidential chats, local paths, runtime contexts, tool data, source code, identifiers, and attachment data or references. Absolute diagnostic paths must be removed from any separately designed share-safe derivative. No current export format should be published without manual privacy review.
+Raw JSONL, Markdown, HTML, DOCX, PDF, both manifests, and decoded files below `assets/` can contain confidential chats, local paths, runtime contexts, tool data, source code, identifiers, and attachment data or references. Absolute diagnostic paths must be removed from any separately designed share-safe derivative. No current export format should be published without manual privacy review.

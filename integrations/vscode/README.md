@@ -40,7 +40,7 @@ code --install-extension "C:\path\to\codex-project-chat-exporter-vscode-0.1.3.vs
 
 ## Commands
 
-- `Codex Export: Export…` – choose **Current Workspace** or **All Sessions**, select an export profile, then keep standard formats or add one DOCX per session.
+- `Codex Export: Export…` – choose **Current Workspace** or **All Sessions**, select an export profile, then keep standard formats or add one DOCX or PDF per session.
 - `Codex Export: Open Latest Export`
 - `Codex Export: Open Export Folder`
 
@@ -50,16 +50,18 @@ code --install-extension "C:\path\to\codex-project-chat-exporter-vscode-0.1.3.vs
 - **Readable export** creates deduplicated assets, Markdown reading views, indexes, and manifests without new Raw snapshots.
 - **Source snapshots** creates deduplicated assets, Raw snapshots verified at export time, a reduced HTML index, and manifests without Markdown transcripts.
 
-After the profile selection, **Standard formats only** preserves that profile exactly. **Add DOCX** adds one deterministic DOCX reading view per session through the same shared exporter contract. It does not create a combined document or enable PDF.
+After the profile selection, **Standard formats only** preserves that profile exactly. **Add DOCX** or **Add PDF** adds one deterministic reading view per session through the same shared exporter contract. Neither selection creates a combined document; PDF is rendered directly and never through DOCX.
 
 Valid bounded HTTP/HTTPS links in DOCX are clickable without being fetched. External image/media/resource relationships, local or active schemes, macros, and other active content remain forbidden.
+
+Valid bounded HTTP/HTTPS links in PDF are clickable without being fetched. PDF uses bundled hash-verified Noto fonts and creates no external images, file/launch/JavaScript actions, forms, or embedded files.
 
 ## Settings
 
 - **Output Directory** – local folder for generated exports. If empty, the extension asks on the first export.
 - **Codex Home** – optional location of the local Codex data. If empty, the extension uses `CODEX_HOME` or the default `.codex` folder.
 - **Path Style** – choose compact or longer readable filenames.
-- **Include Tools** – include recorded tool-call inputs and outputs in Markdown and selected DOCX reading views. This data can be sensitive.
+- **Include Tools** – include recorded tool-call inputs and outputs in Markdown and selected DOCX or PDF reading views. This data can be sensitive.
 - **Diagnostic Output** – add redacted timing details to the output channel for troubleshooting.
 
 Output Directory and Codex Home must be local absolute paths and must be configured as User settings. Network, device, Workspace, and Workspace Folder paths are not supported.

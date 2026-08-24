@@ -145,8 +145,9 @@ test("DOCX failures preserve existing targets and remove run-owned temporary fil
 });
 
 test("document formats are explicit and reject unknown or duplicate selections", async () => {
-  await assert.rejects(() => exportArchive({ scope: "all", documentFormats: ["pdf"] }), (error) => error.code === "INVALID_EXPORT_FORMAT");
+  await assert.rejects(() => exportArchive({ scope: "all", documentFormats: ["epub"] }), (error) => error.code === "INVALID_EXPORT_FORMAT");
   await assert.rejects(() => exportArchive({ scope: "all", documentFormats: ["docx", "docx"] }), (error) => error.code === "INVALID_EXPORT_FORMAT");
+  await assert.rejects(() => exportArchive({ scope: "all", documentFormats: ["docx", "pdf"] }), (error) => error.code === "INVALID_EXPORT_FORMAT");
   await assert.rejects(() => exportArchive({ scope: "all", documentFormats: "docx" }), (error) => error.code === "INVALID_EXPORT_FORMAT");
 });
 

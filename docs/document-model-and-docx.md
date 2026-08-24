@@ -10,7 +10,7 @@ Add DOCX to any CLI profile with:
 node .\bin\export-codex-project-chats.mjs --all --profile readable --format docx --out C:\cx\codex-export
 ```
 
-The shared JavaScript API uses `documentFormats: ["docx"]`. The VS Code adapter exposes the same selection as **Add DOCX** after scope and profile selection. Omitting the selection leaves every existing profile unchanged. PDF is not implemented or selectable.
+The shared JavaScript API uses `documentFormats: ["docx"]`. The VS Code adapter exposes the same selection as **Add DOCX** after scope and profile selection. Omitting the selection leaves every existing profile unchanged. PDF is a separate direct renderer described in `document-model-and-pdf.md`; DOCX is never used as its intermediate format.
 
 ## Document contract
 

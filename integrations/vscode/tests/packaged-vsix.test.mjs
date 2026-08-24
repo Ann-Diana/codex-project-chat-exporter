@@ -79,7 +79,7 @@ async function writeSyntheticSession(codexHome) {
   await fs.writeFile(path.join(directory, `rollout-2026-08-24T10-00-00-${sessionId}.jsonl`), `${records.map((record) => JSON.stringify(record)).join("\n")}\n`, "utf8");
 }
 
-test("regular VSIX builds are byte-identical and their packaged runtime exports a controlled hyperlink DOCX offline", async () => {
+test("regular VSIX builds are byte-identical and their packaged runtime exports controlled DOCX/PDF links offline", async () => {
   const temp = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "packaged-vsix-e2e-")));
   try {
     const first = await buildVsix({ distDir: path.join(temp, "dist-1") });
@@ -104,6 +104,9 @@ test("regular VSIX builds are byte-identical and their packaged runtime exports 
     for (const name of (await fs.readdir("lib")).filter((name) => name.endsWith(".mjs"))) {
       assert.ok(zip.file(`extension/vendor/codex-project-chat-exporter/lib/${name}`), name);
     }
+    for (const name of (await fs.readdir("fonts")).filter((name) => name.endsWith(".ttf") || name === "OFL.txt")) {
+      assert.ok(zip.file(`extension/vendor/codex-project-chat-exporter/fonts/${name}`), name);
+    }
     for (const [lockPath, entry] of Object.entries(lock.packages)) {
       if (!lockPath.startsWith("node_modules/") || entry.dev === true) continue;
       assert.ok(files.some((file) => file.name.startsWith(`extension/vendor/codex-project-chat-exporter/${lockPath}/`)), lockPath);
@@ -116,6 +119,7 @@ test("regular VSIX builds are byte-identical and their packaged runtime exports 
     for (const relative of actualRuntimeFiles) assert.equal(sha256(await zip.file(`${vendorPrefix}${relative}`).async("nodebuffer")), integrity.files[relative], relative);
     const licenses = await zip.file(`${vendorPrefix}THIRD_PARTY_LICENSES.txt`).async("string");
     for (const name of Object.keys(rootPackage.dependencies)) assert.ok(licenses.includes(`Package: ${name}@`), name);
+    assert.ok(licenses.includes("Noto Sans 2.015") && licenses.includes("SIL OPEN FONT LICENSE Version 1.1"));
 
     const installedRoot = path.join(temp, "installed-extension");
     await extractExtension(zip, installedRoot);
@@ -147,6 +151,14 @@ test("regular VSIX builds are byte-identical and their packaged runtime exports 
     const index = children.findIndex((element) => element.name === "w:hyperlink");
     assert.ok(elementText(children[index - 1]).endsWith("Link: "));
     assert.equal(elementText(children[index + 1]), ".");
+
+    const pdfOutputDirectory = path.join(temp, "pdf-output");
+    const pdfResult = await withoutNetwork(() => exporter.exportArchive({ codexHome, scope: "all", outputDirectory: pdfOutputDirectory, exportProfile: "readable", documentFormats: ["pdf"] }));
+    const pdfManifest = JSON.parse(await fs.readFile(pdfResult.manifestPath, "utf8"));
+    const pdf = await fs.readFile(path.join(pdfOutputDirectory, pdfManifest.sessions[0].pdf_file));
+    const pdfSource = pdf.toString("latin1");
+    assert.ok(pdfSource.startsWith("%PDF-") && pdfSource.includes("/S /URI") && pdfSource.includes("/URI (https://openai.com/)"));
+    assert.equal(pdfSource.includes("/Launch") || pdfSource.includes("/JavaScript") || pdfSource.includes("/EmbeddedFile"), false);
   } finally {
     await fs.rm(temp, { recursive: true, force: true });
   }
@@ -158,6 +170,8 @@ test("regular builder fails before archive creation when a packaged runtime impo
     const repoRoot = path.join(temp, "repo");
     await fs.mkdir(path.join(repoRoot, "bin"), { recursive: true });
     await fs.mkdir(path.join(repoRoot, "lib"));
+    await fs.mkdir(path.join(repoRoot, "fonts"));
+    await fs.writeFile(path.join(repoRoot, "fonts", "OFL.txt"), "fixture font license\n");
     await fs.writeFile(path.join(repoRoot, "package.json"), `${JSON.stringify({ name: "fixture", version: "1.0.0", type: "module", dependencies: {} }, null, 2)}\n`);
     await fs.writeFile(path.join(repoRoot, "package-lock.json"), `${JSON.stringify({ name: "fixture", version: "1.0.0", lockfileVersion: 3, packages: { "": { name: "fixture", version: "1.0.0", dependencies: {} } } }, null, 2)}\n`);
     await fs.writeFile(path.join(repoRoot, "LICENSE"), "MIT\n");
@@ -177,6 +191,8 @@ test("regular builder fails before archive creation when the locked production t
     const repoRoot = path.join(temp, "repo");
     await fs.mkdir(path.join(repoRoot, "bin"), { recursive: true });
     await fs.mkdir(path.join(repoRoot, "lib"));
+    await fs.mkdir(path.join(repoRoot, "fonts"));
+    await fs.writeFile(path.join(repoRoot, "fonts", "OFL.txt"), "fixture font license\n");
     const dependencies = { "missing-dependency": "1.0.0" };
     await fs.writeFile(path.join(repoRoot, "package.json"), `${JSON.stringify({ name: "fixture", version: "1.0.0", type: "module", dependencies }, null, 2)}\n`);
     await fs.writeFile(path.join(repoRoot, "package-lock.json"), `${JSON.stringify({ name: "fixture", version: "1.0.0", lockfileVersion: 3, packages: { "": { name: "fixture", version: "1.0.0", dependencies }, "node_modules/missing-dependency": { version: "1.0.0", resolved: "https://registry.npmjs.org/missing-dependency/-/missing-dependency-1.0.0.tgz", integrity: "sha512-fixture" } } }, null, 2)}\n`);

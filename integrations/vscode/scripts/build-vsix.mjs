@@ -48,6 +48,7 @@ export async function buildVsix(options = {}) {
       "extension/vendor",
       "extension/vendor/codex-project-chat-exporter",
       "extension/vendor/codex-project-chat-exporter/bin",
+      "extension/vendor/codex-project-chat-exporter/fonts",
       "extension/vendor/codex-project-chat-exporter/lib",
       "extension/vendor/codex-project-chat-exporter/node_modules",
     ]) {
@@ -161,6 +162,7 @@ async function packageExporterRuntime({ repoRoot, stage, stageOwned }) {
     await copyRuntimeFile(path.join(repoRoot, ...relativePath.split("/")), relativePath);
   }
   await copyRuntimeDirectory(path.join(repoRoot, "lib"), "lib", copyRuntimeFile);
+  await copyRuntimeDirectory(path.join(repoRoot, "fonts"), "fonts", copyRuntimeFile);
 
   const licenseSections = [
     "Third-party production dependencies bundled in this VSIX",
@@ -174,7 +176,7 @@ async function packageExporterRuntime({ repoRoot, stage, stageOwned }) {
     const installedRoot = path.join(repoRoot, ...lockPath.split("/"));
     const installedPackage = parseJsonFile(await fs.readFile(path.join(installedRoot, "package.json"), "utf8"), `${lockPath}/package.json`);
     validateInstalledProductionPackage(lockPath, lockEntry, installedPackage);
-    await copyRuntimeDirectory(installedRoot, lockPath, copyRuntimeFile);
+    await copyRuntimeDirectory(installedRoot, lockPath, copyRuntimeFile, { skipNestedPackageTree: true });
     const licenseSources = await selectLicenseSources(installedRoot);
     licenseSections.push(
       `Package: ${installedPackage.name}@${installedPackage.version}`,
@@ -186,6 +188,18 @@ async function packageExporterRuntime({ repoRoot, stage, stageOwned }) {
     }
     licenseSections.push("----", "");
   }
+  const fontLicense = await fs.readFile(path.join(repoRoot, "fonts", "OFL.txt"), "utf8");
+  licenseSections.push(
+    "Bundled font assets",
+    "Noto Sans 2.015, Noto Sans Mono 2.014, and Noto Sans Symbols 2.003",
+    "Declared license: SIL Open Font License 1.1",
+    "Source: fonts/OFL.txt",
+    "",
+    fontLicense,
+    "",
+    "----",
+    "",
+  );
   const thirdPartyRelative = "THIRD_PARTY_LICENSES.txt";
   const thirdPartyBytes = Buffer.from(`${licenseSections.join("\n").replaceAll("\r\n", "\n").trimEnd()}\n`, "utf8");
   await writeOwnedStageFile(stageOwned, stage, path.join(stage, RUNTIME_ROOT, thirdPartyRelative), thirdPartyBytes);
@@ -233,7 +247,7 @@ function validateInstalledProductionPackage(lockPath, lockEntry, installedPackag
   }
 }
 
-async function copyRuntimeDirectory(sourceRoot, runtimeRelativeRoot, copyRuntimeFile) {
+async function copyRuntimeDirectory(sourceRoot, runtimeRelativeRoot, copyRuntimeFile, options = {}) {
   const rootStat = await fs.lstat(sourceRoot);
   if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) throw new Error(`Runtime source must be a regular directory: ${sourceRoot}`);
   const canonical = await fs.realpath(sourceRoot);
@@ -241,6 +255,7 @@ async function copyRuntimeDirectory(sourceRoot, runtimeRelativeRoot, copyRuntime
   async function visit(directory, relativeDirectory) {
     const entries = (await fs.readdir(directory, { withFileTypes: true })).sort((left, right) => compareOrdinal(left.name, right.name));
     for (const entry of entries) {
+      if (options.skipNestedPackageTree && directory === sourceRoot && entry.name === "node_modules" && entry.isDirectory()) continue;
       const source = path.join(directory, entry.name);
       const relative = `${relativeDirectory}/${entry.name}`;
       const stat = await fs.lstat(source);
@@ -501,7 +516,7 @@ function createContentTypes(stageOwned, stage) {
   const known = new Map([
     ["cjs", "application/javascript"], ["js", "application/javascript"], ["json", "application/json"],
     ["map", "application/json"], ["md", "text/markdown"], ["markdown", "text/markdown"],
-    ["mjs", "application/javascript"], ["png", "image/png"], ["txt", "text/plain"],
+    ["mjs", "application/javascript"], ["png", "image/png"], ["ttf", "font/ttf"], ["txt", "text/plain"],
     ["vsixmanifest", "text/xml"], ["xml", "text/xml"],
   ]);
   const extensions = new Set();

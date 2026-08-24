@@ -489,6 +489,20 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
 }
 
 {
+  lastOptions = undefined;
+  const fake = createFakeVscode({ config: { outputDirectory }, quickPickSelector: (items, options) => {
+    if (options?.placeHolder === "Choose what to export") return items.find((item) => item.label === "All Sessions");
+    if (options?.placeHolder === "Choose an export profile") return items.find((item) => item.label === "Readable export");
+    return items.find((item) => item.label === "Add PDF");
+  } });
+  const context = createContext(temp);
+  const adapter = createExtensionAdapter(fake.vscode, { loadExporter: async () => exporter });
+  await adapter.activate(context);
+  await fake.registered.get(COMMANDS.exportMenu)();
+  assert.deepEqual(lastOptions.documentFormats, ["pdf"], "Add PDF must pass the same shared explicit document-format contract");
+}
+
+{
   let exportCalled = false;
   const fake = createFakeVscode({ quickPickItem: undefined, config: { diagnosticOutput: true } });
   const context = createContext(temp);
@@ -854,6 +868,8 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
   const realSessionsDir = path.join(realCodexHome, "sessions", "2026", "08", "16");
   const directOutput = path.join(temp, "real-core-direct-output");
   const adapterOutput = path.join(temp, "real-core-adapter-output");
+  const directPdfOutput = path.join(temp, "real-core-direct-pdf-output");
+  const adapterPdfOutput = path.join(temp, "real-core-adapter-pdf-output");
   await fsp.mkdir(realSessionsDir, { recursive: true });
   const realSource = path.join(realSessionsDir, "rollout-real-adapter.jsonl");
   const realItems = [
@@ -885,6 +901,19 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
     assert.equal(await fsp.readFile(path.join(adapterOutput, session.markdown_file), "utf8"), await fsp.readFile(path.join(directOutput, session.markdown_file), "utf8"));
     assert.deepEqual(await fsp.readFile(path.join(adapterOutput, session.raw_export_file)), await fsp.readFile(path.join(directOutput, session.raw_export_file)));
     assert.deepEqual(await fsp.readFile(path.join(adapterOutput, session.docx_file)), await fsp.readFile(path.join(directOutput, session.docx_file)), "VS Code and direct shared-core DOCX bytes must match");
+  }
+
+  const directPdfResult = await realExporter.exportArchive({ codexHome: realCodexHome, scope: "all", outputDirectory: directPdfOutput, pathStyle: "readable", documentFormats: ["pdf"] });
+  const pdfFake = createFakeVscode({ config: { outputDirectory: adapterPdfOutput, codexHome: realCodexHome, pathStyle: "readable" } });
+  const pdfContext = createContext(temp);
+  const pdfAdapter = createExtensionAdapter(pdfFake.vscode, { loadExporter: async () => realExporter });
+  await pdfAdapter.activate(pdfContext);
+  const adapterPdfResult = await pdfAdapter.exportAllSessions(pdfContext, undefined, ["pdf"]);
+  const directPdfManifest = JSON.parse(await fsp.readFile(directPdfResult.manifestPath, "utf8"));
+  const adapterPdfManifest = JSON.parse(await fsp.readFile(adapterPdfResult.manifestPath, "utf8"));
+  assert.deepEqual(adapterPdfManifest.sessions.map(stableSessionMetadata), directPdfManifest.sessions.map(stableSessionMetadata), "VS Code and direct shared-core PDF metadata must match");
+  for (const session of directPdfManifest.sessions) {
+    assert.deepEqual(await fsp.readFile(path.join(adapterPdfOutput, session.pdf_file)), await fsp.readFile(path.join(directPdfOutput, session.pdf_file)), "VS Code and direct shared-core PDF bytes must match");
   }
 }
 

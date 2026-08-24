@@ -27,6 +27,7 @@
     "sessions",
     "JSONL",
     "Markdown",
+    "PDF",
     "project-aware"
   ],
   "main": "./src/extension.cjs",
@@ -87,7 +88,7 @@
           "type": "boolean",
           "default": false,
           "scope": "application",
-          "description": "Include potentially sensitive tool call input and output in derived Markdown and selected DOCX reading views."
+          "description": "Include potentially sensitive tool call input and output in derived Markdown and selected DOCX or PDF reading views."
         },
         "codexProjectChatExporter.diagnosticOutput": {
           "type": "boolean",

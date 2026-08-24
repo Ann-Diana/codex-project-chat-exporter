@@ -27,6 +27,7 @@ const EXPORT_PROFILES = Object.freeze([
 const DOCUMENT_FORMATS = Object.freeze([
   { label: "Standard formats only", description: "Keep the selected profile unchanged", documentFormats: [] },
   { label: "Add DOCX", description: "Create one deterministic DOCX reading view per exported session", documentFormats: ["docx"] },
+  { label: "Add PDF", description: "Create one deterministic PDF reading view per exported session", documentFormats: ["pdf"] },
 ]);
 
 function createExtensionAdapter(vscode, injected = {}) {

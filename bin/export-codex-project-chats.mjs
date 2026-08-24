@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
 import readline from "node:readline";
+import { Writable } from "node:stream";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
@@ -31,6 +32,11 @@ import {
   resolveVerifiedAsset,
   validateCanonicalDocx,
 } from "../lib/docx-renderer.mjs";
+import {
+  buildDeterministicPdf,
+  resolveVerifiedPdfAsset,
+  validateCanonicalPdfFile,
+} from "../lib/pdf-renderer.mjs";
 
 const VERSION = "0.3.0";
 const ARCHIVE_FORMAT_VERSION = 1;
@@ -51,7 +57,7 @@ const RAW_COPY_STATUS = Object.freeze({
 const INCOMPLETE_MARKER_NAME = "EXPORT_INCOMPLETE.txt";
 const GENERATION_ROOT_FILES = Object.freeze(["manifest.json", "README.txt", "index.html", "index.md"]);
 const ASSET_MANIFEST_PATH = "assets/manifest.json";
-const ADDITIONAL_EXPORT_FORMATS = Object.freeze({ pdf: false, attachments: true });
+const ADDITIONAL_EXPORT_FORMATS = Object.freeze({ attachments: true });
 const MIRRORED_USER_EVENT_MAX_DELAY_MS = 100;
 const attachmentSequenceHashes = new WeakMap();
 const USER_RECORD_KIND = Object.freeze({
@@ -154,6 +160,7 @@ async function exportArchive(options = {}) {
     readerOptions: options._readerOptions,
     assetStoreOptions: options._assetStoreOptions,
     docxOptions: options._docxOptions,
+    pdfOptions: options._pdfOptions,
   });
   return runCommand(context, { print: false });
 }
@@ -179,8 +186,8 @@ function argsFromExportOptions(options) {
   if (options.documentFormats !== undefined) {
     if (!Array.isArray(options.documentFormats)) throw new ExportError("INVALID_EXPORT_FORMAT", "documentFormats must be an array");
     const unique = new Set(options.documentFormats);
-    if (unique.size !== options.documentFormats.length || [...unique].some((format) => format !== "docx")) throw new ExportError("INVALID_EXPORT_FORMAT", `Unsupported document format selection: ${options.documentFormats.join(", ")}`);
-    if (unique.has("docx")) next.format = "docx";
+    if (unique.size !== options.documentFormats.length || unique.size > 1 || [...unique].some((format) => format !== "docx" && format !== "pdf")) throw new ExportError("INVALID_EXPORT_FORMAT", `Unsupported document format selection: ${options.documentFormats.join(", ")}`);
+    if (unique.size === 1) next.format = [...unique][0];
   }
   return next;
 }
@@ -199,7 +206,7 @@ function createExportContext(args = {}, cwd = process.cwd(), runtimeOptions = {}
   const exportAll = args.all || !projectFilter;
   const exportProfile = resolveExportProfile(args.profile, Boolean(args["no-raw"]));
   const documentFormats = resolveDocumentFormats(args.format);
-  const exportFormats = Object.freeze({ ...EXPORT_PROFILES[exportProfile], docx: documentFormats.includes("docx"), ...ADDITIONAL_EXPORT_FORMATS });
+  const exportFormats = Object.freeze({ ...EXPORT_PROFILES[exportProfile], docx: documentFormats.includes("docx"), pdf: documentFormats.includes("pdf"), ...ADDITIONAL_EXPORT_FORMATS });
   return Object.freeze({
     args: Object.freeze({ ...args }),
     codexHome,
@@ -231,13 +238,14 @@ function createExportContext(args = {}, cwd = process.cwd(), runtimeOptions = {}
     readerOptions: runtimeOptions.readerOptions || Object.freeze({}),
     assetStoreOptions: runtimeOptions.assetStoreOptions || Object.freeze({}),
     docxOptions: runtimeOptions.docxOptions || Object.freeze({}),
+    pdfOptions: runtimeOptions.pdfOptions || Object.freeze({}),
   });
 }
 
 function resolveDocumentFormats(requestedFormat) {
   if (!requestedFormat) return Object.freeze([]);
-  if (requestedFormat !== "docx") throw new ExportError("INVALID_EXPORT_FORMAT", `Unsupported export format: ${requestedFormat}`);
-  return Object.freeze(["docx"]);
+  if (requestedFormat !== "docx" && requestedFormat !== "pdf") throw new ExportError("INVALID_EXPORT_FORMAT", `Unsupported export format: ${requestedFormat}`);
+  return Object.freeze([requestedFormat]);
 }
 
 function resolveExportProfile(requestedProfile, legacyNoRaw = false) {
@@ -477,6 +485,7 @@ async function runCommandInternal(context, { print, profiler, runState }) {
 
   if (exportFormats.markdown) await ensureSeparatedOutputDirectory(path.join(outputDir, markdownDirName), sourceProtection);
   if (exportFormats.docx) await ensureSeparatedOutputDirectory(path.join(outputDir, "docx"), sourceProtection);
+  if (exportFormats.pdf) await ensureSeparatedOutputDirectory(path.join(outputDir, "pdf"), sourceProtection);
   if (copyRaw) await ensureSeparatedOutputDirectory(path.join(outputDir, "raw"), sourceProtection);
   await ensureSeparatedOutputDirectory(path.join(outputDir, "assets"), sourceProtection);
   assetStore = await DeduplicatedAssetStore.create({
@@ -512,7 +521,7 @@ async function runCommandInternal(context, { print, profiler, runState }) {
     if (copyRaw) {
       await ensureSeparatedOutputDirectory(path.join(outputDir, "raw", projectDir), sourceProtection);
       const rawPath = path.join(outputDir, rawRel);
-      const verifyPublishedSnapshot = (exportFormats.markdown || exportFormats.docx) && !needsCompleteInventory
+      const verifyPublishedSnapshot = (exportFormats.markdown || exportFormats.docx || exportFormats.pdf) && !needsCompleteInventory
         ? async (publishedPath) => {
             const parseStart = performance.now();
             const parsedMeta = await readSessionMeta(publishedPath, {
@@ -563,7 +572,7 @@ async function runCommandInternal(context, { print, profiler, runState }) {
   profiler?.addPhase("assets", performance.now() - assetsStartedAt);
   diagnosticReporter("assets_end", { duration_ms: runtimeTimings.assets_ms, sessions: tasks.length });
 
-  if (exportFormats.markdown || exportFormats.docx) progressReporter({ phase: "rendering", message: "Rendering reading views" });
+  if (exportFormats.markdown || exportFormats.docx || exportFormats.pdf) progressReporter({ phase: "rendering", message: "Rendering reading views" });
   const processingStartedAt = performance.now();
   const rows = [];
   for (const task of tasks) rows.push(await processExportTask(task, titleIndex, profiler, context, sourceProtection, generation, assetStore));
@@ -844,7 +853,8 @@ async function processExportTask(task, titleIndex, profiler, context, sourceProt
   let stats = { userMessages: 0, assistantMessages: 0, subagentInputs: 0, runtimeContexts: 0, unclassifiedUserRoleRecords: 0, toolEvents: 0, model: meta.model || "", updatedAt: meta.updatedAt || meta.timestamp || "" };
   let markdownRel = "";
   let docxRel = "";
-  const documentViewEnabled = exportFormats.markdown || exportFormats.docx;
+  let pdfRel = "";
+  const documentViewEnabled = exportFormats.markdown || exportFormats.docx || exportFormats.pdf;
 
   if (documentViewEnabled) {
     const parsePath = copyRaw ? path.join(outputDir, rawRel) : meta.file;
@@ -891,10 +901,15 @@ async function processExportTask(task, titleIndex, profiler, context, sourceProt
       docxRel = path.join("docx", projectDir, `${baseName}.docx`);
       await ensureSeparatedOutputDirectory(path.join(outputDir, "docx", projectDir), sourceProtection);
     }
+    if (exportFormats.pdf) {
+      pdfRel = path.join("pdf", projectDir, `${baseName}.pdf`);
+      await ensureSeparatedOutputDirectory(path.join(outputDir, "pdf", projectDir), sourceProtection);
+    }
     profiler?.recordAttachments(renderMeta.attachmentMetrics);
     stats = await writeSessionDocuments(renderMeta, {
       markdownPath: markdownRel ? path.join(outputDir, markdownRel) : "",
       docxPath: docxRel ? path.join(outputDir, docxRel) : "",
+      pdfPath: pdfRel ? path.join(outputDir, pdfRel) : "",
       rawRel: copyRaw ? rawRel : "",
     }, profiler, meta, context, sourceProtection, generation, assetStore, assetSnapshot);
   } else {
@@ -929,6 +944,7 @@ async function processExportTask(task, titleIndex, profiler, context, sourceProt
     source_relative_path: sourceRelativePath,
     markdown_file: markdownRel,
     ...(exportFormats.docx ? { docx_file: docxRel } : {}),
+    ...(exportFormats.pdf ? { pdf_file: pdfRel } : {}),
     raw_export_file: copyRaw ? rawRel : "",
     raw_export_name: copyRaw ? rawExportName : "",
     raw_sha256: snapshot?.sha256 || "",
@@ -1738,6 +1754,24 @@ function assertSeparatedFromSources(candidate, sourceProtection, options = {}) {
   }
 }
 
+function createFileHandleWritable(handle) {
+  return new Writable({
+    write(chunk, encoding, callback) {
+      const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, encoding);
+      writeCompleteBuffer(handle, bytes).then(() => callback(), callback);
+    },
+  });
+}
+
+async function writeCompleteBuffer(handle, bytes) {
+  let offset = 0;
+  while (offset < bytes.length) {
+    const { bytesWritten } = await handle.write(bytes, offset, bytes.length - offset, null);
+    if (!Number.isSafeInteger(bytesWritten) || bytesWritten <= 0) throw new ExportError("EXPORT_WRITE_FAILED", "PDF stream made no progress while writing its temporary file");
+    offset += bytesWritten;
+  }
+}
+
 async function writeSeparatedOutputFile(destinationPath, sourceProtection, writer, generation = null) {
   const generationDestination = generation ? await assertGenerationDestinationWritable(destinationPath, generation) : null;
   const destinationBefore = await assertSeparatedOutputPath(destinationPath, sourceProtection, { allowMissing: true, requireRegularFile: true, requireReliableIdentity: true });
@@ -1754,7 +1788,7 @@ async function writeSeparatedOutputFile(destinationPath, sourceProtection, write
     const openedIdentity = reliableFileIdentity(openedStat);
     if (!openedIdentity) throw new ExportError("UNSAFE_EXPORT_PATH", `Reliable file identity is unavailable for ${path.basename(temporaryPath)}`);
     temporaryOwned = { path: temporaryPath, identity: { identity: openedIdentity } };
-    await writer(handle);
+    await writer(handle, temporaryPath);
     const writtenStat = await handle.stat({ bigint: true });
     if (reliableFileIdentity(writtenStat) !== openedIdentity) throw new ExportError("UNSAFE_EXPORT_PATH", `Export destination identity changed while writing: ${path.basename(destinationPath)}`);
     await handle.close();
@@ -2166,6 +2200,10 @@ function collectPreviousGenerationPaths(manifest, assetManifest = null) {
       if (manifest.formats.docx !== true) throw new ExportError("INVALID_PREVIOUS_MANIFEST", "The previous manifest contains a DOCX path without declaring the DOCX format");
       addAuthorizedGenerationPath(authorized, session.docx_file, "docx");
     }
+    if (session.pdf_file) {
+      if (manifest.formats.pdf !== true) throw new ExportError("INVALID_PREVIOUS_MANIFEST", "The previous manifest contains a PDF path without declaring the PDF format");
+      addAuthorizedGenerationPath(authorized, session.pdf_file, "pdf");
+    }
   }
   return authorized;
 }
@@ -2248,9 +2286,10 @@ function validatedGenerationRelativePath(value, kind = "any") {
   const validRaw = normalized.startsWith("raw/") && normalized.toLowerCase().endsWith(".jsonl");
   const validMarkdown = (normalized.startsWith("md/") || normalized.startsWith("markdown/")) && normalized.toLowerCase().endsWith(".md");
   const validDocx = normalized.startsWith("docx/") && normalized.toLowerCase().endsWith(".docx");
+  const validPdf = normalized.startsWith("pdf/") && normalized.toLowerCase().endsWith(".pdf");
   const validAssetManifest = normalized === ASSET_MANIFEST_PATH;
   const validAsset = isCanonicalAssetPath(normalized);
-  if ((kind === "root" && !validRoot) || (kind === "raw" && !validRaw) || (kind === "markdown" && !validMarkdown) || (kind === "docx" && !validDocx) || (kind === "asset_manifest" && !validAssetManifest) || (kind === "asset" && !validAsset) || (kind === "any" && !validRoot && !validRaw && !validMarkdown && !validDocx && !validAssetManifest && !validAsset)) {
+  if ((kind === "root" && !validRoot) || (kind === "raw" && !validRaw) || (kind === "markdown" && !validMarkdown) || (kind === "docx" && !validDocx) || (kind === "pdf" && !validPdf) || (kind === "asset_manifest" && !validAssetManifest) || (kind === "asset" && !validAsset) || (kind === "any" && !validRoot && !validRaw && !validMarkdown && !validDocx && !validPdf && !validAssetManifest && !validAsset)) {
     throw new ExportError("INVALID_PREVIOUS_MANIFEST", `The previous manifest contains an unexpected export path: ${normalized}`);
   }
   return normalized;
@@ -2434,14 +2473,14 @@ function readableProjectDir(projectDirs, cwd) {
 
 async function writeSessionDocuments(meta, paths, profiler = null, profileSession = meta, context, sourceProtection, generation, assetStore, assetSnapshot) {
   const { redactMarkdown, includeTools } = context;
-  const { markdownPath, docxPath, rawRel } = paths;
+  const { markdownPath, docxPath, pdfPath, rawRel } = paths;
   const renderStart = performance.now();
   const stats = { userMessages: 0, assistantMessages: 0, subagentInputs: 0, runtimeContexts: 0, unclassifiedUserRoleRecords: 0, toolEvents: 0, model: meta.model || "", updatedAt: meta.latestTimestamp || meta.updatedAt || meta.timestamp || "" };
   const readerSummary = createSessionReaderSummary();
   const documentMessages = [];
 
   const addDocumentMessage = (role, label, text, attachments, timestamp, recordNumber) => {
-    if (!docxPath) return;
+    if (!docxPath && !pdfPath) return;
     documentMessages.push(createDocumentMessage({
       sessionId: meta.id,
       recordOrdinal: recordNumber,
@@ -2575,7 +2614,7 @@ async function writeSessionDocuments(meta, paths, profiler = null, profileSessio
   }
 
   if (!readerSummary.stable || readerSummary.fileSha256 !== assetSnapshot?.sha256) {
-    const renderingLabel = markdownPath ? "Markdown rendering" : "DOCX rendering";
+    const renderingLabel = markdownPath ? "Markdown rendering" : (docxPath ? "DOCX rendering" : "PDF rendering");
     throw new ExportError("SOURCE_CHANGED_DURING_EXPORT", `Session content changed between asset collection and ${renderingLabel}`);
   }
   const renderMs = performance.now() - renderStart;
@@ -2590,7 +2629,7 @@ async function writeSessionDocuments(meta, paths, profiler = null, profileSessio
       ...meta,
       latestTimestamp: stats.updatedAt,
       model: stats.model,
-      rawReference: rawRel ? rawRel.replace(/\\/g, "/") : "",
+      rawReference: rawRel ? rawRel.replaceAll("\\", "/") : "",
     });
     const resolveAsset = context.docxOptions.resolveAsset || ((attachment) => resolveVerifiedAsset(assetStore, context.outputDir, attachment));
     const buffer = await buildDeterministicDocx({ header, messages: documentMessages, resolveAsset, packer: context.docxOptions.packer });
@@ -2600,6 +2639,31 @@ async function writeSessionDocuments(meta, paths, profiler = null, profileSessio
     const outputSize = (await fsp.stat(docxPath)).size;
     profiler?.addPhase("docx_rendering", docxMs, meta.fileSize || 0, outputSize);
     profiler?.recordSession(profileSession, "docx_render_ms", docxMs, meta.fileSize || 0, outputSize);
+  }
+  if (pdfPath) {
+    const pdfStart = performance.now();
+    const header = createSessionDocumentHeader({
+      ...meta,
+      latestTimestamp: stats.updatedAt,
+      model: stats.model,
+      rawReference: rawRel ? rawRel.replaceAll("\\", "/") : "",
+    });
+    const resolveAsset = context.pdfOptions.resolveAsset || ((attachment) => resolveVerifiedPdfAsset(assetStore, context.outputDir, attachment));
+    if (context.pdfOptions.writeBuffer) {
+      const buffer = await buildDeterministicPdf({ header, messages: documentMessages, resolveAsset, fontRoot: context.pdfOptions.fontRoot });
+      await writeSeparatedOutputFile(pdfPath, sourceProtection, (handle) => context.pdfOptions.writeBuffer(handle, buffer), generation);
+    } else {
+      await writeSeparatedOutputFile(pdfPath, sourceProtection, async (handle, temporaryPath) => {
+        const outputStream = createFileHandleWritable(handle);
+        await buildDeterministicPdf({ header, messages: documentMessages, resolveAsset, fontRoot: context.pdfOptions.fontRoot, outputStream });
+        await handle.sync();
+        await validateCanonicalPdfFile(temporaryPath);
+      }, generation);
+    }
+    const pdfMs = performance.now() - pdfStart;
+    const outputSize = (await fsp.stat(pdfPath)).size;
+    profiler?.addPhase("pdf_rendering", pdfMs, meta.fileSize || 0, outputSize);
+    profiler?.recordSession(profileSession, "pdf_render_ms", pdfMs, meta.fileSize || 0, outputSize);
   }
   return stats;
 }
@@ -2658,6 +2722,7 @@ async function writeIndexFiles(dir, rows, profiler = null, context, sourceProtec
   const indexRows = [...rows].sort((a, b) => (b.updated_at || b.started_at || "").localeCompare(a.updated_at || a.started_at || ""));
   const includeRawColumn = indexRows.some((row) => Boolean(row.raw_export_file));
   const includeDocxColumn = indexRows.some((row) => Boolean(row.docx_file));
+  const includePdfColumn = indexRows.some((row) => Boolean(row.pdf_file));
   const indexStart = performance.now();
   diagnosticReporter("index_start", { rows: indexRows.length, html: Boolean(exportFormats.html), markdown: Boolean(exportFormats.markdown) });
   let indexBytes = 0;
@@ -2666,6 +2731,9 @@ async function writeIndexFiles(dir, rows, profiler = null, context, sourceProtec
     if (includeDocxColumn) {
       md.push(includeRawColumn ? "| Project | Title | Storage | Started | Markdown | DOCX | Raw |" : "| Project | Title | Storage | Started | Markdown | DOCX |", includeRawColumn ? "| --- | --- | --- | --- | --- | --- | --- |" : "| --- | --- | --- | --- | --- | --- |");
       for (const row of indexRows) md.push(includeRawColumn ? `| ${mdCell(row.project_name || row.project)} | ${mdCell(row.title || row.session_id)} | ${mdCell(row.storage)} | ${mdCell(formatDerivedTimestamp(row.started_at))} | ${mdLink(row.markdown_file)} | ${mdLink(row.docx_file)} | ${row.raw_export_file ? mdLink(row.raw_export_file) : ""} |` : `| ${mdCell(row.project_name || row.project)} | ${mdCell(row.title || row.session_id)} | ${mdCell(row.storage)} | ${mdCell(formatDerivedTimestamp(row.started_at))} | ${mdLink(row.markdown_file)} | ${mdLink(row.docx_file)} |`);
+    } else if (includePdfColumn) {
+      md.push(includeRawColumn ? "| Project | Title | Storage | Started | Markdown | PDF | Raw |" : "| Project | Title | Storage | Started | Markdown | PDF |", includeRawColumn ? "| --- | --- | --- | --- | --- | --- | --- |" : "| --- | --- | --- | --- | --- | --- |");
+      for (const row of indexRows) md.push(includeRawColumn ? `| ${mdCell(row.project_name || row.project)} | ${mdCell(row.title || row.session_id)} | ${mdCell(row.storage)} | ${mdCell(formatDerivedTimestamp(row.started_at))} | ${mdLink(row.markdown_file)} | ${mdLink(row.pdf_file)} | ${row.raw_export_file ? mdLink(row.raw_export_file) : ""} |` : `| ${mdCell(row.project_name || row.project)} | ${mdCell(row.title || row.session_id)} | ${mdCell(row.storage)} | ${mdCell(formatDerivedTimestamp(row.started_at))} | ${mdLink(row.markdown_file)} | ${mdLink(row.pdf_file)} |`);
     } else {
       md.push(includeRawColumn ? "| Project | Title | Storage | Started | Markdown | Raw |" : "| Project | Title | Storage | Started | Markdown |", includeRawColumn ? "| --- | --- | --- | --- | --- | --- |" : "| --- | --- | --- | --- | --- |");
       for (const row of indexRows) md.push(includeRawColumn ? `| ${mdCell(row.project_name || row.project)} | ${mdCell(row.title || row.session_id)} | ${mdCell(row.storage)} | ${mdCell(formatDerivedTimestamp(row.started_at))} | ${mdLink(row.markdown_file)} | ${row.raw_export_file ? mdLink(row.raw_export_file) : ""} |` : `| ${mdCell(row.project_name || row.project)} | ${mdCell(row.title || row.session_id)} | ${mdCell(row.storage)} | ${mdCell(formatDerivedTimestamp(row.started_at))} | ${mdLink(row.markdown_file)} |`);
@@ -2676,7 +2744,7 @@ async function writeIndexFiles(dir, rows, profiler = null, context, sourceProtec
     indexBytes += Buffer.byteLength(markdownIndex);
   }
   if (exportFormats.html) {
-    const htmlIndex = renderHtmlIndex(indexRows, generatedAt, { assetStore, reducedMetadata: exportProfile === EXPORT_PROFILE.SOURCE_SNAPSHOTS && !exportFormats.docx });
+    const htmlIndex = renderHtmlIndex(indexRows, generatedAt, { assetStore, reducedMetadata: exportProfile === EXPORT_PROFILE.SOURCE_SNAPSHOTS && !exportFormats.docx && !exportFormats.pdf });
     await writeSeparatedOutputFile(path.join(dir, "index.html"), sourceProtection, (handle) => handle.writeFile(htmlIndex, "utf8"), generation);
     indexBytes += Buffer.byteLength(htmlIndex);
   }
@@ -3062,8 +3130,9 @@ async function writeSummary(dir, rows, context, sourceProtection, generation, as
   const archivedCount = rows.filter((row) => row.storage === "archived").length;
   const lines = ["Codex Project Chat Export", "=========================", "", `Generated: ${generation?.generatedAt || new Date().toISOString()}`, `Codex home: ${codexHome}`, `Sessions dir: ${sessionsDir}`, `Archived sessions dir: ${includeArchived ? archivedSessionsDir : "disabled"}`, `Export profile: ${exportProfile}`, `Path style: ${pathStyle}`, `Sessions exported: ${rows.length}`, `Active sessions: ${activeCount}`, `Archived sessions: ${archivedCount}`, `Attachment occurrences: ${assetSummary.assetOccurrences}`, `Unique assets: ${assetSummary.uniqueAssets}`, `Unique asset bytes: ${assetSummary.uniqueAssetBytes}`, `Deduplicated asset bytes saved: ${assetSummary.deduplicatedBytesSaved}`, "", "Projects:", ...Array.from(projects.entries()).map(([project, count]) => `- ${project}: ${count}`), "", "Notes:"];
   if (exportFormats.markdown) lines.push(`- ${markdownDirName}/ contains classified, derived reading views.`);
-  else if (!exportFormats.docx) lines.push("- This profile intentionally does not create human-readable session transcripts or classify session events.");
+  else if (!exportFormats.docx && !exportFormats.pdf) lines.push("- This profile intentionally does not create human-readable session transcripts or classify session events.");
   if (exportFormats.docx) lines.push("- docx/ contains one deterministic, classified DOCX reading view per exported session.");
+  if (exportFormats.pdf) lines.push("- pdf/ contains one deterministic, classified PDF reading view per exported session.");
   if (copyRaw) lines.push("- raw/ contains canonical byte-preserving session JSONL snapshots.");
   else lines.push("- This profile does not include canonical raw JSONL snapshots.");
   lines.push("- assets/ contains content-addressed decoded attachments; assets/manifest.json records validated types and every stable usage occurrence.");
@@ -3086,7 +3155,7 @@ async function verifyExport(dir, rows, profiler = null, context, options = {}) {
     if (!stat?.isFile() || stat.size === 0) throw new ExportError("EXPORT_VERIFICATION_FAILED", `Missing or empty output file: ${file}`);
   }
   for (const row of rows) {
-    for (const rel of [row.markdown_file, row.docx_file, row.raw_export_file].filter(Boolean)) {
+    for (const rel of [row.markdown_file, row.docx_file, row.pdf_file, row.raw_export_file].filter(Boolean)) {
       const file = path.join(dir, rel);
       const stat = await fsp.stat(file).catch(() => null);
       if (!stat?.isFile() || stat.size === 0) throw new ExportError("EXPORT_VERIFICATION_FAILED", `Missing or empty session export: ${file}`);
@@ -3095,6 +3164,10 @@ async function verifyExport(dir, rows, profiler = null, context, options = {}) {
       const docxPath = path.join(dir, row.docx_file);
       const bytes = await fsp.readFile(docxPath);
       await validateCanonicalDocx(bytes);
+    }
+    if (row.pdf_file) {
+      const pdfPath = path.join(dir, row.pdf_file);
+      await validateCanonicalPdfFile(pdfPath);
     }
     if (row.raw_export_file) {
       if (row.raw_copy_status !== RAW_COPY_STATUS.VERIFIED_AT_EXPORT || !isCanonicalIsoTimestamp(row.raw_verified_at) || row.snapshot_status !== "STABLE" || !row.raw_sha256) throw new ExportError("EXPORT_VERIFICATION_FAILED", `Raw snapshot verification metadata is incomplete: ${row.raw_export_file}`);
@@ -3139,7 +3212,7 @@ Options:
   --session-index <file>      Use a custom session_index.jsonl file.
   --include-tools             Include tool call input/output in Markdown.
   --profile <name>            Use complete, readable, or source-snapshots. Explicit profile wins over --no-raw.
-  --format docx               Add one deterministic DOCX reading view per exported session.
+  --format <docx|pdf>         Add one deterministic document reading view per exported session.
   --no-raw                    Legacy shorthand for the readable profile when --profile is omitted.
   --no-redact-markdown        Disable redaction in Markdown and derived display titles.
   --readable-paths            Use longer human-readable export file names.
@@ -3149,7 +3222,7 @@ Options:
   --version, -v               Show the version.
 
 By default, exports use short paths such as md/p001-project/s0001.md and
-raw/p001-project/s0001.jsonl to make copied or unzipped archives safer on Windows.\n\nIf node is not found, use export-codex-project-chats.cmd or install Node.js 18+.`);
+raw/p001-project/s0001.jsonl to make copied or unzipped archives safer on Windows.\n\nIf node is not found, use export-codex-project-chats.cmd or install Node.js 22+.`);
 }
 
 function printProjectList(metas, context) {
@@ -3293,6 +3366,7 @@ function renderHtmlIndex(rows, generatedAt, options = {}) {
   const includeRawColumn = rows.some((row) => Boolean(row.raw_export_file));
   const includeMarkdownColumn = rows.some((row) => Boolean(row.markdown_file));
   const includeDocxColumn = rows.some((row) => Boolean(row.docx_file));
+  const includePdfColumn = rows.some((row) => Boolean(row.pdf_file));
   const bodyRows = rows.map((row) => {
     const startedAt = formatDerivedTimestamp(row.started_at);
     const updatedAt = formatDerivedTimestamp(row.updated_at);
@@ -3302,15 +3376,16 @@ function renderHtmlIndex(rows, generatedAt, options = {}) {
     const rawCell = includeRawColumn ? `<td>${row.raw_export_file ? htmlLink(row.raw_export_file, path.posix.basename(toPosixPath(row.raw_export_file))) : ""}</td>` : "";
     const markdownCell = includeMarkdownColumn ? `<td>${row.markdown_file ? htmlLink(row.markdown_file, path.posix.basename(toPosixPath(row.markdown_file))) : ""}</td>` : "";
     const docxCell = includeDocxColumn ? `<td>${row.docx_file ? htmlLink(row.docx_file, path.posix.basename(toPosixPath(row.docx_file))) : ""}</td>` : "";
+    const pdfCell = includePdfColumn ? `<td>${row.pdf_file ? htmlLink(row.pdf_file, path.posix.basename(toPosixPath(row.pdf_file))) : ""}</td>` : "";
     const assetsCell = `<td>${renderHtmlAssetReferences(assetStore?.referencesForSession(row.session_id) || [])}</td>`;
-    if (reducedMetadata) return `      <tr data-search="${htmlEscape(searchable)}"><td>${htmlEscape(row.project_name || row.project)}</td><td>${htmlEscape(row.storage || "active")}</td><td>${htmlEscape(startedAt)}</td><td>${htmlEscape(row.session_id)}</td>${assetsCell}${docxCell}${rawCell}</tr>`;
-    return `      <tr data-search="${htmlEscape(searchable)}"><td>${htmlEscape(row.project_name || row.project)}</td><td>${htmlEscape(row.title || row.session_id)}</td><td>${htmlEscape(row.storage || "active")}</td><td>${htmlEscape(startedAt)}</td><td>${htmlEscape(row.model || "")}</td>${assetsCell}${markdownCell}${docxCell}${rawCell}</tr>`;
+    if (reducedMetadata) return `      <tr data-search="${htmlEscape(searchable)}"><td>${htmlEscape(row.project_name || row.project)}</td><td>${htmlEscape(row.storage || "active")}</td><td>${htmlEscape(startedAt)}</td><td>${htmlEscape(row.session_id)}</td>${assetsCell}${docxCell}${pdfCell}${rawCell}</tr>`;
+    return `      <tr data-search="${htmlEscape(searchable)}"><td>${htmlEscape(row.project_name || row.project)}</td><td>${htmlEscape(row.title || row.session_id)}</td><td>${htmlEscape(row.storage || "active")}</td><td>${htmlEscape(startedAt)}</td><td>${htmlEscape(row.model || "")}</td>${assetsCell}${markdownCell}${docxCell}${pdfCell}${rawCell}</tr>`;
   }).join("\n");
   const filterPlaceholder = reducedMetadata ? "Project, storage, date, or session ID" : "Project, title, date, model, active or archived";
   const profileNote = reducedMetadata ? "\n  <p class=\"meta\">Source snapshots intentionally use a reduced index and do not inspect complete readable metadata.</p>" : "";
   const header = reducedMetadata
-    ? `<th>Project</th><th>Storage</th><th>Started</th><th>Session ID</th><th>Assets</th>${includeDocxColumn ? "<th>DOCX</th>" : ""}${includeRawColumn ? "<th>Raw</th>" : ""}`
-    : `<th>Project</th><th>Title</th><th>Storage</th><th>Started</th><th>Model</th><th>Assets</th>${includeMarkdownColumn ? "<th>Markdown</th>" : ""}${includeDocxColumn ? "<th>DOCX</th>" : ""}${includeRawColumn ? "<th>Raw</th>" : ""}`;
+    ? `<th>Project</th><th>Storage</th><th>Started</th><th>Session ID</th><th>Assets</th>${includeDocxColumn ? "<th>DOCX</th>" : ""}${includePdfColumn ? "<th>PDF</th>" : ""}${includeRawColumn ? "<th>Raw</th>" : ""}`
+    : `<th>Project</th><th>Title</th><th>Storage</th><th>Started</th><th>Model</th><th>Assets</th>${includeMarkdownColumn ? "<th>Markdown</th>" : ""}${includeDocxColumn ? "<th>DOCX</th>" : ""}${includePdfColumn ? "<th>PDF</th>" : ""}${includeRawColumn ? "<th>Raw</th>" : ""}`;
   return `<!doctype html>
 <html lang="en">
 <head>
