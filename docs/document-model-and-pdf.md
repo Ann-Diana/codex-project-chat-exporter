@@ -20,7 +20,7 @@ Canonical bounded HTTP/HTTPS links become URI annotations. Invalid, overlong, lo
 
 ## Fonts and missing glyphs
 
-The renderer uses only the bundled Noto Sans, Noto Sans Mono, and Noto Sans Symbols faces described in `fonts/README.md`. Font bytes are hashed before parsing. Text is checked code point by code point; the symbol face is used only when the selected proportional or monospace face lacks that character. An unsupported code point aborts with the session ID and Unicode code point but without message content.
+The renderer uses only the bundled Noto Sans, Noto Sans Mono, Noto Sans Symbols, and Noto Sans Symbols 2 faces described in `fonts/README.md`. Font bytes are hashed before parsing. Text is checked code point by code point; missing primary glyphs use the two symbol faces and then the monospace face in a fixed order. Arrows, check marks, warning signs, plus/minus, and comparison signs remain selectable as their original Unicode characters. Each mixed-font run derives its baseline, pagination, and line height from the primary face's ascender/descender metrics instead of applying character-specific offsets. An unsupported code point aborts with the session ID and Unicode code point but without message content.
 
 ## Reproducibility and publication
 
@@ -43,8 +43,8 @@ Measurements on 2026-08-25 with Node.js 24.19.0:
 
 | JSONL input | PDF | DOCX | PDF / DOCX | PDF Peak RSS | Result |
 | --- | ---: | ---: | ---: | ---: | --- |
-| 16 MiB | 1,234.718 ms | 1,169.600 ms | 1.056 | 152.527 MiB | pass |
-| 115 MiB | 6,606.087 ms | 6,530.895 ms | 1.012 | 253.855 MiB | pass |
+| 16 MiB | 1,245.190 ms | 1,184.063 ms | 1.052 | 155.613 MiB | pass |
+| 115 MiB | 7,471.683 ms | 7,415.534 ms | 1.008 | 253.344 MiB | pass |
 
 Both runs left no temporary residue and preserved the JSONL source byte-for-byte. Neither ratio crossed the 1.5 investigation threshold.
 

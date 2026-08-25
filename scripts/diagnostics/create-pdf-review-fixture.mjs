@@ -47,7 +47,7 @@ try {
         content: [
           {
             type: "input_text",
-            text: "# Manueller PDF-Abnahmetest\n\nUmlaute: Ä Ö Ü ä ö ü ß. XML-Sonderzeichen bleiben sichtbar: <tag> & \"Zitat\" →.\n\nLink: [OpenAI](https://openai.com/).\n\n- erster Listenpunkt\n- zweiter Listenpunkt\n\n```js\nconst greeting = 'Grüße <&> aus Köln';\nconsole.log(greeting);\n```",
+            text: "# Manueller PDF-Abnahmetest\n\nUmlaute: Ä Ö Ü ä ö ü ß. XML-Sonderzeichen bleiben sichtbar: <tag> & \"Zitat\".\n\nGemeinsame Grundlinie: Aa→Bb ←Cc ↑Dd ↓Ee ✓Ff ⚠Gg ±Hh ≤Ii ≥Jj.\n\nSymbolfolge: → ← ↑ ↓ ✓ ⚠ ± ≤ ≥.\n\nLink: [OpenAI](https://openai.com/).\n\n- erster Listenpunkt → ✓\n- zweiter Listenpunkt ≤ ≥\n\n```js\nconst greeting = 'Grüße <&> aus Köln';\nconst symbols = '→ ← ↑ ↓ ✓ ⚠ ± ≤ ≥';\nconsole.log(greeting, symbols);\n```",
           },
           { type: "input_image", image_url: `data:image/png;base64,${PNG}` },
           { type: "input_image", image_url: `data:image/jpeg;base64,${JPEG}` },

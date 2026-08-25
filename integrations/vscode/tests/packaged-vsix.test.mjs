@@ -72,8 +72,8 @@ async function writeSyntheticSession(codexHome) {
   await fs.mkdir(directory, { recursive: true });
   const records = [
     { type: "session_meta", timestamp: "2026-08-24T10:00:00.000Z", payload: { id: sessionId, cwd: "C:\\Synthetic\\link-check", timestamp: "2026-08-24T10:00:00.000Z", source: "vscode", thread_source: "user" } },
-    { type: "response_item", timestamp: "2026-08-24T10:00:01.000Z", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "# Linktest\n\nUmlaute äöü & <XML>.\n\nLink: [OpenAI](https://openai.com/).\n\n- eins\n- zwei\n\n```js\nconst value = '<&>';\n```" }], internal_chat_message_metadata_passthrough: { turn_id: "turn-1" } } },
-    { type: "event_msg", timestamp: "2026-08-24T10:00:01.001Z", payload: { type: "user_message", message: "# Linktest\n\nUmlaute äöü & <XML>.\n\nLink: [OpenAI](https://openai.com/).\n\n- eins\n- zwei\n\n```js\nconst value = '<&>';\n```" } },
+    { type: "response_item", timestamp: "2026-08-24T10:00:01.000Z", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "# Linktest\n\nUmlaute äöü & <XML>. Symbole → ← ↑ ↓ ✓ ⚠ ± ≤ ≥.\n\nLink: [OpenAI](https://openai.com/).\n\n- eins\n- zwei\n\n```js\nconst value = '<&> → ✓ ⚠ ≤ ≥';\n```" }], internal_chat_message_metadata_passthrough: { turn_id: "turn-1" } } },
+    { type: "event_msg", timestamp: "2026-08-24T10:00:01.001Z", payload: { type: "user_message", message: "# Linktest\n\nUmlaute äöü & <XML>. Symbole → ← ↑ ↓ ✓ ⚠ ± ≤ ≥.\n\nLink: [OpenAI](https://openai.com/).\n\n- eins\n- zwei\n\n```js\nconst value = '<&> → ✓ ⚠ ≤ ≥';\n```" } },
     { type: "response_item", timestamp: "2026-08-24T10:00:02.000Z", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "Antwort." }] } },
   ];
   await fs.writeFile(path.join(directory, `rollout-2026-08-24T10-00-00-${sessionId}.jsonl`), `${records.map((record) => JSON.stringify(record)).join("\n")}\n`, "utf8");
@@ -104,7 +104,7 @@ test("regular VSIX builds are byte-identical and their packaged runtime exports 
     for (const name of (await fs.readdir("lib")).filter((name) => name.endsWith(".mjs"))) {
       assert.ok(zip.file(`extension/vendor/codex-project-chat-exporter/lib/${name}`), name);
     }
-    for (const name of (await fs.readdir("fonts")).filter((name) => name.endsWith(".ttf") || name === "OFL.txt")) {
+    for (const name of (await fs.readdir("fonts")).filter((name) => name.endsWith(".ttf") || (name.startsWith("OFL") && name.endsWith(".txt")))) {
       assert.ok(zip.file(`extension/vendor/codex-project-chat-exporter/fonts/${name}`), name);
     }
     for (const [lockPath, entry] of Object.entries(lock.packages)) {
@@ -119,7 +119,8 @@ test("regular VSIX builds are byte-identical and their packaged runtime exports 
     for (const relative of actualRuntimeFiles) assert.equal(sha256(await zip.file(`${vendorPrefix}${relative}`).async("nodebuffer")), integrity.files[relative], relative);
     const licenses = await zip.file(`${vendorPrefix}THIRD_PARTY_LICENSES.txt`).async("string");
     for (const name of Object.keys(rootPackage.dependencies)) assert.ok(licenses.includes(`Package: ${name}@`), name);
-    assert.ok(licenses.includes("Noto Sans 2.015") && licenses.includes("SIL OPEN FONT LICENSE Version 1.1"));
+    assert.ok(licenses.includes("Noto Sans 2.015") && licenses.includes("Noto Sans Symbols 2 2.008") && licenses.includes("SIL OPEN FONT LICENSE Version 1.1"));
+    assert.ok(licenses.includes("Source: fonts/OFL-SYMBOLS.txt") && licenses.includes("Copyright 2022 The Noto Project Authors (https://github.com/notofonts/symbols)"));
 
     const installedRoot = path.join(temp, "installed-extension");
     await extractExtension(zip, installedRoot);
@@ -172,6 +173,7 @@ test("regular builder fails before archive creation when a packaged runtime impo
     await fs.mkdir(path.join(repoRoot, "lib"));
     await fs.mkdir(path.join(repoRoot, "fonts"));
     await fs.writeFile(path.join(repoRoot, "fonts", "OFL.txt"), "fixture font license\n");
+    await fs.writeFile(path.join(repoRoot, "fonts", "OFL-SYMBOLS.txt"), "fixture symbol font license\n");
     await fs.writeFile(path.join(repoRoot, "package.json"), `${JSON.stringify({ name: "fixture", version: "1.0.0", type: "module", dependencies: {} }, null, 2)}\n`);
     await fs.writeFile(path.join(repoRoot, "package-lock.json"), `${JSON.stringify({ name: "fixture", version: "1.0.0", lockfileVersion: 3, packages: { "": { name: "fixture", version: "1.0.0", dependencies: {} } } }, null, 2)}\n`);
     await fs.writeFile(path.join(repoRoot, "LICENSE"), "MIT\n");
@@ -193,6 +195,7 @@ test("regular builder fails before archive creation when the locked production t
     await fs.mkdir(path.join(repoRoot, "lib"));
     await fs.mkdir(path.join(repoRoot, "fonts"));
     await fs.writeFile(path.join(repoRoot, "fonts", "OFL.txt"), "fixture font license\n");
+    await fs.writeFile(path.join(repoRoot, "fonts", "OFL-SYMBOLS.txt"), "fixture symbol font license\n");
     const dependencies = { "missing-dependency": "1.0.0" };
     await fs.writeFile(path.join(repoRoot, "package.json"), `${JSON.stringify({ name: "fixture", version: "1.0.0", type: "module", dependencies }, null, 2)}\n`);
     await fs.writeFile(path.join(repoRoot, "package-lock.json"), `${JSON.stringify({ name: "fixture", version: "1.0.0", lockfileVersion: 3, packages: { "": { name: "fixture", version: "1.0.0", dependencies }, "node_modules/missing-dependency": { version: "1.0.0", resolved: "https://registry.npmjs.org/missing-dependency/-/missing-dependency-1.0.0.tgz", integrity: "sha512-fixture" } } }, null, 2)}\n`);
@@ -200,6 +203,30 @@ test("regular builder fails before archive creation when the locked production t
     await fs.writeFile(path.join(repoRoot, "bin", "export-codex-project-chats.mjs"), "export function exportArchive() {}\n");
     let archiveCalls = 0;
     await assert.rejects(() => buildVsix({ repoRoot, distDir: path.join(temp, "dist"), archiveWriter: async () => { archiveCalls += 1; } }), (error) => error?.code === "ENOENT");
+    assert.equal(archiveCalls, 0);
+    assert.deepEqual(await fs.readdir(path.join(temp, "dist")), []);
+  } finally {
+    await fs.rm(temp, { recursive: true, force: true });
+  }
+});
+
+test("regular builder rejects a missing upstream symbol-font license before archive creation", async () => {
+  const temp = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "packaged-vsix-missing-symbol-license-")));
+  try {
+    const repoRoot = path.join(temp, "repo");
+    await fs.mkdir(path.join(repoRoot, "bin"), { recursive: true });
+    await fs.mkdir(path.join(repoRoot, "lib"));
+    await fs.mkdir(path.join(repoRoot, "fonts"));
+    await fs.writeFile(path.join(repoRoot, "fonts", "OFL.txt"), "fixture font license\n");
+    await fs.writeFile(path.join(repoRoot, "package.json"), `${JSON.stringify({ name: "fixture", version: "1.0.0", type: "module", dependencies: {} }, null, 2)}\n`);
+    await fs.writeFile(path.join(repoRoot, "package-lock.json"), `${JSON.stringify({ name: "fixture", version: "1.0.0", lockfileVersion: 3, packages: { "": { name: "fixture", version: "1.0.0", dependencies: {} } } }, null, 2)}\n`);
+    await fs.writeFile(path.join(repoRoot, "LICENSE"), "MIT\n");
+    await fs.writeFile(path.join(repoRoot, "bin", "export-codex-project-chats.mjs"), "export function exportArchive() {}\n");
+    let archiveCalls = 0;
+    await assert.rejects(
+      () => buildVsix({ repoRoot, distDir: path.join(temp, "dist"), archiveWriter: async () => { archiveCalls += 1; } }),
+      (error) => error?.code === "ENOENT" && String(error.path || "").endsWith("OFL-SYMBOLS.txt"),
+    );
     assert.equal(archiveCalls, 0);
     assert.deepEqual(await fs.readdir(path.join(temp, "dist")), []);
   } finally {

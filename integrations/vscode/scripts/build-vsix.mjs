@@ -189,13 +189,23 @@ async function packageExporterRuntime({ repoRoot, stage, stageOwned }) {
     licenseSections.push("----", "");
   }
   const fontLicense = await fs.readFile(path.join(repoRoot, "fonts", "OFL.txt"), "utf8");
+  const symbolFontLicense = await fs.readFile(path.join(repoRoot, "fonts", "OFL-SYMBOLS.txt"), "utf8");
   licenseSections.push(
     "Bundled font assets",
-    "Noto Sans 2.015, Noto Sans Mono 2.014, and Noto Sans Symbols 2.003",
+    "Noto Sans 2.015 and Noto Sans Mono 2.014",
     "Declared license: SIL Open Font License 1.1",
     "Source: fonts/OFL.txt",
     "",
     fontLicense,
+    "",
+    "----",
+    "",
+    "Bundled symbol font assets",
+    "Noto Sans Symbols 2.003 and Noto Sans Symbols 2 2.008",
+    "Declared license: SIL Open Font License 1.1",
+    "Source: fonts/OFL-SYMBOLS.txt",
+    "",
+    symbolFontLicense,
     "",
     "----",
     "",

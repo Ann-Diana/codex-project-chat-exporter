@@ -11,7 +11,9 @@ import path from "node:path";
 import test from "node:test";
 import tls from "node:tls";
 import { promisify } from "node:util";
+import { inflateSync } from "node:zlib";
 
+import PDFDocument from "pdfkit";
 import { DOCUMENT_ROLE, createDocumentMessage, createSessionDocumentHeader } from "../lib/document-model.mjs";
 import { PdfExportError, buildDeterministicPdf, resolveVerifiedPdfAsset, safePdfProjectDisplayName, validateCanonicalPdf, validateCanonicalPdfFile } from "../lib/pdf-renderer.mjs";
 
@@ -19,6 +21,7 @@ const execFileAsync = promisify(execFile);
 const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAGAAAAAwCAIAAABhdOiYAAABq0lEQVR4nO2b0W3DMAxEFaED3U7dIUN0h+ykZQr0ox8Fmq/INkmLR8GxeV8BAkvn5ztFjpPb989vSW2rCu+lSikfTwr4/EocndrjngnSlRWzVazL1ZWF19UmE6QoASlKQBcDhP8VhLhrqWelAxKj8wBCzF63npgOGMjqe60IqxLG909d32tFWKobuT3u3L1uFCAsiEQwWtLpXvjnDQGEDU9cRlt0uPPyAUH0zWKk0mEVjQwIa76XjJyYjNmhFI0JCNu+l2vnsGN7s+QDZwOCwbef0V46/qJxAMHs28NoLDvOohEAwXdVjaaHmyWPEw4I7qtqMe2k4ymaCxAcvu2MKNkZLto4ILh9WxixmiUPywcEkm95i8SlM3b4CCCwfa9GKSI7A0XbDQgxmZfrFvQwysJoHyBE+rbcMcTNQgCE+Ksad8+5NaYaIisgTMl8d3875zGvzKgeis5TE+jYB69HozNNxqLVa9LpJJxXvTKdZuiyBKi9fuNVzij1vJSKtYmfJseUvki3C9M5z6PnOCUgRQlIUQLa+SvX/EV5p0yQogSk6Jb/9pGVCSqy/gD5cfpUy6at1AAAAABJRU5ErkJggg==", "base64");
 const JPEG = Buffer.from("/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAMCAgMCAgMDAwMEAwMEBQgFBQQEBQoHBwYIDAoMDAsKCwsNDhIQDQ4RDgsLEBYQERMUFRUVDA8XGBYUGBIUFRT/2wBDAQMEBAUEBQkFBQkUDQsNFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBT/wAARCAAgAEADASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwDxeiiiv3g/FAooooAKKKKACiiigAooooAKKKKACiiigAooooA//9k=", "base64");
 const LONG_URL = `https://example.invalid/technical/${"a".repeat(700)}`;
+const REQUIRED_SYMBOLS = Object.freeze(["→", "←", "↑", "↓", "✓", "⚠", "±", "≤", "≥"]);
 
 function sha256(data) {
   return createHash("sha256").update(data).digest("hex");
@@ -26,6 +29,64 @@ function sha256(data) {
 
 function attachment(data, mediaType) {
   return { sha256: sha256(data), sourceSha256: sha256(Buffer.concat([data, Buffer.from("source")])), mediaType, decodedBytes: data.length };
+}
+
+function inflatedPdfStreams(bytes) {
+  const streamStart = Buffer.from("stream\n", "latin1");
+  const streamEnd = Buffer.from("\nendstream", "latin1");
+  const streams = [];
+  let cursor = 0;
+  while (cursor < bytes.length) {
+    const marker = bytes.indexOf(streamStart, cursor);
+    if (marker < 0) break;
+    const start = marker + streamStart.length;
+    const end = bytes.indexOf(streamEnd, start);
+    assert.notEqual(end, -1, "each PDF stream must have its closing delimiter");
+    const content = bytes.subarray(start, end);
+    try {
+      streams.push(inflateSync(content).toString("latin1"));
+    } catch {
+      streams.push(content.toString("latin1"));
+    }
+    cursor = end + streamEnd.length;
+  }
+  return streams;
+}
+
+async function captureRenderedPdfFragments(options) {
+  const fragments = [];
+  const originalFragment = PDFDocument.prototype._fragment;
+  PDFDocument.prototype._fragment = function captureFragment(text, x, y, textOptions) {
+    const originalAddContent = this.addContent;
+    let matrixY;
+    this.addContent = function captureContent(command) {
+      const tokens = String(command).split(" ");
+      if (tokens.length === 7 && tokens[6] === "Tm") matrixY = Number(tokens[5]);
+      return originalAddContent.call(this, command);
+    };
+    try {
+      return originalFragment.call(this, text, x, y, textOptions);
+    } finally {
+      this.addContent = originalAddContent;
+      if (matrixY !== undefined) {
+        fragments.push({
+          text: String(text),
+          page: this.page.dictionary.id,
+          top: y,
+          baseline: matrixY,
+          font: this._font.name,
+          fontSize: this._fontSize,
+          lineHeight: this.currentLineHeight(true),
+          requestedBaseline: textOptions.baseline,
+        });
+      }
+    }
+  };
+  try {
+    return { bytes: await buildDeterministicPdf(options), fragments };
+  } finally {
+    PDFDocument.prototype._fragment = originalFragment;
+  }
 }
 
 async function withoutNetwork(action) {
@@ -72,7 +133,7 @@ function createRepresentativeDocument(repeatedPng = true) {
     role: DOCUMENT_ROLE.USER,
     label: "User",
     timestamp: "2026-08-24T10:00:01.000Z",
-    text: `# Überschrift\n\nUmlaute äöü & < >, “Zitat” →. Link: [OpenAI](https://openai.com/). Long URL: [technical reference](${LONG_URL}).\n\nUnsafe: [script](javascript:noop), [data](data:text/plain,secret), [file](file:///C:/secret.txt), [UNC](//server/share), [too long](https://example.invalid/${"z".repeat(2100)}).\n\n- eins\n- zwei\n\n\`\`\`js\nconst value = '<&>';\n${"A".repeat(5000)}\n\`\`\``,
+    text: `# Überschrift\n\nUmlaute äöü & < >, “Zitat” ${REQUIRED_SYMBOLS.join(" ")}. Link: [OpenAI](https://openai.com/). Long URL: [technical reference](${LONG_URL}).\n\nUnsafe: [script](javascript:noop), [data](data:text/plain,secret), [file](file:///C:/secret.txt), [UNC](//server/share), [too long](https://example.invalid/${"z".repeat(2100)}).\n\n- eins → ✓\n- zwei ≤ ≥\n\n\`\`\`js\nconst value = '<&> ${REQUIRED_SYMBOLS.join(" ")}';\n${"A".repeat(5000)}\n\`\`\``,
     attachments: repeatedPng ? [png, png, jpeg, gif, webp, binary] : [png, jpeg, gif, webp, binary],
   });
   const messages = [
@@ -112,6 +173,116 @@ test("PDF renderer creates deterministic offline A4 documents with safe links an
 
   const withoutDuplicate = await buildDeterministicPdf(createRepresentativeDocument(false));
   assert.equal(source.split("/Subtype /Image").length, withoutDuplicate.toString("latin1").split("/Subtype /Image").length, "a repeated PNG must reuse the same embedded image object");
+});
+
+test("mixed proportional, monospace, and symbol runs emit aligned text matrices and intact Unicode mappings", async () => {
+  const sessionId = "baseline-session";
+  const header = createSessionDocumentHeader({ id: sessionId, title: "Baseline test" });
+  const symbolSequence = "A→B←C↑D↓E✓F⚠G±H≤I≥J";
+  const text = `Normal: ${symbolSequence}\n\n\`\`\`text\nMono: ${symbolSequence}\n\`\`\``;
+  const messages = [createDocumentMessage({ sessionId, recordOrdinal: 1, role: DOCUMENT_ROLE.USER, label: "User", text })];
+  const { bytes, fragments } = await withoutNetwork(() => captureRenderedPdfFragments({ header, messages, resolveAsset: async () => null }));
+
+  for (const [label, fontSize, primaryFont] of [["Normal: ", 10.5, "NotoSans-Regular"], ["Mono: ", 8.5, "NotoSansMono-Regular"]]) {
+    const initial = fragments.find((fragment) => fragment.text.startsWith(label));
+    assert.ok(initial, `${label} must be emitted as a real PDF text fragment`);
+    const line = fragments.filter((fragment) => fragment.top === initial.top && fragment.fontSize === fontSize);
+    assert.equal(line.map((fragment) => fragment.text).join(""), `${label}${symbolSequence}`);
+    assert.ok(line.some((fragment) => fragment.font === primaryFont));
+    assert.ok(line.some((fragment) => fragment.font === "NotoSansSymbols2-Regular"));
+    assert.ok(line.some((fragment) => fragment.font === "NotoSansMono-Regular"));
+    if (label === "Normal: ") assert.ok(line.some((fragment) => fragment.font === "NotoSansSymbols-Regular"));
+    assert.equal(new Set(line.map((fragment) => fragment.baseline)).size, 1, `${label} must use one emitted PDF text-matrix baseline`);
+    assert.equal(new Set(line.map((fragment) => fragment.lineHeight)).size, 1, `${label} must retain the primary font line height`);
+    assert.equal(new Set(line.map((fragment) => fragment.requestedBaseline)).size, 1, `${label} must compute one metrics-based baseline`);
+    assert.equal(line[0].lineHeight, 1.362 * fontSize);
+    assert.equal(line[0].requestedBaseline, -1.069 * fontSize);
+  }
+
+  const unicodeMaps = inflatedPdfStreams(bytes).filter((stream) => stream.includes("beginbfchar") || stream.includes("beginbfrange")).join("\n").toUpperCase();
+  assert.notEqual(unicodeMaps.length, 0, "embedded font subsets must publish ToUnicode maps");
+  for (const symbol of REQUIRED_SYMBOLS) {
+    const scalar = symbol.codePointAt(0).toString(16).toUpperCase().padStart(4, "0");
+    assert.ok(unicodeMaps.includes(`<${scalar}>`), `ToUnicode must preserve ${symbol} as U+${scalar} for copying and selection`);
+  }
+  assert.deepEqual(bytes, await buildDeterministicPdf({ header, messages, resolveAsset: async () => null }), "mixed-font PDF output must remain byte-identical");
+});
+
+test("fallback-heavy proportional and monospace text preserves wrapping, baseline, and every symbol", async () => {
+  const sessionId = "wrapped-baseline-session";
+  const header = createSessionDocumentHeader({ id: sessionId, title: "Wrapped baseline test" });
+  const repeated = Array.from({ length: 36 }, (_, index) => `A→B←C↑D↓E✓F⚠G±H≤I≥J${index}`).join(" ");
+  const text = `${repeated}\n\n\`\`\`text\n${repeated}\n\`\`\``;
+  const messages = [createDocumentMessage({ sessionId, recordOrdinal: 1, role: DOCUMENT_ROLE.USER, label: "User", text })];
+  const { bytes, fragments } = await captureRenderedPdfFragments({ header, messages, resolveAsset: async () => null });
+
+  for (const fontSize of [10.5, 8.5]) {
+    const runs = fragments.filter((fragment) => fragment.fontSize === fontSize);
+    const lines = new Map();
+    for (const run of runs) {
+      const key = `${run.page}:${run.top}`;
+      if (!lines.has(key)) lines.set(key, []);
+      lines.get(key).push(run);
+    }
+    assert.ok(lines.size > 1, `${fontSize}-point text must wrap instead of being clipped`);
+    for (const [key, line] of lines) {
+      assert.equal(new Set(line.map((fragment) => fragment.baseline)).size, 1, `${key} must retain one emitted baseline`);
+      assert.equal(new Set(line.map((fragment) => fragment.lineHeight)).size, 1, `${key} must retain one line height`);
+    }
+    const rendered = runs.map((run) => run.text).join("");
+    for (const symbol of REQUIRED_SYMBOLS) {
+      assert.equal(rendered.split(symbol).length - 1, 36, `wrapped ${fontSize}-point text must retain every ${symbol}`);
+    }
+  }
+  assert.deepEqual(bytes, await buildDeterministicPdf({ header, messages, resolveAsset: async () => null }));
+});
+
+test("paragraphs and lists ending in fallback glyphs preserve subsequent vertical spacing", async () => {
+  const sessionId = "terminal-fallback-spacing-session";
+  const header = createSessionDocumentHeader({ id: sessionId, title: "Terminal fallback spacing test" });
+  const render = async (ending) => captureRenderedPdfFragments({
+    header,
+    messages: [
+      createDocumentMessage({ sessionId, recordOrdinal: 1, role: DOCUMENT_ROLE.USER, label: "First message", text: `- List item ${ending}\n\nFollowing paragraph ${ending}` }),
+      createDocumentMessage({ sessionId, recordOrdinal: 2, role: DOCUMENT_ROLE.USER, label: "Second message", text: "Final paragraph" }),
+    ],
+    resolveAsset: async () => null,
+  });
+
+  const normal = await render("A");
+  const fallback = await render("✓");
+  for (const label of ["Following paragraph ", "Second message", "Final paragraph"]) {
+    const regularFragment = normal.fragments.find((fragment) => fragment.text.startsWith(label));
+    const fallbackFragment = fallback.fragments.find((fragment) => fragment.text.startsWith(label));
+    assert.ok(regularFragment && fallbackFragment, `${label} must be emitted in both documents`);
+    assert.equal(fallbackFragment.top, regularFragment.top, `${label} must not shift when the previous run ends in a fallback glyph`);
+  }
+});
+
+test("the additional bundled symbol face fails closed when missing or modified", async () => {
+  const sessionId = "font-integrity-session";
+  const header = createSessionDocumentHeader({ id: sessionId, title: "Font integrity test" });
+  const messages = [createDocumentMessage({ sessionId, recordOrdinal: 1, role: DOCUMENT_ROLE.USER, label: "User", text: "✓ ⚠" })];
+  const fontRoot = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "pdf-symbol-font-integrity-")));
+  const symbolPath = path.join(fontRoot, "NotoSansSymbols2-Regular.ttf");
+  try {
+    await fs.cp(path.resolve("fonts"), fontRoot, { recursive: true });
+    await fs.rm(symbolPath);
+    await assert.rejects(
+      () => buildDeterministicPdf({ header, messages, fontRoot, resolveAsset: async () => null }),
+      (error) => error instanceof PdfExportError && error.code === "PDF_FONT_MISSING" && error.message.includes("NotoSansSymbols2-Regular.ttf"),
+    );
+
+    const modified = Buffer.from(await fs.readFile(path.resolve("fonts", "NotoSansSymbols2-Regular.ttf")));
+    modified[modified.length - 1] ^= 1;
+    await fs.writeFile(symbolPath, modified, { flag: "wx" });
+    await assert.rejects(
+      () => buildDeterministicPdf({ header, messages, fontRoot, resolveAsset: async () => null }),
+      (error) => error instanceof PdfExportError && error.code === "PDF_FONT_INTEGRITY" && error.message.includes("NotoSansSymbols2-Regular.ttf"),
+    );
+  } finally {
+    await fs.rm(fontRoot, { recursive: true, force: true });
+  }
 });
 
 test("PDF renderer fails closed for missing glyphs and corrupt image data without leaking content", async () => {
