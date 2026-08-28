@@ -58,6 +58,53 @@ async function withoutNetwork(action) {
   }
 }
 
+test("DOCX XML reserialization preserves query separators and literal entity text", async () => {
+  const target = "https://example.invalid/?a=1&b=2&literal=&amp;#part";
+  const options = {
+    header: createSessionDocumentHeader({ id: "xml-regression" }),
+    messages: [createDocumentMessage({ sessionId: "xml-regression", recordOrdinal: 399, role: DOCUMENT_ROLE.ASSISTANT,
+      text: `Literal &amp; &lt; & < > \" '. [A &amp; B](${target}).` })], resolveAsset: async () => null,
+  };
+  const bytes = await withoutNetwork(() => buildDeterministicDocx(options));
+  assert.deepEqual(bytes, await buildDeterministicDocx(options));
+  const zip = await JSZip.loadAsync(bytes);
+  for (const part of Object.values(zip.files).filter(p => p.name.endsWith(".xml") || p.name.endsWith(".rels"))) {
+    const xml = await part.async("string");
+    assert.doesNotThrow(() => xml2js(xml));
+  }
+  await validateCanonicalDocx(bytes);
+  const rels = collectElements(xml2js(await zip.file("word/_rels/document.xml.rels").async("string")), "Relationship");
+  assert.equal(rels.find(r => r.attributes.Type.endsWith("/hyperlink")).attributes.Target, target);
+  const doc = xml2js(await zip.file("word/document.xml").async("string"));
+  assert.ok(elementText(doc).includes(`Literal &amp; &lt; & < > \" '. A &amp; B (${target}).`));
+  for (const control of ["\u0001", "\u000b", "\ufffe"]) {
+    const invalid = await JSZip.loadAsync(bytes);
+    invalid.file("word/styles.xml", `<root>${control}</root>`);
+    const invalidBytes = await invalid.generateAsync({ type: "nodebuffer" });
+    await assert.rejects(() => normalizeAndValidateDocx(invalidBytes), e => e.code === "DOCX_XML_INVALID");
+  }
+});
+
+test("DOCX restarts logical lists, retains explicit starts and resumes nested parents", async () => {
+  const messages = [
+    createDocumentMessage({sessionId:"lists",recordOrdinal:1,role:DOCUMENT_ROLE.USER,text:"1. first\n2. second\n\ntext\n\n1. new\n2. next\n\n4. explicit\n5. continue\n  7. nested\n  8. nested next\n6. parent"}),
+    createDocumentMessage({sessionId:"lists",recordOrdinal:2,role:DOCUMENT_ROLE.ASSISTANT,text:"1. assistant\n2. assistant next"}),
+    createDocumentMessage({sessionId:"lists",recordOrdinal:3,role:DOCUMENT_ROLE.TOOL,text:"tool"}),
+    createDocumentMessage({sessionId:"lists",recordOrdinal:4,role:DOCUMENT_ROLE.USER,text:"1. after tool"}),
+  ];
+  const bytes=await buildDeterministicDocx({header:createSessionDocumentHeader({id:"lists"}),messages,resolveAsset:async()=>null});
+  const zip=await JSZip.loadAsync(bytes);
+  const doc=xml2js(await zip.file("word/document.xml").async("string"));
+  const ids=collectElements(doc,"w:numId").map(e=>e.attributes["w:val"]).slice(-12);
+  assert.equal(ids[0],ids[1]); assert.notEqual(ids[1],ids[2]); assert.equal(ids[2],ids[3]);
+  assert.equal(ids[4],ids[5]); assert.notEqual(ids[5],ids[6]); assert.equal(ids[6],ids[7]); assert.equal(ids[5],ids[8]);
+  assert.notEqual(ids[8],ids[9]); assert.notEqual(ids[10],ids[11]);
+  const numbering=xml2js(await zip.file("word/numbering.xml").async("string"));
+  const starts=collectElements(numbering,"w:start").map(e=>e.attributes["w:val"]);
+  assert.ok(starts.includes("4")&&starts.includes("7"));
+  assert.equal(collectElements(doc,"w:ilvl").slice(-12)[6].attributes["w:val"],"1");
+});
+
 test("DOCX renderer creates deterministic safe OOXML with deduplicated PNG/JPEG media", async () => {
   const sessionId = "11111111-1111-7111-8111-111111111111";
   const png = attachment(PNG, "image/png");
@@ -129,7 +176,7 @@ test("DOCX renderer creates deterministic safe OOXML with deduplicated PNG/JPEG 
   assert.equal(hyperlinks.length, 1);
   assert.equal(hyperlinks[0].attributes["r:id"], hyperlinkRelationships[0].attributes.Id);
   assert.equal(elementText(hyperlinks[0]), "OpenAI (https://openai.com/)");
-  assert.ok(documentXml.includes("script [blocked unsupported-protocol]") && documentXml.includes("data [blocked unsupported-protocol]") && documentXml.includes("file [blocked file-link]"));
+  assert.ok(documentXml.includes("script [blocked unsupported-protocol]") && documentXml.includes("data [blocked unsupported-protocol]") && documentXml.includes("file [local file not included]"));
   const hyperlinkParagraph = collectElements(parsedDocument, "w:p").find((paragraph) => collectElements(paragraph, "w:hyperlink").length === 1);
   const directChildren = hyperlinkParagraph.elements.filter((element) => element.type === "element");
   const hyperlinkIndex = directChildren.findIndex((element) => element.name === "w:hyperlink");
@@ -143,6 +190,11 @@ test("DOCX normalization allows only controlled HTTP(S) hyperlinks and rejects e
   const safe = await buildDeterministicDocx({ header, messages: [], resolveAsset: async () => null });
   const externalZip = await JSZip.loadAsync(safe);
   const rels = await externalZip.file("word/_rels/document.xml.rels").async("string");
+  for (const entity of ["&#0;", "&#x1;", "&#xFFFE;"]) {
+    const invalid = await JSZip.loadAsync(safe);
+    invalid.file("word/document.xml", (await invalid.file("word/document.xml").async("string")).replace("safe", entity));
+    await assert.rejects(() => normalizeAndValidateDocx(invalid.generateAsync({ type: "nodebuffer" })), error => error.code === "DOCX_XML_INVALID");
+  }
   externalZip.file("word/_rels/document.xml.rels", rels.replace("</Relationships>", "<Relationship Id=\"rId999\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/image\" Target=\"https://example.invalid/pixel.png\" TargetMode=\"External\"/></Relationships>"));
   await assert.rejects(() => normalizeAndValidateDocx(externalZip.generateAsync({ type: "nodebuffer" })), (error) => error instanceof DocxExportError && error.code === "DOCX_EXTERNAL_RELATIONSHIP");
 

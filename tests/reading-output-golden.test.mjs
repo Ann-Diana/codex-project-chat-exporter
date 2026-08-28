@@ -159,10 +159,10 @@ test("version 0.3.0 reference and streaming readers preserve all profile golden 
         const subagentMarkdown = await fs.readFile(path.join(outputDir, subagent.markdown_file), "utf8");
         assertOrdered(activeMarkdown, [
           "<summary>Automatic runtime context – AGENTS / ENVIRONMENT",
-          "## User - 2026-01-02T10:00:01.000Z",
-          "## Assistant - 2026-01-02T10:00:02.000Z",
+          "## User – 2026-01-02T10:00:01.000Z",
+          "## Assistant – 2026-01-02T10:00:02.000Z",
           "<summary>Unclassified user-role record",
-          "## Tool function_call - fixture_tool",
+          "## Tool function_call – fixture_tool",
         ]);
         assert.match(subagentMarkdown, /<summary>Subagent input \/ parent-agent handoff/);
         assert.equal(activeMarkdown.includes(SMALL_PNG_DATA_URL), false, "the current reading view must not inline the embedded image payload");

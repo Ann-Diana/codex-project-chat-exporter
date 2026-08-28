@@ -14,6 +14,7 @@ import { promisify } from "node:util";
 import { inflateSync } from "node:zlib";
 
 import PDFDocument from "pdfkit";
+import { securityPdf } from "./helpers/pdf-security-fixture.mjs";
 import { DOCUMENT_ROLE, createDocumentMessage, createSessionDocumentHeader } from "../lib/document-model.mjs";
 import { PdfExportError, buildDeterministicPdf, resolveVerifiedPdfAsset, safePdfProjectDisplayName, validateCanonicalPdf, validateCanonicalPdfFile } from "../lib/pdf-renderer.mjs";
 
@@ -307,14 +308,29 @@ test("PDF renderer fails closed for missing glyphs and corrupt image data withou
   );
 });
 
-test("PDF validation rejects active actions and non-HTTP URI actions", async () => {
-  const safe = await buildDeterministicPdf(createRepresentativeDocument(false));
-  for (const token of ["/Launch", "/JavaScript", "/EmbeddedFile", "/AcroForm", "/GoToR"]) {
-    const modified = Buffer.concat([safe.subarray(0, -6), Buffer.from(`\n${token}\n%%EOF\n`, "latin1")]);
-    assert.throws(() => validateCanonicalPdf(modified), (error) => error instanceof PdfExportError && error.code === "PDF_ACTIVE_CONTENT", token);
+test("PDF validation distinguishes harmless text/URL/stream bytes from structural active content", async () => {
+  const safe = await securityPdf(doc => {
+    doc.link(10, 10, 100, 10, "https://example.invalid/3D?x=1&y=2");
+    const stream = doc.ref({}); stream.end(Buffer.from("/3D /Launch /JavaScript endobj startxref 1 %%EOF"));
+    doc.info.Title = "/3D /JavaScript (nested) & metadata";
+  });
+  assert.doesNotThrow(() => validateCanonicalPdf(safe));
+  for (const key of ["3D", "3#44", "AA", "JavaScript", "Launch", "EmbeddedFile", "AcroForm", "RichMedia", "Filespec", "GoToR"]) {
+    const unsafe = await securityPdf(doc => { const ref = doc.ref({ [key]: true }); ref.end(); doc._root.data.Test = ref; });
+    assert.throws(() => validateCanonicalPdf(unsafe), e => e.code === "PDF_ACTIVE_CONTENT", key);
   }
-  const fileAction = Buffer.concat([safe.subarray(0, -6), Buffer.from("\n/S /URI /URI (file:///C:/secret.txt)\n%%EOF\n", "latin1")]);
-  assert.throws(() => validateCanonicalPdf(fileAction), (error) => error instanceof PdfExportError && error.code === "PDF_EXTERNAL_ACTION_UNSAFE");
+  for (const action of ["JavaScript", "Launch", "GoToR", "SubmitForm", "UnknownAction"]) {
+    const unsafe = await securityPdf(doc => { const ref = doc.ref({ S: action }); ref.end(); doc._root.data.A = ref; });
+    assert.throws(() => validateCanonicalPdf(unsafe), e => e.code === "PDF_ACTIVE_CONTENT", action);
+  }
+  for (const target of ["file:///C:/secret.txt", "javascript:noop", "data:text/plain,x", "\\\\host\\share", "https://exa mple.invalid", "https://example.invalid/" + "a".repeat(2050)]) {
+    const unsafe = await securityPdf(doc => doc.link(10, 10, 100, 10, target));
+    assert.throws(() => validateCanonicalPdf(unsafe), e => e.code === "PDF_EXTERNAL_ACTION_UNSAFE", target);
+  }
+  const external = await securityPdf(doc => { const stream = doc.ref({ F: new String("https://example.invalid/image") }); stream.end("ignored"); });
+  assert.throws(() => validateCanonicalPdf(external), e => e.code === "PDF_ACTIVE_CONTENT");
+  const malformed = Buffer.concat([safe.subarray(0,-6), Buffer.from("/Launch\n%%EOF\n")]);
+  assert.throws(() => validateCanonicalPdf(malformed), e => e.code === "PDF_STRUCTURE_INVALID");
 });
 
 test("streaming PDF validation accepts canonical output and rejects active actions", async () => {
@@ -326,7 +342,7 @@ test("streaming PDF validation accepts canonical output and rejects active actio
     assert.equal(await validateCanonicalPdfFile(safePath), true);
 
     const unsafePath = path.join(temp, "unsafe.pdf");
-    await fs.writeFile(unsafePath, Buffer.concat([safe.subarray(0, -6), Buffer.from("\n/SubmitForm\n%%EOF\n", "latin1")]));
+    await fs.writeFile(unsafePath, await securityPdf(doc => { doc._root.data.OpenAction = { S: "SubmitForm" }; }));
     await assert.rejects(() => validateCanonicalPdfFile(unsafePath), (error) => error instanceof PdfExportError && error.code === "PDF_ACTIVE_CONTENT");
   } finally {
     await fs.rm(temp, { recursive: true, force: true });

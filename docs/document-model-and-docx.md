@@ -39,6 +39,10 @@ The package validator permits only explicit external HTTP/HTTPS hyperlink relati
 
 ## Reproducibility and publication
 
+Decoded XML attributes are escaped again during relationship-ID normalization; query separators and literal entity text are preserved. Every XML and relationship part is checked before and after normalization. Each logical list has a separate numbering instance, with explicit starts and nested parent continuation retained. Exporter-owned separators use en dashes; source punctuation is not rewritten.
+
+Standalone technical image-marker parts are omitted only when directly paired with a verified PNG/JPEG image part with valid dimensions. Markers in code, quoted/literal examples, unsupported attachments, and forensic source data remain. Local-file links are labelled `[local file not included]` in document reading views; the model retains the blocked reason. No workspace/preview files are collected. Images are not linked to external relative files from DOCX/PDF: resolving them reliably would require local-resource relationships/actions that these formats deliberately prohibit. Use the portable `assets/` references in the HTML index instead.
+
 `docx` 9.7.1 creates the OOXML structure. `jszip` 3.10.1 normalizes every ZIP timestamp, deterministic entry order, compression settings, hyperlink relationship IDs, and the generated core-property timestamps. Large images are inserted through deterministic small media placeholders and replaced during final ZIP construction, avoiding the library's high-memory byte-to-text conversion while preserving the original image bytes.
 
 Publication uses the exporter's exclusive temporary-file and hard-link path. A differing existing target causes a collision error; it is not overwritten. Failed packaging or publication removes the run-owned document temporary file. A failed export generation keeps `EXPORT_INCOMPLETE.txt` as the existing archive-level safety marker.

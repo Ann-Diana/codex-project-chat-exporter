@@ -86,7 +86,8 @@ test("regular VSIX builds are byte-identical and their packaged runtime exports 
     const second = await buildVsix({ distDir: path.join(temp, "dist-2") });
     const firstBytes = await fs.readFile(first.vsixPath);
     const secondBytes = await fs.readFile(second.vsixPath);
-    assert.deepEqual(firstBytes, secondBytes, "two independent regular builds must be byte-identical");
+    // Avoid allocating a multi-megabyte structural assertion diff on failure.
+    assert.ok(firstBytes.equals(secondBytes), `independent builds differ: ${sha256(firstBytes)} / ${sha256(secondBytes)}`);
 
     const zip = await JSZip.loadAsync(firstBytes, { checkCRC32: true, createFolders: false });
     const files = Object.values(zip.files).filter((entry) => !entry.dir);

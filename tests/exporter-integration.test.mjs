@@ -193,15 +193,15 @@ for (const session of manifest.sessions) {
 }
 
 const activeMarkdown = await fs.readFile(path.join(outputDir, activeSession.markdown_file), "utf8");
-assert.equal((activeMarkdown.match(/^## User - /gm) || []).length, 2);
-assert.equal((activeMarkdown.match(/^## Assistant - /gm) || []).length, 2);
+assert.equal((activeMarkdown.match(/^## User – /gm) || []).length, 2);
+assert.equal((activeMarkdown.match(/^## Assistant – /gm) || []).length, 2);
 assert.equal((activeMarkdown.match(/<summary>Automatic runtime context/g) || []).length, 3);
 assert.match(activeMarkdown, /Create the release archive/);
 assert.match(activeMarkdown, /literal terms AGENTS\.md and <environment_context>/);
 assert.equal((activeMarkdown.match(/\[Attachment [12] \(file\)\]\(\.\.\/\.\.\/assets\/[0-9a-f]{64}\.bin\)/g) || []).length, 2);
 assert.doesNotMatch(activeMarkdown, /data:image|file:\/\/|https?:\/\//, "derived Markdown must use only local relative asset references");
 const subagentMarkdown = await fs.readFile(path.join(outputDir, subagentSession.markdown_file), "utf8");
-assert.doesNotMatch(subagentMarkdown, /^## User - /m);
+assert.doesNotMatch(subagentMarkdown, /^## User – /m);
 assert.match(subagentMarkdown, /<summary>Subagent input \/ parent-agent handoff/);
 assert.match(subagentMarkdown, /\[1\] user: retained parent material/);
 assert.match(subagentMarkdown, /\[7\] assistant: retained parent material/);

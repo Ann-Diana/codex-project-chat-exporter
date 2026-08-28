@@ -18,6 +18,12 @@ PNG and JPEG assets are embedded proportionally within the printable page. Repea
 
 Canonical bounded HTTP/HTTPS links become URI annotations. Invalid, overlong, local, UNC/device, `file:`, `javascript:`, `data:`, and other targets remain non-clickable labelled text. The renderer never downloads a target. It creates no external images, file actions, launch actions, JavaScript, forms, embedded files, or other active content.
 
+## Structural validation and reading fidelity
+
+The validator follows the classic cross-reference table and parses all object dictionaries, escaped names, strings and references. It skips stream payloads by their exact lengths: `/3D` in a compressed page stream, ordinary text, metadata or an HTTP URL is harmless. Actual 3D, JavaScript, Launch, RichMedia and embedded-file structures remain forbidden. Unsupported encryption, incremental revisions and object/xref streams are rejected rather than interpreted permissively. The file path uses bounded 64-KiB reads; no additional JSONL pass is needed.
+
+List starts and nesting come from the shared model. Document labels use en dashes without rewriting source punctuation. Local targets appear as `[local file not included]`; no local preview files are gathered and no external relative-asset actions are added.
+
 ## Fonts and missing glyphs
 
 The renderer uses only the bundled Noto Sans, Noto Sans Mono, Noto Sans Symbols, and Noto Sans Symbols 2 faces described in `fonts/README.md`. Font bytes are hashed before parsing. Text is checked code point by code point; missing primary glyphs use the two symbol faces and then the monospace face in a fixed order. Arrows, check marks, warning signs, plus/minus, and comparison signs remain selectable as their original Unicode characters. Each mixed-font run derives its baseline, pagination, and line height from the primary face's ascender/descender metrics instead of applying character-specific offsets. An unsupported code point aborts with the session ID and Unicode code point but without message content.

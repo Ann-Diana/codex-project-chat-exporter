@@ -151,6 +151,37 @@ test("document formats are explicit and reject unknown or duplicate selections",
   await assert.rejects(() => exportArchive({ scope: "all", documentFormats: "docx" }), (error) => error.code === "INVALID_EXPORT_FORMAT");
 });
 
+test("paired image markers disappear only from reading views while raw bytes and literal examples survive", async () => {
+  const temp = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "image-marker-export-")));
+  try {
+    const codexHome = path.join(temp, "source");
+    const { file } = await writeSingleSession(codexHome);
+    const records = (await fs.readFile(file, "utf8")).trim().split("\n").map(line => JSON.parse(line));
+    const image = { type: "input_image", image_url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aCioAAAAASUVORK5CYII=" };
+    const text = value => ({ type: "input_text", text: value });
+    records[1].payload.content = [text("1. Before image\n2. Second"), text("<image name=[Image #1]>"), image, text("</image>")];
+    records[2].payload.message = "1. Before image\n2. Second";
+    records[3].payload.content = [text("1. After image\n2. Second\n\n```text\n<image>\n</image>\n```\n\nQuelle — ‘Zitat’ **fett**")];
+    const source = Buffer.from(records.map(record => JSON.stringify(record)).join("\n") + "\n");
+    await fs.writeFile(file, source);
+    const outputDirectory = path.join(temp, "output");
+    const result = await exportArchive({ codexHome, scope: "all", outputDirectory, exportProfile: "complete", documentFormats: ["docx"] });
+    const manifest = JSON.parse(await fs.readFile(result.manifestPath, "utf8"));
+    const session = manifest.sessions[0];
+    const rawFile = (await listFiles(outputDirectory)).find(name => name.endsWith(".jsonl"));
+    assert.deepEqual(await fs.readFile(path.join(outputDirectory, rawFile)), source);
+    const markdown = await fs.readFile(path.join(outputDirectory, session.markdown_file), "utf8");
+    assert.equal(markdown.includes("<image name="), false);
+    assert.ok(markdown.includes("```text\n<image>\n</image>\n```") && markdown.includes("Quelle — ‘Zitat’ **fett**"));
+    const zip = await JSZip.loadAsync(await fs.readFile(path.join(outputDirectory, session.docx_file)));
+    assert.equal(Object.keys(zip.files).filter(name => name.startsWith("word/media/") && !zip.files[name].dir).length, 1);
+    const xml = await zip.file("word/document.xml").async("string");
+    assert.equal(xml.includes("image name="), false);
+    assert.ok(xml.includes("&lt;image&gt;") && xml.includes("&lt;/image&gt;"));
+    for (const entry of Object.values(zip.files)) if (!entry.dir && (entry.name.endsWith(".xml") || entry.name.endsWith(".rels"))) xml2js(await entry.async("string"));
+  } finally { await fs.rm(temp, { recursive: true, force: true }); }
+});
+
 test("CLI --format docx uses the same explicit export contract", async () => {
   const temp = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "docx-cli-")));
   try {

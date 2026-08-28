@@ -29,6 +29,7 @@ import {
 } from "../lib/document-model.mjs";
 import {
   buildDeterministicDocx,
+  imageDimensions,
   resolveVerifiedAsset,
   validateCanonicalDocx,
 } from "../lib/docx-renderer.mjs";
@@ -37,6 +38,7 @@ import {
   resolveVerifiedPdfAsset,
   validateCanonicalPdfFile,
 } from "../lib/pdf-renderer.mjs";
+import { extractReadingText } from "../lib/reading-content.mjs";
 
 const VERSION = "0.3.0";
 const ARCHIVE_FORMAT_VERSION = 1;
@@ -2478,6 +2480,26 @@ async function writeSessionDocuments(meta, paths, profiler = null, profileSessio
   const stats = { userMessages: 0, assistantMessages: 0, subagentInputs: 0, runtimeContexts: 0, unclassifiedUserRoleRecords: 0, toolEvents: 0, model: meta.model || "", updatedAt: meta.latestTimestamp || meta.updatedAt || meta.timestamp || "" };
   const readerSummary = createSessionReaderSummary();
   const documentMessages = [];
+  const renderedImageChecks = new Map();
+  const readingMessageText = async (content, recordNumber) => {
+    if (!Array.isArray(content) || !content.some(part => part?.type === "input_text" && String(part.text || "").startsWith("<image"))) return extractText(content);
+    const candidates = new Set();
+    extractReadingText(content, part => { candidates.add(part); return false; });
+    const accepted = new Set();
+    for (const part of candidates) {
+      const descriptors = collectAttachmentDescriptorsInOrder(part);
+      if (descriptors.length !== 1) continue;
+      const descriptor = descriptors[0];
+      const entry = assetStore.assetForDescriptor(descriptor);
+      if (!entry?.renderable || !["png", "jpg"].includes(entry.extension)) continue;
+      if (!renderedImageChecks.has(entry.sha256)) {
+        const asset = await resolveVerifiedAsset(assetStore, context.outputDir, { ...descriptor, origin: { recordOrdinal: recordNumber } });
+        renderedImageChecks.set(entry.sha256, Boolean(imageDimensions(asset.data, asset.extension)));
+      }
+      if (renderedImageChecks.get(entry.sha256)) accepted.add(part);
+    }
+    return extractReadingText(content, part => accepted.has(part));
+  };
 
   const addDocumentMessage = (role, label, text, attachments, timestamp, recordNumber) => {
     if (!docxPath && !pdfPath) return;
@@ -2520,7 +2542,7 @@ async function writeSessionDocuments(meta, paths, profiler = null, profileSessio
       if (item.type !== "response_item" || !item.payload) continue;
       const payload = item.payload;
       if (payload.type === "message" && payload.role === "user") {
-        const text = extractText(payload.content);
+        const text = await readingMessageText(payload.content, recordNumber);
         const renderedText = redactMarkdown ? redactSecrets(text) : text;
         const attachments = collectAttachmentDescriptorsInOrder(payload.content);
         if (!text.trim() && !attachments.length) continue;
@@ -2561,7 +2583,7 @@ async function writeSessionDocuments(meta, paths, profiler = null, profileSessio
         continue;
       }
       if (payload.type === "message" && payload.role === "assistant") {
-        const text = extractText(payload.content);
+        const text = await readingMessageText(payload.content, recordNumber);
         const renderedText = redactMarkdown ? redactSecrets(text) : text;
         const attachments = collectAttachmentDescriptorsInOrder(payload.content);
         if (!text.trim() && !attachments.length) continue;
@@ -2581,7 +2603,7 @@ async function writeSessionDocuments(meta, paths, profiler = null, profileSessio
           const toolText = payload.arguments || payload.input || payload.output || JSON.stringify(payload, null, 2);
           const renderedToolText = redactMarkdown ? redactSecrets(String(toolText)) : String(toolText);
           const attachments = collectAttachmentDescriptorsInOrder(payload);
-          const label = `Tool ${payload.type}${payload.name ? ` - ${payload.name}` : ""}`;
+          const label = `Tool ${payload.type}${payload.name ? ` – ${payload.name}` : ""}`;
           const fence = markdownFence(renderedToolText);
           if (out) {
             writeLine(out, `## ${label}${formatDerivedTimestampSuffix(item.timestamp)}`);
@@ -3336,7 +3358,7 @@ function formatDerivedTimestamp(value) {
 }
 function formatDerivedTimestampSuffix(value) {
   const timestamp = formatDerivedTimestamp(value);
-  return timestamp ? ` - ${timestamp}` : "";
+  return timestamp ? ` – ${timestamp}` : "";
 }
 function mdCell(value) {
   return String(value ?? "")

@@ -25,6 +25,7 @@ Core behavior:
 - Optional deterministic DOCX or PDF reading views, with exactly one document per exported session.
 - Optional byte-preserving raw JSONL snapshots with an export-time SHA-256 verification.
 - Recorded tool-call inputs and outputs can optionally be included in Markdown and selected DOCX or PDF reading views.
+- Stored user steering inputs and assistant progress messages can be preserved even when the UI does not show them as ordinary chat messages. Roles and runtime context remain evidence-based; the exporter does not guess steering/progress labels from timing or hide `AGENTS.md`/environment records.
 - Short Windows-friendly paths by default, with a readable-path option.
 
 Codex Project Chat Exporter reads the project association stored in each session's `cwd`; the original project folder does not need to remain present.

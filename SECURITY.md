@@ -18,6 +18,7 @@ The required invariants are:
 - decoded asset filenames and types come only from decoded SHA-256 and a bounded internal raster allowlist; unknown or active content is never rendered automatically;
 - DOCX permits only bounded canonical HTTP/HTTPS hyperlink relationships; external image/media/resource relationships, local or active link schemes, macros, and other active content are rejected, and remote targets are never fetched;
 - PDF permits only bounded canonical HTTP/HTTPS URI actions; external images, file/launch/JavaScript actions, forms, embedded files, and other active content are not produced, and remote targets are never fetched;
+- PDF validation parses the classic cross-reference table, object dictionaries, escaped names and strings, references, and exact stream lengths. Binary stream bytes and literal text are not action names. Unsupported incremental updates, encryption, object streams, and xref streams fail closed; this is validation of generated PDFKit output, not a general PDF import API;
 - PDF fonts are repository-local, hash-verified Noto assets; no operating-system font lookup is performed, and unsupported glyphs fail closed with session ID and Unicode code point only;
 - existing asset targets are rehashed, size/type checked, and never overwritten;
 - invocation contexts never mix, and concurrent exports to one destination are rejected;

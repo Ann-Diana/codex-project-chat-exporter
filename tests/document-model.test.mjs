@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { extractReadingText } from "../lib/reading-content.mjs";
 
 import {
   DOCUMENT_BLOCK_KIND,
@@ -95,4 +96,25 @@ test("document model rejects ambiguous origins and unknown roles", () => {
   assert.throws(() => createSessionDocumentHeader({}), /session ID is required/);
   assert.throws(() => createDocumentMessage({ sessionId: "session", recordOrdinal: 0, role: DOCUMENT_ROLE.USER }), /positive integer/);
   assert.throws(() => createDocumentMessage({ sessionId: "session", recordOrdinal: 1, role: "GUESSED" }), /Unsupported document role/);
+});
+
+test("technical image markers require adjacent renderable image parts and preserve literal source", () => {
+  const t = text => ({type:"input_text",text});
+  const image = {type:"input_image",image_url:"synthetic-descriptor"};
+  for (const marker of ["<image>","<image name=[Image #1]>"]) {
+    const content=[t("Text — ‘source’ **bold**"),t(marker),image,t("</image>")];
+    assert.equal(extractReadingText(content,p=>p===image),"Text — ‘source’ **bold**");
+    assert.ok(extractReadingText(content,()=>false).includes(marker));
+    assert.equal(content[1].text,marker);
+  }
+  for (const marker of ["<image name=[Image #0]>","<image name=[Image #x]>","<image> example","> <image>","    <image>","`<image>`"]) {
+    assert.ok(extractReadingText([t(marker),image],()=>true).includes(marker));
+  }
+  assert.equal(extractReadingText([t("<image>"),t("ordinary text"),image],()=>true),"<image>\n\nordinary text");
+  const fenced=[t("```text"),t("<image>"),image,t("</image>"),t("```")];
+  assert.ok(extractReadingText(fenced,()=>true).includes("<image>"));
+  for (const prefix of [" ", "  ", "   "]) {
+    assert.ok(extractReadingText([t(`${prefix}~~~text`),t("<image>"),image,t("</image>"),t(`${prefix}~~~`)],()=>true).includes("<image>"));
+  }
+  assert.equal(extractReadingText([t("</image>")],()=>true),"</image>");
 });
