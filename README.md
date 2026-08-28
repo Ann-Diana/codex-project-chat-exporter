@@ -9,6 +9,7 @@ Export local active and archived Codex sessions into a portable, project-aware e
 Core behavior:
 
 - Sessions are grouped by their stored project/work directory.
+- Moved or renamed workspaces can be recovered with **Choose recorded project path…**, an exact stored-path selection with confirmation; see [recorded project selection](docs/recorded-project-selection.md).
 - Session content is processed on the machine running the exporter. The exporter includes no telemetry or built-in upload.
 - Exports are one-way: sessions cannot be imported back into Codex.
 

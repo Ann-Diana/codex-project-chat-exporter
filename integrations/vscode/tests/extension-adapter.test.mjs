@@ -50,7 +50,7 @@ function createFakeVscode(overrides = {}) {
     },
     window: {
       createOutputChannel: () => ({ appendLine: (line) => output.push(line), show: () => {}, dispose: () => {} }),
-      showWarningMessage: async (message) => { messages.push({ type: "warning", message }); return undefined; },
+      showWarningMessage: async (message, ...actions) => { messages.push({ type: "warning", message, actions }); return overrides.warningSelector?.(message, actions); },
       showErrorMessage: async (message) => { messages.push({ type: "error", message }); return undefined; },
       showInformationMessage: async (message, ...actions) => { messages.push({ type: "info", message, actions }); return overrides.infoAction; },
       showQuickPick: async (items, options) => {
@@ -914,6 +914,46 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
   assert.deepEqual(adapterPdfManifest.sessions.map(stableSessionMetadata), directPdfManifest.sessions.map(stableSessionMetadata), "VS Code and direct shared-core PDF metadata must match");
   for (const session of directPdfManifest.sessions) {
     assert.deepEqual(await fsp.readFile(path.join(adapterPdfOutput, session.pdf_file)), await fsp.readFile(path.join(directPdfOutput, session.pdf_file)), "VS Code and direct shared-core PDF bytes must match");
+  }
+}
+
+// Recovery is explicit at every boundary and never stores a cwd alias.
+for (const mode of ["recover", "menu", "dismiss-recovery", "dismiss-picker", "dismiss-confirmation"]) {
+  const recorded = { cwd: "/synthetic/historical", sessionCount: 2, sourceBytes: 12345, lastSessionAt: "2026-08-02T10:00:00.000Z" };
+  let selected;
+  const fake = createFakeVscode({ workspaceFolders: [folder(oneWorkspace)], config: { outputDirectory },
+    warningSelector: (message) => message.startsWith("No sessions were recorded")
+      ? (mode === "dismiss-recovery" ? undefined : "Choose recorded project path…")
+      : (mode === "dismiss-confirmation" ? undefined : "Export recorded sessions"),
+    quickPickSelector: (items, options) => {
+      if (options.placeHolder === "Choose what to export") return items.find(item => item.scope === "recorded-project");
+      if (options.placeHolder === "Choose recorded project path…") return mode === "dismiss-picker" ? undefined : items[0];
+      return items[0];
+    },
+  });
+  const context = createContext(temp);
+  const adapter = createExtensionAdapter(fake.vscode, { loadExporter: async () => ({ async exportArchive(options) {
+    selected = await options.onSelectRecordedProject({ projects: [recorded], reason: mode === "menu" ? "requested" : "no-match" });
+    if (selected === null) throw Object.assign(new Error("Cancelled"), { code: "EXPORT_CANCELLED" });
+    return exporter.exportArchive(options);
+  } }) });
+  await adapter.activate(context);
+  const result = mode === "menu" ? await adapter.exportFromQuickPick(context) : await adapter.exportCurrentWorkspace(context);
+  if (mode.startsWith("dismiss")) {
+    assert.equal(result, undefined);
+    assert.equal(selected, null);
+    assert.equal(context.globalState.values.size, 0);
+    assert.equal(fake.messages.some(m => m.type === "info" || m.type === "error"), false);
+  } else {
+    assert.equal(selected, recorded.cwd);
+    const picker = fake.quickPicks.find(p => p.options.placeHolder === "Choose recorded project path…");
+    assert.equal(picker.items[0].label, recorded.cwd);
+    assert.ok(picker.items[0].description.includes("2 sessions") && picker.items[0].description.includes("12345 bytes"));
+    assert.ok(picker.items[0].detail.includes(recorded.lastSessionAt));
+    const confirmation = fake.messages.find(m => m.message.includes("Several logically different projects"));
+    assert.deepEqual(confirmation.actions, [{ modal: true }, "Export recorded sessions"]);
+    assert.equal([...context.globalState.values.values()].includes(recorded.cwd), false);
+    if (mode === "menu") assert.equal(lastOptions.scope, "recorded-project");
   }
 }
 

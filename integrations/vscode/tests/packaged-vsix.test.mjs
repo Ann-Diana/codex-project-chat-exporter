@@ -74,7 +74,7 @@ async function writeSyntheticSession(codexHome) {
     { type: "session_meta", timestamp: "2026-08-24T10:00:00.000Z", payload: { id: sessionId, cwd: "C:\\Synthetic\\link-check", timestamp: "2026-08-24T10:00:00.000Z", source: "vscode", thread_source: "user" } },
     { type: "response_item", timestamp: "2026-08-24T10:00:01.000Z", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "# Linktest\n\nUmlaute äöü & <XML>. Symbole → ← ↑ ↓ ✓ ⚠ ± ≤ ≥.\n\nLink: [OpenAI](https://openai.com/).\n\n- eins\n- zwei\n\n```js\nconst value = '<&> → ✓ ⚠ ≤ ≥';\n```" }], internal_chat_message_metadata_passthrough: { turn_id: "turn-1" } } },
     { type: "event_msg", timestamp: "2026-08-24T10:00:01.001Z", payload: { type: "user_message", message: "# Linktest\n\nUmlaute äöü & <XML>. Symbole → ← ↑ ↓ ✓ ⚠ ± ≤ ≥.\n\nLink: [OpenAI](https://openai.com/).\n\n- eins\n- zwei\n\n```js\nconst value = '<&> → ✓ ⚠ ≤ ≥';\n```" } },
-    { type: "response_item", timestamp: "2026-08-24T10:00:02.000Z", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "Antwort." }] } },
+    { type: "response_item", timestamp: "2026-08-24T10:00:02.000Z", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "Antwort. [Query](https://example.invalid/3D?a=1&b=2)." }] } },
   ];
   await fs.writeFile(path.join(directory, `rollout-2026-08-24T10-00-00-${sessionId}.jsonl`), `${records.map((record) => JSON.stringify(record)).join("\n")}\n`, "utf8");
 }
@@ -130,12 +130,21 @@ test("regular VSIX builds are byte-identical and their packaged runtime exports 
     const outputDirectory = path.join(temp, "output");
     await writeSyntheticSession(codexHome);
     const exporter = await withoutNetwork(() => defaultLoadExporter({ extensionPath: installedRoot }));
-    const result = await withoutNetwork(() => exporter.exportArchive({ codexHome, scope: "all", outputDirectory, exportProfile: "readable", documentFormats: ["docx"] }));
+    let choices = 0;
+    const result = await withoutNetwork(() => exporter.exportArchive({ codexHome, scope: "project", workspacePath: "C:\\Synthetic\\renamed", outputDirectory, exportProfile: "readable", documentFormats: ["docx"], onSelectRecordedProject: ({ projects, reason }) => {
+      choices++;
+      assert.equal(reason, "no-match");
+      assert.equal(projects.length, 1);
+      assert.equal(projects[0].sessionCount, 1);
+      return projects[0].cwd;
+    } }));
+    assert.equal(choices, 1);
     const manifest = JSON.parse(await fs.readFile(result.manifestPath, "utf8"));
     assert.equal(manifest.sessions.length, 1);
     const docx = await fs.readFile(path.join(outputDirectory, manifest.sessions[0].docx_file));
     const { documentXml, relsXml } = await withoutNetwork(async () => {
       const documentZip = await JSZip.loadAsync(docx, { checkCRC32: true, createFolders: false });
+      for (const entry of Object.values(documentZip.files)) if (!entry.dir && (entry.name.endsWith(".xml") || entry.name.endsWith(".rels"))) xml2js(await entry.async("string"));
       return {
         documentXml: await documentZip.file("word/document.xml").async("string"),
         relsXml: await documentZip.file("word/_rels/document.xml.rels").async("string"),
@@ -144,6 +153,7 @@ test("regular VSIX builds are byte-identical and their packaged runtime exports 
     const relationship = collectElements(xml2js(relsXml, { compact: false, alwaysChildren: true }), "Relationship").find((element) => element.attributes?.Type.endsWith("/hyperlink"));
     assert.equal(relationship.attributes.TargetMode, "External");
     assert.equal(relationship.attributes.Target, "https://openai.com/");
+    assert.ok(collectElements(xml2js(relsXml), "Relationship").some(element => element.attributes?.Target === "https://example.invalid/3D?a=1&b=2"));
     const parsedDocument = xml2js(documentXml, { compact: false, alwaysChildren: true });
     const hyperlink = collectElements(parsedDocument, "w:hyperlink")[0];
     assert.equal(hyperlink.attributes["r:id"], relationship.attributes.Id);
@@ -160,6 +170,7 @@ test("regular VSIX builds are byte-identical and their packaged runtime exports 
     const pdf = await fs.readFile(path.join(pdfOutputDirectory, pdfManifest.sessions[0].pdf_file));
     const pdfSource = pdf.toString("latin1");
     assert.ok(pdfSource.startsWith("%PDF-") && pdfSource.includes("/S /URI") && pdfSource.includes("/URI (https://openai.com/)"));
+    assert.ok(pdfSource.includes("/URI (https://example.invalid/3D?a=1&b=2)"));
     assert.equal(pdfSource.includes("/Launch") || pdfSource.includes("/JavaScript") || pdfSource.includes("/EmbeddedFile"), false);
   } finally {
     await fs.rm(temp, { recursive: true, force: true });

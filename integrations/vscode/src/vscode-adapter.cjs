@@ -81,6 +81,7 @@ function createExtensionAdapter(vscode, injected = {}) {
     ensureDesktopLocalExtensionHost();
     const picked = await vscode.window.showQuickPick([
       { label: "Current Workspace", scope: "project" },
+      { label: "Choose recorded project path…", scope: "recorded-project" },
       { label: "All Sessions", scope: "all" },
     ], { placeHolder: "Choose what to export" });
     if (!picked) return undefined;
@@ -91,7 +92,14 @@ function createExtensionAdapter(vscode, injected = {}) {
     const pickedFormats = await vscode.window.showQuickPick(DOCUMENT_FORMATS, { placeHolder: "Choose optional document formats" });
     if (!pickedFormats) return undefined;
     writeDiagnostic("document_formats_selected", { document_formats: pickedFormats.documentFormats });
-    return picked.scope === "project" ? exportCurrentWorkspace(context, pickedProfile.profile, pickedFormats.documentFormats) : exportAllSessions(context, pickedProfile.profile, pickedFormats.documentFormats);
+    if (picked.scope === "project") return exportCurrentWorkspace(context, pickedProfile.profile, pickedFormats.documentFormats);
+    if (picked.scope === "recorded-project") {
+      const hasWorkspace = (vscode.workspace.workspaceFolders || []).length > 0;
+      const workspacePath = hasWorkspace ? await getLocalWorkspacePath() : "";
+      if (hasWorkspace && !workspacePath) return undefined;
+      return runExport(context, { scope: "recorded-project", workspacePath }, pickedProfile.profile, pickedFormats.documentFormats);
+    }
+    return exportAllSessions(context, pickedProfile.profile, pickedFormats.documentFormats);
   }
 
   async function exportCurrentWorkspace(context, explicitProfile, documentFormats = []) {
@@ -134,6 +142,36 @@ function createExtensionAdapter(vscode, injected = {}) {
         pathStyle: config.get("pathStyle", "short"),
         includeTools: getUserOnlyConfigValue("includeTools", false),
       };
+      if (scopeOptions.scope !== "all") {
+        options.onSelectRecordedProject = async ({ projects, reason }) => {
+          if (reason === "no-match") {
+            const action = await vscode.window.showWarningMessage(
+              "No sessions were recorded for the current workspace path. The project may have been moved, renamed, or previously opened from another folder.",
+              "Choose recorded project path…",
+            );
+            if (action !== "Choose recorded project path…") return null;
+          }
+          if (!projects.length) {
+            await vscode.window.showWarningMessage("No recorded project paths are available in the selected session sources.");
+            return null;
+          }
+          const picked = await vscode.window.showQuickPick(projects.map(project => ({
+            label: displayRecordedPath(project.cwd),
+            description: `${project.sessionCount} sessions – ${project.sourceBytes} bytes`,
+            detail: `Last session: ${project.lastSessionAt || "unknown"}`,
+            project,
+          })), { placeHolder: "Choose recorded project path…", matchOnDescription: true, matchOnDetail: true });
+          if (!picked || !projects.includes(picked.project)) return null;
+          if (picked.project.cwd !== scopeOptions.workspacePath) {
+            const confirmed = await vscode.window.showWarningMessage(
+              `Export all ${picked.project.sessionCount} sessions recorded under ${displayRecordedPath(picked.project.cwd)}? This differs from the current workspace path. Several logically different projects may be mixed under this historical cwd.`,
+              { modal: true }, "Export recorded sessions",
+            );
+            if (confirmed !== "Export recorded sessions") return null;
+          }
+          return picked.project.cwd;
+        };
+      }
       const codexHome = getUserOnlyConfigValue("codexHome", "");
       if (codexHome) {
         const validatedCodexHome = validateLocalAbsolutePath(codexHome, "codexProjectChatExporter.codexHome");
@@ -160,7 +198,7 @@ function createExtensionAdapter(vscode, injected = {}) {
             writeDiagnostic("core_call_end", { status: "COMPLETED", duration_ms: roundDiagnosticMs(performance.now() - coreCallStartedAt) });
             return coreResult;
           } catch (error) {
-            writeDiagnostic("core_call_end", { status: "FAILED", error_code: error?.code || "UNKNOWN", duration_ms: roundDiagnosticMs(performance.now() - coreCallStartedAt) });
+            writeDiagnostic("core_call_end", { status: error?.code === "EXPORT_CANCELLED" ? "CANCELLED" : "FAILED", error_code: error?.code || "UNKNOWN", duration_ms: roundDiagnosticMs(performance.now() - coreCallStartedAt) });
             throw error;
           }
         });
@@ -183,6 +221,10 @@ function createExtensionAdapter(vscode, injected = {}) {
         if (action === "Open Export Folder") await openVerifiedTarget(openTargets.output);
         return result;
       } catch (error) {
+        if (error?.code === "EXPORT_CANCELLED") {
+          outputChannel.appendLine("Export cancelled before selecting a recorded project.");
+          return undefined;
+        }
         const message = safeErrorMessage(error);
         outputChannel.appendLine(`Export failed: ${message}`);
         vscode.window.showErrorMessage(`Codex export failed: ${message}`);
@@ -470,6 +512,15 @@ async function defaultLoadExporter(context) {
     if (actualSha256 !== integrity.files[relative]) throw Object.assign(new Error(`The packaged exporter file does not match its integrity record: ${relative}`), { code: "PACKAGED_EXPORTER_INTEGRITY_FAILED" });
   }
   return import(pathToFileURL(canonicalModule).href);
+}
+
+function displayRecordedPath(value) {
+  // The label is plain text; make control characters visible without changing
+  // the exact inventory value used by the core for selection.
+  return [...value].map(character => {
+    const code = character.codePointAt(0);
+    return code < 32 || code === 127 ? `\\u${code.toString(16).padStart(4, "0")}` : character;
+  }).join("");
 }
 
 function isSafeIntegrityRelativePath(value) {

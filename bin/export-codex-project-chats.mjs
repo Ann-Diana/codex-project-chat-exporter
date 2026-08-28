@@ -163,6 +163,8 @@ async function exportArchive(options = {}) {
     assetStoreOptions: options._assetStoreOptions,
     docxOptions: options._docxOptions,
     pdfOptions: options._pdfOptions,
+    exactWorkspacePath: typeof options.workspacePath === "string",
+    onSelectRecordedProject: options.onSelectRecordedProject,
   });
   return runCommand(context, { print: false });
 }
@@ -170,8 +172,14 @@ async function exportArchive(options = {}) {
 function argsFromExportOptions(options) {
   const next = {};
   const scope = options.scope || (options.workspacePath ? "project" : "all");
+  if (!["all", "project", "recorded-project"].includes(scope)) throw new ExportError("INVALID_EXPORT_SCOPE", "Unsupported export scope");
   if (scope === "all") next.all = true;
-  else next.project = options.workspacePath || options.projectFilter || "";
+  else if (scope === "recorded-project") {
+    if (options.recordedProjectPath !== undefined && (typeof options.recordedProjectPath !== "string" || !options.recordedProjectPath)) throw new ExportError("INVALID_PROJECT_SELECTION", "A recorded project path must be a nonempty string");
+    if (!options.recordedProjectPath && typeof options.onSelectRecordedProject !== "function") throw new ExportError("INVALID_PROJECT_SELECTION", "Recorded-project export requires a path or selection callback");
+    next["recorded-project"] = options.recordedProjectPath || "";
+  } else next.project = options.workspacePath || options.projectFilter || "";
+  if (options.recordedProjectPath !== undefined && scope !== "recorded-project") throw new ExportError("INVALID_PROJECT_SELECTION", "recordedProjectPath requires recorded-project scope");
   if (options.outputDirectory) next.out = options.outputDirectory;
   if (options.codexHome) next["codex-home"] = options.codexHome;
   if (options.sessionsDir) next["sessions-dir"] = options.sessionsDir;
@@ -204,8 +212,9 @@ function createExportContext(args = {}, cwd = process.cwd(), runtimeOptions = {}
   const outputPrefix = pathStyle === "readable" ? "codex-chat-export" : "cx";
   const defaultOutputBase = isPathInside(cwd, toolRoot) ? path.join(os.homedir(), "Documents") : cwd;
   const outputDir = path.resolve(args.out || path.join(defaultOutputBase, `${outputPrefix}-${stampForName(new Date())}`));
-  const projectFilter = args.project || "";
-  const exportAll = args.all || !projectFilter;
+  const recordedProjectSelection = Object.hasOwn(args, "recorded-project");
+  const projectFilter = recordedProjectSelection ? args["recorded-project"] : args.project || "";
+  const exportAll = Boolean(args.all || (!projectFilter && !recordedProjectSelection));
   const exportProfile = resolveExportProfile(args.profile, Boolean(args["no-raw"]));
   const documentFormats = resolveDocumentFormats(args.format);
   const exportFormats = Object.freeze({ ...EXPORT_PROFILES[exportProfile], docx: documentFormats.includes("docx"), pdf: documentFormats.includes("pdf"), ...ADDITIONAL_EXPORT_FORMATS });
@@ -222,6 +231,9 @@ function createExportContext(args = {}, cwd = process.cwd(), runtimeOptions = {}
     outputDir,
     projectFilter,
     exportAll,
+    recordedProjectSelection,
+    exactProjectMatch: recordedProjectSelection || runtimeOptions.exactWorkspacePath === true,
+    onSelectRecordedProject: runtimeOptions.onSelectRecordedProject,
     includeTools: Boolean(args["include-tools"]),
     copyRaw: exportFormats.raw,
     redactMarkdown: !args["no-redact-markdown"],
@@ -351,7 +363,7 @@ async function runCommandInternal(context, { print, profiler, runState }) {
     return null;
   }
 
-  if (!args.all && !projectFilter && !listOnly && !listSessionsOnly && !diagnoseOnly) {
+  if (!args.all && !projectFilter && !context.recordedProjectSelection && !listOnly && !listSessionsOnly && !diagnoseOnly) {
     throw new ExportError("NO_SELECTION", "Choose --all or --project <name-or-path>.");
   }
 
@@ -458,10 +470,20 @@ async function runCommandInternal(context, { print, profiler, runState }) {
     return { parsedEntries: parsedEntries.length, sessions: metas.length, locations };
   }
 
-  const selected = metas.filter((meta) => exportAll || matchesProject(meta.cwd, projectFilter));
+  let exactSelection = !exportAll && context.exactProjectMatch;
+  let selected = metas.filter((meta) => exportAll || (projectFilter && (exactSelection ? meta.cwd === projectFilter : matchesProject(meta.cwd, projectFilter))));
+  const requestedSelection = context.recordedProjectSelection && !projectFilter;
+  if ((requestedSelection || !selected.length) && typeof context.onSelectRecordedProject === "function") {
+    const projects = recordedProjectInventory(metas);
+    const chosen = await context.onSelectRecordedProject(Object.freeze({ projects, reason: requestedSelection ? "requested" : "no-match" }));
+    if (chosen === null || chosen === undefined) throw new ExportError("EXPORT_CANCELLED", "Recorded-project selection was cancelled");
+    if (typeof chosen !== "string" || !projects.some(project => project.cwd === chosen)) throw new ExportError("INVALID_PROJECT_SELECTION", "Selected project was not in the recorded inventory");
+    selected = metas.filter(meta => meta.cwd === chosen);
+    exactSelection = true;
+  }
   if (!selected.length) {
     if (print) printProjectList(projectListMetas || metas, context);
-    throw new ExportError("NO_PROJECT_MATCH", `No sessions matched project filter: ${projectFilter}`);
+    throw new ExportError("NO_PROJECT_MATCH", "No sessions were recorded for the current workspace path. The project may have been moved, renamed, or previously opened from another folder.");
   }
   profiler?.setCounts({ exportedSessions: selected.length });
 
@@ -551,6 +573,7 @@ async function runCommandInternal(context, { print, profiler, runState }) {
         diagnostic: diagnosticReporter,
         diagnosticContext,
         routingSnapshot: meta.routingSnapshot,
+        requiredSourceSha256: exactSelection ? meta.routingSnapshot?.sha256 || meta.fileSha256 : undefined,
         verifyPublishedSnapshot,
         generation,
       });
@@ -669,10 +692,34 @@ function printExportResult(result, context) {
   nextSteps.push("Keep assets/ and both manifests private until they have been reviewed.");
   nextSteps.forEach((step, index) => console.log(`${index + 1}. ${step}`));
 }
+function recordedProjectInventory(metas) {
+  const groups = new Map();
+  for (const meta of metas) {
+    if (typeof meta.cwd !== "string" || !meta.cwd) continue;
+    let group = groups.get(meta.cwd);
+    if (!group) { group = { cwd: meta.cwd, sessionCount: 0, sourceBytes: 0, lastSessionAt: "" }; groups.set(meta.cwd, group); }
+    group.sessionCount++;
+    group.sourceBytes += Number.isSafeInteger(meta.fileSize) && meta.fileSize > 0 ? meta.fileSize : 0;
+    const timestamp = meta.recordedLastSessionAt || meta.timestamp;
+    const date = typeof timestamp === "string" ? Date.parse(timestamp) : NaN;
+    if (Number.isFinite(date) && (!group.lastSessionAt || date > Date.parse(group.lastSessionAt))) group.lastSessionAt = new Date(date).toISOString();
+  }
+  return Object.freeze([...groups.values()].sort((a, b) => a.cwd < b.cwd ? -1 : a.cwd > b.cwd ? 1 : 0).map(Object.freeze));
+}
+
+function observeRecordedTimestamp(meta, value) {
+  if (typeof value !== "string") return;
+  const milliseconds = Date.parse(value);
+  if (Number.isFinite(milliseconds) && (meta.recordedLastSessionMs === undefined || milliseconds > meta.recordedLastSessionMs)) {
+    meta.recordedLastSessionMs = milliseconds;
+    meta.recordedLastSessionAt = new Date(milliseconds).toISOString();
+  }
+}
+
 function parseArgs(argv) {
   const parsed = {};
   const flagArgs = new Set(["all", "include-tools", "no-raw", "no-redact-markdown", "no-archived", "list", "list-sessions", "diagnose", "help", "version", "readable-paths", "allow-output-in-tool-dir"]);
-  const valueArgs = new Set(["project", "out", "codex-home", "sessions-dir", "archived-dir", "session-index", "performance-profile", "profile", "format"]);
+  const valueArgs = new Set(["project", "recorded-project", "out", "codex-home", "sessions-dir", "archived-dir", "session-index", "performance-profile", "profile", "format"]);
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === "-h") {
@@ -696,7 +743,7 @@ function parseArgs(argv) {
       throw new Error(`Unknown option: --${name}`);
     }
   }
-  if (parsed.all && parsed.project) throw new Error("Use either --all or --project, not both.");
+  if ([parsed.all, parsed.project, parsed["recorded-project"]].filter(Boolean).length > 1) throw new Error("Use only one of --all, --project or --recorded-project.");
   if (parsed.profile && !Object.hasOwn(EXPORT_PROFILES, parsed.profile)) throw new Error(`Unsupported export profile: ${parsed.profile}`);
   return parsed;
 }
@@ -781,6 +828,7 @@ async function readSessionMeta(file, {
   })) {
     if (meta.attachmentMetrics) observeAttachmentMetrics(item, meta.attachmentMetrics);
     classifier.observe(item, recordNumber);
+    observeRecordedTimestamp(meta, item.timestamp);
     if (item.timestamp && (!meta.latestTimestamp || item.timestamp > meta.latestTimestamp)) meta.latestTimestamp = item.timestamp;
     if (item.type === "session_meta" && item.payload) {
       const payloadId = item.payload.id || item.payload.session_id || "";
@@ -1021,6 +1069,7 @@ async function readSessionRoutingMeta(file, {
     summary: readerSummary,
   })) {
     const type = item?.type || "";
+    observeRecordedTimestamp(meta, item.timestamp);
     if (type !== "session_meta" && type !== "turn_context") continue;
     if (type === "session_meta" && item.payload) {
       const payloadId = item.payload.id || item.payload.session_id || "";
@@ -1420,6 +1469,9 @@ async function copyStableRawSnapshot(sourcePath, destinationPath, options = {}) 
           if (attempt < maxAttempts) options.profiler?.recordSnapshotRetryCount(1);
           continue;
         }
+      }
+      if (options.requiredSourceSha256 && sourceSha256 !== options.requiredSourceSha256) {
+        throw new ExportError("SOURCE_CHANGED_DURING_EXPORT", "The selected session changed after the project inventory was read; select it again");
       }
       if (options.beforeCopy) await options.beforeCopy({ attempt, sourcePath, temporaryPath, sourceHashBasis });
       const copyStart = performance.now();
@@ -3222,6 +3274,7 @@ Usage:
 
 Options:
   --project <name-or-path>    Export sessions matching a project/work folder name or path.
+  --recorded-project <cwd>    Export only sessions with this exact recorded cwd (no aliases).
   --all                       Export all detected local Codex sessions, including project/work chats found on disk.
   --list                      List unique project/work folders and active/archived counts.
   --list-sessions             List every detected session with storage, title, project, date, and ID.

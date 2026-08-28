@@ -22,6 +22,7 @@ The required invariants are:
 - PDF fonts are repository-local, hash-verified Noto assets; no operating-system font lookup is performed, and unsupported glyphs fail closed with session ID and Unicode code point only;
 - existing asset targets are rehashed, size/type checked, and never overwritten;
 - invocation contexts never mix, and concurrent exports to one destination are rejected;
+- recorded-project recovery uses only an explicitly selected exact cwd from the current inventory, with adapter confirmation for a different workspace path; stored cwd values never authorize filesystem collection or automatic fallback;
 - source changes cause a retry or fail-closed error;
 - `raw_sha256` and `raw_verified_at` describe verification only at export time;
 - published Raw files remain mutable, so later use or a future importer must hash them again and reject a mismatch.
