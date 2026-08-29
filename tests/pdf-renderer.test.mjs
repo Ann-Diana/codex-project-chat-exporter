@@ -73,6 +73,7 @@ async function captureRenderedPdfFragments(options) {
         fragments.push({
           text: String(text),
           page: this.page.dictionary.id,
+          pageIndex: this._pageBuffer.indexOf(this.page),
           top: y,
           baseline: matrixY,
           font: this._font.name,
@@ -88,6 +89,36 @@ async function captureRenderedPdfFragments(options) {
   } finally {
     PDFDocument.prototype._fragment = originalFragment;
   }
+}
+
+function fragmentContaining(fragments, marker) {
+  const matches = fragments.filter((fragment) => fragment.text.includes(marker));
+  assert.equal(matches.length, 1, `${marker} must occur in exactly one emitted text fragment`);
+  return matches[0];
+}
+
+function assertLineMarkersDoNotOverlap(fragments, markers) {
+  const lines = markers.map((marker) => fragmentContaining(fragments, marker));
+  for (let index = 1; index < lines.length; index += 1) {
+    const previous = lines[index - 1];
+    const current = lines[index];
+    if (current.pageIndex === previous.pageIndex) {
+      assert.ok(
+        current.top >= previous.top + previous.lineHeight - 0.01,
+        `${markers[index]} must start below the bounding box of ${markers[index - 1]}`,
+      );
+    } else {
+      assert.ok(current.pageIndex > previous.pageIndex, `${markers[index]} must follow ${markers[index - 1]} on a later page`);
+    }
+  }
+  return lines;
+}
+
+async function captureSyntheticLayout(text, recordOrdinal = 1) {
+  const sessionId = `layout-session-${recordOrdinal}`;
+  const header = createSessionDocumentHeader({ id: sessionId, title: "Vertical layout regression" });
+  const messages = [createDocumentMessage({ sessionId, recordOrdinal, role: DOCUMENT_ROLE.USER, label: "User", text })];
+  return captureRenderedPdfFragments({ header, messages, resolveAsset: async () => null });
 }
 
 async function withoutNetwork(action) {
@@ -258,6 +289,60 @@ test("paragraphs and lists ending in fallback glyphs preserve subsequent vertica
     assert.ok(regularFragment && fallbackFragment, `${label} must be emitted in both documents`);
     assert.equal(fallbackFragment.top, regularFragment.top, `${label} must not shift when the previous run ends in a fallback glyph`);
   }
+});
+
+test("an inline arrow retains the primary baseline and advances to the next hard line", async () => {
+  const { fragments } = await captureSyntheticLayout("INLINE_ARROW A → B\nINLINE_ARROW_FOLLOW");
+  const first = fragmentContaining(fragments, "INLINE_ARROW A ");
+  const line = fragments.filter((fragment) => fragment.pageIndex === first.pageIndex && fragment.top === first.top && fragment.fontSize === 10.5);
+  assert.ok(line.some((fragment) => fragment.font === "NotoSans-Regular"));
+  assert.ok(line.some((fragment) => fragment.font === "NotoSansSymbols-Regular"));
+  assert.equal(new Set(line.map((fragment) => fragment.baseline)).size, 1, "the inline arrow must share the primary text baseline");
+  assertLineMarkersDoNotOverlap(fragments, ["INLINE_ARROW A ", "INLINE_ARROW_FOLLOW"]);
+});
+
+test("separate arrow-led paragraphs retain independent vertical boxes", async () => {
+  const { fragments } = await captureSyntheticLayout("→ ARROW_PARAGRAPH_1\n\n→ ARROW_PARAGRAPH_2\n\n→ ARROW_PARAGRAPH_3", 2);
+  assertLineMarkersDoNotOverlap(fragments, ["ARROW_PARAGRAPH_1", "ARROW_PARAGRAPH_2", "ARROW_PARAGRAPH_3"]);
+});
+
+test("arrow-led hard lines and following non-arrow lines never reuse a vertical box", async () => {
+  const { fragments } = await captureSyntheticLayout("→ ARROW_HARD_1\nPLAIN_HARD_1\n→ ARROW_HARD_2\nPLAIN_HARD_2", 3);
+  assertLineMarkersDoNotOverlap(fragments, ["ARROW_HARD_1", "PLAIN_HARD_1", "ARROW_HARD_2", "PLAIN_HARD_2"]);
+});
+
+test("a trailing hard break does not create an extra empty output line", async () => {
+  const withoutBreak = await captureSyntheticLayout("TRAILING_BREAK_LINE", 31);
+  const withBreak = await captureSyntheticLayout("TRAILING_BREAK_LINE\n", 32);
+  const withoutLine = fragmentContaining(withoutBreak.fragments, "TRAILING_BREAK_LINE");
+  const withLine = fragmentContaining(withBreak.fragments, "TRAILING_BREAK_LINE");
+  assert.equal(withLine.top, withoutLine.top);
+  assert.equal(withBreak.fragments.filter((fragment) => fragment.fontSize === 10.5).length, withoutBreak.fragments.filter((fragment) => fragment.fontSize === 10.5).length);
+});
+
+test("nested list items with arrows retain distinct vertical boxes", async () => {
+  const { fragments } = await captureSyntheticLayout("- → ARROW_LIST_0\n  - → ARROW_LIST_1\n    - → ARROW_LIST_2\n- PLAIN_LIST_0", 4);
+  assertLineMarkersDoNotOverlap(fragments, ["ARROW_LIST_0", "ARROW_LIST_1", "ARROW_LIST_2", "PLAIN_LIST_0"]);
+});
+
+test("wrapped mixed-font runs return their complete height to the following hard line", async () => {
+  const mixed = Array.from({ length: 48 }, (_, index) => `segment${index}→`).join(" ");
+  const { fragments } = await captureSyntheticLayout(`WRAP_MIXED_BEGIN ${mixed} WRAP_MIXED_END\nWRAP_MIXED_FOLLOW`, 5);
+  const beginning = fragmentContaining(fragments, "WRAP_MIXED_BEGIN");
+  const ending = fragmentContaining(fragments, "WRAP_MIXED_END");
+  assert.ok(
+    ending.pageIndex > beginning.pageIndex || ending.top >= beginning.top + beginning.lineHeight - 0.01,
+    "the mixed-font source line must wrap to at least one additional vertical box",
+  );
+  assertLineMarkersDoNotOverlap(fragments, ["WRAP_MIXED_END", "WRAP_MIXED_FOLLOW"]);
+});
+
+test("one arrow-heavy block remains non-overlapping across page breaks", async () => {
+  const markers = Array.from({ length: 96 }, (_, index) => `PAGE_BREAK_LINE_${String(index).padStart(3, "0")}`);
+  const { bytes, fragments } = await captureSyntheticLayout(markers.map((marker) => `→ ${marker}`).join("\n"), 6);
+  const lines = assertLineMarkersDoNotOverlap(fragments, markers);
+  assert.ok(new Set(lines.map((line) => line.pageIndex)).size >= 3, "the single document block must cross at least two page boundaries");
+  assert.deepEqual(bytes, (await captureSyntheticLayout(markers.map((marker) => `→ ${marker}`).join("\n"), 6)).bytes, "page-breaking layout must remain byte-identical");
 });
 
 test("the additional bundled symbol face fails closed when missing or modified", async () => {
