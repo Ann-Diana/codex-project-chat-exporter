@@ -165,6 +165,7 @@ async function exportArchive(options = {}) {
     pdfOptions: options._pdfOptions,
     exactWorkspacePath: typeof options.workspacePath === "string",
     onSelectRecordedProject: options.onSelectRecordedProject,
+    abortSignal: options.abortSignal,
   });
   return runCommand(context, { print: false });
 }
@@ -234,6 +235,7 @@ function createExportContext(args = {}, cwd = process.cwd(), runtimeOptions = {}
     recordedProjectSelection,
     exactProjectMatch: recordedProjectSelection || runtimeOptions.exactWorkspacePath === true,
     onSelectRecordedProject: runtimeOptions.onSelectRecordedProject,
+    abortSignal: runtimeOptions.abortSignal,
     includeTools: Boolean(args["include-tools"]),
     copyRaw: exportFormats.raw,
     redactMarkdown: !args["no-redact-markdown"],
@@ -304,7 +306,9 @@ async function runCommand(context, { print }) {
   try {
     result = await runCommandInternal(context, { print, profiler, runState });
   } catch (error) {
-    failure = error;
+    failure = context.abortSignal?.aborted && error?.code !== "EXPORT_CANCELLED"
+      ? new ExportError("EXPORT_CANCELLED", "Export cancelled during session discovery")
+      : error;
   }
   if (profiler && runState.sourceProtection) {
     const profile = profiler.finish({ status: failure ? "FAILED" : "COMPLETED", errorCode: failure?.code || "" });
@@ -353,6 +357,7 @@ async function runCommandInternal(context, { print, profiler, runState }) {
     verification_ms: 0,
   };
   diagnosticReporter("core_start", { profile: exportProfile, scope_kind: exportAll ? "all" : "workspace" });
+  throwIfExportAborted(context.abortSignal);
   if (args.help) {
     if (print) printHelp();
     return null;
@@ -383,31 +388,33 @@ async function runCommandInternal(context, { print, profiler, runState }) {
 
   const files = [];
   for (const location of locations) {
-    for (const file of await findJsonlFiles(location.root)) files.push({ file, sourceRootPath: location.root, storage: location.storage });
+    for (const file of await findJsonlFiles(location.root, context.abortSignal)) files.push({ file, sourceRootPath: location.root, storage: location.storage });
   }
   if (!files.length) {
     throw new ExportError("NO_SESSIONS", `No rollout JSONL files found under: ${locations.map((location) => location.root).join(", ")}`);
   }
   files.sort((a, b) => a.file.localeCompare(b.file));
-  const sourceProtection = await createSourceProtection(files, locations, [sessionIndexPath]);
+  const sourceProtection = await createSourceProtection(files, locations, [sessionIndexPath], context.abortSignal);
   runState.sourceProtection = sourceProtection;
   if (!listOnly && !listSessionsOnly && !diagnoseOnly) {
     await assertSeparatedExportRoot(outputDir, locations.map((location) => location.root));
     await ensureSeparatedOutputDirectory(outputDir, sourceProtection);
     await probeHardLinkSupport(outputDir, { io: context.assetStoreOptions.preflightIo });
   }
-  const titleIndex = await readSessionIndex(sessionIndexPath, profiler);
+  throwIfExportAborted(context.abortSignal);
+  const titleIndex = await readSessionIndex(sessionIndexPath, profiler, context.abortSignal);
   profiler?.addPhase("session_discovery_and_metadata", performance.now() - discoveryStart);
   runtimeTimings.discovery_ms = roundMs(performance.now() - discoveryStart);
   profiler?.setCounts({ scannedSessions: files.length });
   diagnosticReporter("discovery_end", { duration_ms: roundMs(performance.now() - discoveryStart), scanned_sessions: files.length });
-  const needsCompleteInventory = listOnly || listSessionsOnly || diagnoseOnly || exportProfile === EXPORT_PROFILE.READABLE;
+  const needsCompleteInventory = listSessionsOnly || diagnoseOnly || (exportProfile === EXPORT_PROFILE.READABLE && exportAll);
   const parsedEntries = [];
   let metas;
   let projectListMetas;
   if (needsCompleteInventory) {
     const metaMap = new Map();
     for (const entry of files) {
+      throwIfExportAborted(context.abortSignal);
       const enriched = await readAndEnrichSession(entry, titleIndex, profiler, "initial_parse_ms", context);
       parsedEntries.push(enriched);
       retainPreferredSession(metaMap, enriched);
@@ -421,23 +428,19 @@ async function runCommandInternal(context, { print, profiler, runState }) {
     for (let routingIndex = 0; routingIndex < files.length; routingIndex += 1) {
       const entry = files[routingIndex];
       const routingStart = performance.now();
-      let routing = await readSessionRoutingMeta(entry.file, { implementation: context.readerImplementation, readerOptions: context.readerOptions });
+      throwIfExportAborted(context.abortSignal);
+      const routing = await readSessionDiscoveryMeta(entry.file, { abortSignal: context.abortSignal });
       const routingMs = performance.now() - routingStart;
-      diagnosticReporter("routing_hash_end", {
+      diagnosticReporter("routing_metadata_end", {
         ordinal: routingIndex + 1,
         total: files.length,
         short_id: shortenSessionId(routing.id || routing.session_id || ""),
         size_bytes: routing.fileSize || 0,
-        stable: routing.routingSnapshot?.stable === true,
+        metadata_bytes_read: routing.discoverySnapshot?.bytesRead || 0,
       });
-      profiler?.addPhase("routing", routingMs, routing.fileSize, 0);
-      profiler?.recordSession(routing, "routing_scan_ms", routingMs, routing.fileSize, 0);
-      routing = { ...routing, file: entry.file, sourceRootPath: entry.sourceRootPath, storage: entry.storage };
-      if (!routing.cwd) {
-        const routingEvidence = routing.routingSnapshot;
-        routing = await readAndEnrichSession(entry, titleIndex, profiler, "routing_fallback_parse_ms", context);
-        routing.routingSnapshot = routingEvidence;
-      }
+      profiler?.addPhase("routing", routingMs, routing.discoverySnapshot?.bytesRead || 0, 0);
+      profiler?.recordSession(routing, "routing_metadata_ms", routingMs, routing.discoverySnapshot?.bytesRead || 0, 0);
+      const retained = { ...routing, file: entry.file, sourceRootPath: entry.sourceRootPath, storage: entry.storage };
       diagnosticReporter("routing_session_end", {
         ordinal: routingIndex + 1,
         total: files.length,
@@ -446,7 +449,7 @@ async function runCommandInternal(context, { print, profiler, runState }) {
         duration_ms: roundMs(performance.now() - routingStart),
         storage: entry.storage,
       });
-      retainPreferredSession(routingMap, routing);
+      retainPreferredSession(routingMap, retained);
     }
     const routed = sortedSessionValues(routingMap);
     projectListMetas = routed;
@@ -486,6 +489,10 @@ async function runCommandInternal(context, { print, profiler, runState }) {
     throw new ExportError("NO_PROJECT_MATCH", "No sessions were recorded for the current workspace path. The project may have been moved, renamed, or previously opened from another folder.");
   }
   profiler?.setCounts({ exportedSessions: selected.length });
+
+  if (exactSelection) {
+    for (const meta of selected) await assertDiscoveryMetadataUnchanged(meta, context.abortSignal);
+  }
 
   await assertSeparatedExportRoot(outputDir, locations.map((location) => location.root));
   await ensureSeparatedOutputDirectory(outputDir, sourceProtection);
@@ -549,7 +556,7 @@ async function runCommandInternal(context, { print, profiler, runState }) {
         ? async (publishedPath) => {
             const parseStart = performance.now();
             const parsedMeta = await readSessionMeta(publishedPath, {
-              fallbackSessionId: meta.id,
+              fallbackSessionId: meta.idSource === "metadata_fallback" ? "" : meta.id,
               fallbackTimestamp: meta.timestamp,
               collectAttachmentMetrics: Boolean(profiler),
               calculateSha256: true,
@@ -589,7 +596,7 @@ async function runCommandInternal(context, { print, profiler, runState }) {
   diagnosticReporter("assets_start", { sessions: tasks.length });
   for (const task of tasks) {
     const parsePath = copyRaw ? path.join(outputDir, task.rawRel) : task.meta.file;
-    task.assetSnapshot = await collectSessionAssets(parsePath, task.meta.id || task.meta.session_id, assetStore, context.readerImplementation, context.readerOptions);
+    task.assetSnapshot = await collectSessionAssets(parsePath, task.parsedSnapshotMeta?.id || task.meta.id || task.meta.session_id, assetStore, context.readerImplementation, context.readerOptions);
     const expectedSha256 = copyRaw ? task.snapshot?.sha256 : task.meta.fileSha256;
     if (expectedSha256 && task.assetSnapshot.sha256 !== expectedSha256) throw new ExportError("SOURCE_CHANGED_DURING_EXPORT", "Session content changed before its assets were collected");
   }
@@ -748,11 +755,17 @@ function parseArgs(argv) {
   return parsed;
 }
 
-async function findJsonlFiles(root) {
+function throwIfExportAborted(signal) {
+  if (signal?.aborted) throw new ExportError("EXPORT_CANCELLED", "Export cancelled during session discovery");
+}
+
+async function findJsonlFiles(root, signal) {
   const results = [];
   async function walk(dir) {
+    throwIfExportAborted(signal);
     const entries = await fsp.readdir(dir, { withFileTypes: true });
     for (const entry of entries) {
+      throwIfExportAborted(signal);
       const full = path.join(dir, entry.name);
       if (entry.isDirectory()) await walk(full);
       else if (entry.isFile() && entry.name.toLowerCase().endsWith(".jsonl")) results.push(full);
@@ -762,13 +775,15 @@ async function findJsonlFiles(root) {
   return results;
 }
 
-async function readSessionIndex(indexPath, profiler = null) {
+async function readSessionIndex(indexPath, profiler = null, signal = undefined) {
   const result = new Map();
+  throwIfExportAborted(signal);
   if (!fs.existsSync(indexPath)) return result;
   const indexStat = await fsp.stat(indexPath).catch(() => null);
   profiler?.addPhase("session_discovery_and_metadata", 0, indexStat?.size || 0, 0);
-  const rl = readline.createInterface({ input: fs.createReadStream(indexPath, { encoding: "utf8" }), crlfDelay: Infinity });
+  const rl = readline.createInterface({ input: fs.createReadStream(indexPath, { encoding: "utf8", signal }), crlfDelay: Infinity });
   for await (const line of rl) {
+    throwIfExportAborted(signal);
     if (!line.trim()) continue;
     try {
       const item = JSON.parse(line);
@@ -881,6 +896,113 @@ async function readSessionMeta(file, {
   return meta;
 }
 
+const DISCOVERY_RECORD_MAX_BYTES = 1024 * 1024;
+const DISCOVERY_TYPE_PROBE_MAX_BYTES = 64 * 1024;
+// Type probing stays small so a non-metadata first record stops immediately.
+// Confirmed metadata is streamed in larger blocks; at most 4095 bytes beyond
+// its newline can enter the read buffer, and those bytes are never parsed,
+// retained, hashed, or exposed as metadata.
+const DISCOVERY_TYPE_READ_CHUNK_BYTES = 64;
+const DISCOVERY_METADATA_READ_CHUNK_BYTES = 4096;
+
+async function readSessionDiscoveryMeta(file, { abortSignal, maxRecordBytes = DISCOVERY_RECORD_MAX_BYTES, io = {} } = {}) {
+  throwIfExportAborted(abortSignal);
+  const before = await (io.stat || fsp.stat)(file, { bigint: true });
+  throwIfExportAborted(abortSignal);
+  const beforeIdentity = reliableFileIdentity(before);
+  if (!before.isFile() || !beforeIdentity) throw new ExportError("UNSAFE_SESSION_SOURCE", "Session discovery requires a regular source with reliable identity");
+  const handle = await (io.open || fsp.open)(file, "r");
+  let bytesRead = 0;
+  let recordBytes = Buffer.alloc(0);
+  try {
+    const chunks = [];
+    let recordLength = 0;
+    let position = 0;
+    let metadataTypeConfirmed = false;
+    while (true) {
+      throwIfExportAborted(abortSignal);
+      const buffer = Buffer.allocUnsafe(metadataTypeConfirmed ? DISCOVERY_METADATA_READ_CHUNK_BYTES : DISCOVERY_TYPE_READ_CHUNK_BYTES);
+      const result = await handle.read(buffer, 0, buffer.length, position);
+      if (!result.bytesRead) break;
+      bytesRead += result.bytesRead;
+      position += result.bytesRead;
+      const chunk = buffer.subarray(0, result.bytesRead);
+      const newline = chunk.indexOf(0x0a);
+      const part = newline >= 0 ? chunk.subarray(0, newline) : chunk;
+      const remaining = maxRecordBytes - recordLength;
+      const retainedPart = part.subarray(0, Math.max(0, remaining));
+      chunks.push(Buffer.from(retainedPart));
+      recordLength += retainedPart.length;
+      if (!metadataTypeConfirmed) {
+        if (recordLength > DISCOVERY_TYPE_PROBE_MAX_BYTES) break;
+        const probe = Buffer.concat(chunks, recordLength).toString("utf8");
+        const prefixType = readTopLevelJsonEventTypePrefix(probe.charCodeAt(0) === 0xfeff ? probe.slice(1) : probe);
+        if (prefixType.status === "FOUND") {
+          if (!["session_meta", "turn_context"].includes(prefixType.value)) break;
+          metadataTypeConfirmed = true;
+        }
+      }
+      if (part.length > retainedPart.length || recordLength === maxRecordBytes) break;
+      if (newline >= 0) break;
+    }
+    recordBytes = Buffer.concat(chunks, recordLength);
+  } finally {
+    await handle.close();
+  }
+  throwIfExportAborted(abortSignal);
+  if (recordBytes.at(-1) === 0x0d) recordBytes = recordBytes.subarray(0, recordBytes.length - 1);
+  let item;
+  try {
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(recordBytes);
+    const normalized = text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+    const eventType = readTopLevelJsonEventType(normalized);
+    item = eventType.status === "FOUND" && ["session_meta", "turn_context"].includes(eventType.value) ? JSON.parse(normalized) : null;
+  } catch { item = null; }
+  const after = await (io.stat || fsp.stat)(file, { bigint: true });
+  if (reliableFileIdentity(after) !== beforeIdentity || before.size !== after.size || before.mtimeNs !== after.mtimeNs) {
+    throw new ExportError("SOURCE_CHANGED_DURING_EXPORT", "Session metadata changed while it was discovered");
+  }
+  const filenameId = extractSessionIdFromFilename(file);
+  const firstRecordSha256 = createHash("sha256").update(recordBytes).digest("hex");
+  const payload = item?.type === "session_meta" && item.payload && typeof item.payload === "object" ? item.payload : null;
+  const routingPayload = (item?.type === "session_meta" || item?.type === "turn_context") && item.payload && typeof item.payload === "object" ? item.payload : null;
+  const payloadId = payload?.id || payload?.session_id || "";
+  const fallbackId = `metadata-${firstRecordSha256.slice(0, 16)}`;
+  return {
+    file,
+    id: filenameId || payloadId || fallbackId,
+    session_id: filenameId || payload?.session_id || payloadId || fallbackId,
+    idSource: filenameId ? "filename" : (payloadId ? "session_meta" : "metadata_fallback"),
+    metadataId: payloadId,
+    metadataIdMismatch: Boolean(filenameId && payloadId && filenameId !== payloadId),
+    cwd: routingPayload?.cwd || "",
+    timestamp: payload?.timestamp || new Date(Number(before.mtimeMs)).toISOString(),
+    recordedLastSessionAt: payload?.timestamp || "",
+    source: payload?.source || "",
+    threadSource: payload?.thread_source || "",
+    parentThreadId: payload?.parent_thread_id || "",
+    hasSessionMeta: Boolean(payload),
+    fileSize: Number(before.size),
+    discoverySnapshot: Object.freeze({
+      bytesRead,
+      firstRecordSha256,
+      identity: beforeIdentity,
+      sizeBytes: Number(before.size),
+      mtimeNs: before.mtimeNs.toString(),
+    }),
+  };
+}
+
+async function assertDiscoveryMetadataUnchanged(meta, abortSignal) {
+  const expected = meta.discoverySnapshot;
+  if (!expected) return;
+  const current = await readSessionDiscoveryMeta(meta.file, { abortSignal });
+  const actual = current.discoverySnapshot;
+  if (actual.identity !== expected.identity || actual.sizeBytes !== expected.sizeBytes || actual.mtimeNs !== expected.mtimeNs || actual.firstRecordSha256 !== expected.firstRecordSha256) {
+    throw new ExportError("SOURCE_CHANGED_DURING_EXPORT", "Selected session metadata changed after discovery; select the project again");
+  }
+}
+
 async function collectSessionAssets(file, sessionId, assetStore, readerImplementation, readerOptions = {}) {
   const summary = createSessionReaderSummary();
   for await (const _record of streamSessionRecords(file, {
@@ -912,7 +1034,7 @@ async function processExportTask(task, titleIndex, profiler, context, sourceProt
     if (!metadataAlreadyParsed && !parsedSnapshotMeta) {
       const parseStart = performance.now();
       parsedMeta = await readSessionMeta(parsePath, {
-        fallbackSessionId: meta.id,
+        fallbackSessionId: meta.idSource === "metadata_fallback" ? "" : meta.id,
         fallbackTimestamp: meta.timestamp,
         collectAttachmentMetrics: Boolean(profiler),
         calculateSha256: true,
@@ -924,7 +1046,7 @@ async function processExportTask(task, titleIndex, profiler, context, sourceProt
       profiler?.addPhase("parse_and_classify", parseMs, parsedMeta.fileSize, 0);
       profiler?.recordSession(meta, copyRaw ? "snapshot_parse_ms" : "selected_parse_ms", parseMs, parsedMeta.fileSize, 0);
     }
-    if (meta.id && parsedMeta.id && meta.id !== parsedMeta.id) throw new ExportError("SOURCE_SNAPSHOT_MISMATCH", `Parsed session ID differs from scanned source: ${sourceOriginalFilename}`);
+    if (meta.idSource !== "metadata_fallback" && meta.id && parsedMeta.id && meta.id !== parsedMeta.id) throw new ExportError("SOURCE_SNAPSHOT_MISMATCH", `Parsed session ID differs from scanned source: ${sourceOriginalFilename}`);
     const indexed = parsedMeta.id ? (titleIndex.get(parsedMeta.id) || {}) : {};
     const titleResolution = resolveDisplayTitle(parsedMeta, indexed.threadName);
     const displayTitle = redactMarkdown ? redactSecrets(titleResolution.displayTitle) : titleResolution.displayTitle;
@@ -1758,20 +1880,23 @@ async function releaseExportLock(lock) {
   await removeOwnedTemporary(lock, { lstat: fsp.lstat, realpath: fsp.realpath, rm: fsp.rm, stat: fsp.stat });
 }
 
-async function createSourceProtection(files, locations, protectedInputPaths = []) {
+async function createSourceProtection(files, locations, protectedInputPaths = [], abortSignal = undefined) {
   const rootCanonicalPaths = new Set();
   const fileCanonicalPaths = new Set();
   const fileIdentities = new Set();
   for (const location of locations) {
+    throwIfExportAborted(abortSignal);
     const root = await inspectSeparatedPath(location.root, { requireDirectory: true });
     rootCanonicalPaths.add(normalizePathForCompare(root.canonicalPath));
   }
   for (const entry of files) {
+    throwIfExportAborted(abortSignal);
     const source = await inspectSeparatedPath(entry.file, { requireRegularFile: true, requireReliableIdentity: true });
     fileCanonicalPaths.add(normalizePathForCompare(source.canonicalPath));
     fileIdentities.add(source.identity);
   }
   for (const protectedInputPath of protectedInputPaths) {
+    throwIfExportAborted(abortSignal);
     const input = await inspectSeparatedPath(protectedInputPath, { allowMissing: true, requireRegularFile: true, requireReliableIdentity: true });
     fileCanonicalPaths.add(normalizePathForCompare(input.canonicalPath));
     if (input.identity) fileIdentities.add(input.identity);
@@ -1815,6 +1940,32 @@ function createFileHandleWritable(handle) {
       writeCompleteBuffer(handle, bytes).then(() => callback(), callback);
     },
   });
+}
+
+function readTopLevelJsonEventTypePrefix(line) {
+  const text = String(line || "");
+  let index = skipJsonWhitespace(text, 0);
+  if (text[index] !== "{") return { status: "UNCERTAIN", value: "" };
+  index += 1;
+  while (index < text.length) {
+    index = skipJsonWhitespace(text, index);
+    if (text[index] === "}") return { status: "NOT_FOUND", value: "" };
+    const key = readJsonStringToken(text, index);
+    if (!key) return { status: "UNCERTAIN", value: "" };
+    index = skipJsonWhitespace(text, key.end);
+    if (text[index] !== ":") return { status: "UNCERTAIN", value: "" };
+    index = skipJsonWhitespace(text, index + 1);
+    if (key.value === "type") {
+      const value = readJsonStringToken(text, index);
+      return value ? { status: "FOUND", value: value.value } : { status: "UNCERTAIN", value: "" };
+    }
+    const valueEnd = skipJsonValue(text, index);
+    if (valueEnd === null) return { status: "UNCERTAIN", value: "" };
+    index = skipJsonWhitespace(text, valueEnd);
+    if (text[index] !== ",") return text[index] === "}" ? { status: "NOT_FOUND", value: "" } : { status: "UNCERTAIN", value: "" };
+    index += 1;
+  }
+  return { status: "UNCERTAIN", value: "" };
 }
 
 async function writeCompleteBuffer(handle, bytes) {
@@ -3548,6 +3699,7 @@ export {
   portableBasename,
   redactSecrets,
   readSessionMeta,
+  readSessionDiscoveryMeta,
   readSessionRoutingMeta,
   readTopLevelJsonEventType,
   inspectUnprefixedEmbeddedImage,

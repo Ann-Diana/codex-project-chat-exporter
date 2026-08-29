@@ -187,10 +187,13 @@ function createExtensionAdapter(vscode, injected = {}) {
       try {
         const withProgressStartedAt = performance.now();
         writeDiagnostic("with_progress_start");
-        const result = await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: "Exporting Codex sessions", cancellable: false }, async (progress) => {
+        const abortController = new AbortController();
+        const result = await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: "Exporting Codex sessions", cancellable: true }, async (progress, token) => {
           const coreCallStartedAt = performance.now();
           writeDiagnostic("with_progress_enter");
           options.onProgress = (event) => progress.report({ message: event.message });
+          options.abortSignal = abortController.signal;
+          const cancellation = token?.onCancellationRequested?.(() => abortController.abort());
           if (diagnosticsEnabled()) options.onDiagnostic = (event) => recordDiagnostic(event);
           writeDiagnostic("core_call_start");
           try {
@@ -200,6 +203,8 @@ function createExtensionAdapter(vscode, injected = {}) {
           } catch (error) {
             writeDiagnostic("core_call_end", { status: error?.code === "EXPORT_CANCELLED" ? "CANCELLED" : "FAILED", error_code: error?.code || "UNKNOWN", duration_ms: roundDiagnosticMs(performance.now() - coreCallStartedAt) });
             throw error;
+          } finally {
+            cancellation?.dispose?.();
           }
         });
         writeDiagnostic("with_progress_end", { duration_ms: roundDiagnosticMs(performance.now() - withProgressStartedAt) });

@@ -12,7 +12,7 @@ Unlike Codex's native TUI `/export`, the extension can export the current VS Cod
 
 ## Features
 
-- **Current Workspace** exports detected active and archived sessions with the exact recorded path of the currently opened local workspace.
+- **Current Workspace** discovers detected active and archived sessions through a bounded first-record metadata stream and exports only sessions with the exact recorded path of the currently opened local workspace. Discovery is cancellable and does not read later conversation records to determine paths.
 - **Choose recorded project path…** lists recorded paths with session count, source bytes and latest date. A different historical path requires confirmation and may contain several logical projects. No alias or automatic all-session fallback is stored. This choice is also offered after an unmatched workspace export; see [recovery details](../../docs/recorded-project-selection.md).
 - **All Sessions** exports all detected active and archived sessions from the configured Codex home.
 - Choose scope, export profile, and optional document formats from native Quick Picks.

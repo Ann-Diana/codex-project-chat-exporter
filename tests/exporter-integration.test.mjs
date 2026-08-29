@@ -113,7 +113,8 @@ const version = await execFileAsync(process.execPath, [script, "--version"], { c
 assert.equal(version.stdout.trim(), "0.3.0");
 
 const projectList = await execFileAsync(process.execPath, [script, "--codex-home", codexHome, "--list"], { cwd: temp });
-assert.match(projectList.stdout, /C:\\Projects\\alpha \(5: 3 active, 2 archived\)/);
+assert.match(projectList.stdout, /C:\\Projects\\alpha \(4: 3 active, 1 archived\)/);
+assert.match(projectList.stdout, /\(unknown\) \(2: 1 active, 1 archived\)/, "metadata-only listing must not inspect later conversation/context records for a missing first-record cwd");
 
 const sessionList = await execFileAsync(process.execPath, [script, "--codex-home", codexHome, "--list-sessions"], { cwd: temp });
 assert.match(sessionList.stdout, /\[active\] Create the release archive and preserve the literal terms AGENTS\.md and <environment_context>\. \| C:\\Projects\\alpha/);
@@ -218,10 +219,10 @@ assert.doesNotMatch(html, /<img src="assets\/[0-9a-f]{64}\.bin"/, "non-renderabl
 const apiOutputDir = path.join(temp, "api-output");
 const apiProfilePath = path.join(temp, "api-performance-profile.json");
 const apiResult = await exportArchive({ codexHome, scope: "project", workspacePath: "C:\\Projects\\alpha", outputDirectory: apiOutputDir, includeOriginalJsonl: false, performanceProfilePath: apiProfilePath });
-assert.equal(apiResult.exportedSessionCount, 5);
+assert.equal(apiResult.exportedSessionCount, 4);
 assert.equal(apiResult.exportedProjectCount, 1);
 assert.equal(apiResult.activeSessionCount, 3);
-assert.equal(apiResult.archivedSessionCount, 2);
+assert.equal(apiResult.archivedSessionCount, 1);
 assert.ok(apiResult.htmlIndexPath.endsWith("index.html"));
 assert.ok(apiResult.manifestPath.endsWith("manifest.json"));
 assert.ok(apiResult.assetManifestPath.endsWith(path.join("assets", "manifest.json")));
@@ -447,7 +448,12 @@ try {
 }
 
 const markdownAliasOutput = path.join(temp, "markdown-alias-output");
-const markdownAliasPath = path.join(markdownAliasOutput, activeSession.markdown_file);
+const markdownPlanOutput = path.join(temp, "markdown-alias-plan");
+const markdownPlan = await exportArchive({ codexHome, scope: "all", outputDirectory: markdownPlanOutput, exportProfile: "readable" });
+const markdownPlanManifest = JSON.parse(await fs.readFile(markdownPlan.manifestPath, "utf8"));
+const markdownAliasRelative = markdownPlanManifest.sessions.find(session => session.session_id === activeSession.session_id).markdown_file;
+await fs.rm(markdownPlanOutput, { recursive: true, force: true });
+const markdownAliasPath = path.join(markdownAliasOutput, markdownAliasRelative);
 await fs.mkdir(path.dirname(markdownAliasPath), { recursive: true });
 await fs.link(protectedSource, markdownAliasPath);
 await assert.rejects(() => exportArchive({ codexHome, scope: "all", outputDirectory: markdownAliasOutput, exportProfile: "readable" }), (error) => error?.code === "OUTPUT_OVERLAPS_SOURCE");
@@ -473,7 +479,7 @@ await assert.rejects(() => exportArchive({
 assert.equal(await pathExists(path.join(codexHome, "sessions", "unsafe-export")), false, "overlapping output roots must be rejected before mkdir or any export write");
 assert.equal(apiProfile.raw_enabled, false);
 assert.equal(apiProfile.counts.scanned_sessions, 7);
-assert.equal(apiProfile.counts.exported_sessions, 5);
+assert.equal(apiProfile.counts.exported_sessions, 4);
 assert.equal(apiProfile.attachments.embedded_count, 2);
 assert.equal(apiProfile.attachments.embedded_bytes, 17);
 assert.equal(apiProfile.attachments.data_url_count, 1);
@@ -487,12 +493,9 @@ assert.equal(apiProfile.attachments.referenced_unknown_size_count, 2);
 assert.ok(apiProfile.phases.parse_and_classify.duration_ms > 0);
 const readableSourceFiles = [
   path.join(activeDir, "rollout-active.jsonl"),
-  path.join(activeDir, "rollout-empty-project.jsonl"),
   path.join(activeDir, "rollout-subagent.jsonl"),
   path.join(activeDir, "rollout-no-user.jsonl"),
-  path.join(archivedDir, "rollout-archived.jsonl"),
   path.join(archivedDir, "rollout-archived-same-project.jsonl"),
-  path.join(archivedDir, `rollout-2026-05-10T08-00-00-${malformedArchivedId}.jsonl`),
 ];
 const readableSourceBytes = (await Promise.all(readableSourceFiles.map((file) => fs.stat(file)))).reduce((sum, stat) => sum + stat.size, 0);
 assert.equal(apiProfile.phases.parse_and_classify.bytes_read, readableSourceBytes, "readable exports should classify each discovered source exactly once instead of routing and reparsing selected sessions");
@@ -510,10 +513,9 @@ const profiledRawResult = await exportArchive({ codexHome, scope: "project", wor
 const profiledRawManifest = JSON.parse(await fs.readFile(profiledRawResult.manifestPath, "utf8"));
 const profiledRaw = JSON.parse(await fs.readFile(profiledRawPath, "utf8"));
 const semanticSession = ({ markdown_file, raw_export_file, raw_export_name, raw_verified_at, ...session }) => session;
-assert.deepEqual(profiledRawManifest.sessions.map(semanticSession), manifest.sessions.filter((session) => session.project === "C:\\Projects\\alpha").map(semanticSession), "routing preflight must preserve selected-session manifest semantics");
-const uncertainRoutingFallbackBytes = (await fs.stat(path.join(activeDir, "rollout-empty-project.jsonl"))).size;
-assert.equal(profiledRaw.phases.parse_and_classify.bytes_read, profiledRawManifest.sessions.reduce((sum, session) => sum + session.raw_size_bytes, 0) + uncertainRoutingFallbackBytes, "raw exports should parse accepted snapshots once while retaining the conservative full-parser fallback for uncertain routing metadata");
-assert.ok(profiledRaw.phases.routing.bytes_read > profiledRaw.phases.parse_and_classify.bytes_read, "routing should scan all source bytes without fully classifying unselected sessions");
+assert.deepEqual(profiledRawManifest.sessions.map(semanticSession), manifest.sessions.filter((session) => session.project === "C:\\Projects\\alpha" && session.session_id !== malformedArchivedId).map(semanticSession), "first-record routing must preserve selected-session manifest semantics without assigning a later turn_context cwd");
+assert.equal(profiledRaw.phases.parse_and_classify.bytes_read, profiledRawManifest.sessions.reduce((sum, session) => sum + session.raw_size_bytes, 0), "only selected sources should receive complete metadata classification");
+assert.ok(profiledRaw.phases.routing.bytes_read > 0, "routing should account for first-record metadata reads");
 assert.ok(profiledRaw.phases.snapshot_stability_checks.duration_ms >= 0, "performance profiles should report snapshot stability checks separately");
 assert.ok(profiledRaw.slowest_sessions.some((session) => session.snapshot_attempts >= 1), "profiled raw sessions should expose snapshot attempt counts without attributing attempts to routing-only sessions");
 for (const session of profiledRawManifest.sessions) {
@@ -575,11 +577,12 @@ for (const session of sourceSnapshotsManifest.sessions) {
 assert.deepEqual(progressEvents.map((event) => event.phase).filter((phase, index, phases) => index === 0 || phase !== phases[index - 1]), ["discovery", "routing", "snapshot", "processing", "assets", "writing", "complete"]);
 assert.ok(progressEvents.some((event) => event.message === `Processing session ${sourceSnapshotsManifest.sessions.length} of ${sourceSnapshotsManifest.sessions.length}`));
 assert.doesNotMatch(JSON.stringify(progressEvents), /Projects|codex-exporter-test/, "progress events must not expose project names or full paths");
-for (const event of ["core_start", "discovery_start", "discovery_end", "routing_start", "routing_hash_end", "routing_end", "session_start", "snapshot_attempt_start", "source_hash_reused", "snapshot_copy_start", "snapshot_copy_end", "export_hash_start", "export_hash_end", "snapshot_stability_check", "snapshot_attempt_end", "session_end", "assets_start", "assets_end", "index_start", "index_end", "manifest_start", "manifest_end", "verification_start", "verification_end", "core_end"]) {
+for (const event of ["core_start", "discovery_start", "discovery_end", "routing_start", "routing_metadata_end", "routing_end", "session_start", "snapshot_attempt_start", "source_hash_start", "source_hash_end", "snapshot_copy_start", "snapshot_copy_end", "export_hash_start", "export_hash_end", "snapshot_stability_check", "snapshot_attempt_end", "session_end", "assets_start", "assets_end", "index_start", "index_end", "manifest_start", "manifest_end", "verification_start", "verification_end", "core_end"]) {
   assert.ok(diagnosticEvents.some((entry) => entry.event === event), `diagnostic trace should contain ${event}`);
 }
-assert.equal(diagnosticEvents.filter((event) => event.event === "routing_hash_end").length, diagnosticEvents.find((event) => event.event === "discovery_end").scanned_sessions, "each scanned source must be hashed exactly once by routing");
-assert.equal(diagnosticEvents.filter((event) => event.event === "source_hash_start").length, 0, "stable selected sources must not receive a second source hash pass");
+assert.equal(diagnosticEvents.filter((event) => event.event === "routing_metadata_end").length, diagnosticEvents.find((event) => event.event === "discovery_end").scanned_sessions, "each scanned source must contribute only first-record routing metadata");
+assert.ok(diagnosticEvents.filter((event) => event.event === "routing_metadata_end").every(event => event.metadata_bytes_read <= 1024 * 1024 + 4095));
+assert.equal(diagnosticEvents.filter((event) => event.event === "source_hash_start").length, sourceSnapshotsManifest.sessions.length, "only selected sources should receive a complete source hash pass");
 assert.equal(diagnosticEvents.filter((event) => event.event === "export_hash_start").length, sourceSnapshotsManifest.sessions.length, "each source snapshot must receive exactly one export hash pass");
 assert.equal(diagnosticEvents.filter((event) => event.event === "verification_hash_start").length, 0, "final verification must not hash Raw snapshots a second time");
 assert.ok(diagnosticEvents.every((event) => Number.isFinite(event.monotonic_ms)), "diagnostic events must use monotonic timestamps");
@@ -601,7 +604,7 @@ for (const session of JSON.parse(await fs.readFile(explicitCompleteResult.manife
   assert.equal(await fs.readFile(path.join(explicitCompleteOutput, session.markdown_file), "utf8"), await fs.readFile(path.join(profiledRawOutputDir, baseline.markdown_file), "utf8"), "the complete profile must preserve established Markdown semantics");
 }
 assert.deepEqual(completeProgress.map((event) => event.phase).filter((phase, index, phases) => index === 0 || phase !== phases[index - 1]), ["discovery", "routing", "snapshot", "processing", "assets", "rendering", "writing", "complete"], "complete-profile progress phases must be ordered and finite");
-assert.equal(completeDiagnostics.filter((event) => event.event === "source_hash_start").length, 0, "complete exports must reuse stable routing hashes");
+assert.equal(completeDiagnostics.filter((event) => event.event === "source_hash_start").length, explicitCompleteResult.exportedSessionCount, "complete exports must hash only selected sources after metadata-only routing");
 assert.equal(completeDiagnostics.filter((event) => event.event === "export_hash_start" && event.stage === "snapshot_parse").length, explicitCompleteResult.exportedSessionCount, "complete exports must hash each Raw snapshot during its existing parse pass");
 assert.equal(completeDiagnostics.filter((event) => event.event === "verification_hash_start").length, 0, "complete exports must not add a final duplicate Raw hash pass");
 
@@ -699,7 +702,7 @@ const routerOutput = path.join(temp, "router-output");
 const streamingInvalidOutput = path.join(temp, "router-streaming-invalid-output");
 await assert.rejects(
   () => exportArchive({ codexHome: routerHome, scope: "all", outputDirectory: streamingInvalidOutput, exportProfile: "complete" }),
-  (error) => error?.code === "SESSION_JSONL_INVALID" && error?.recordNumber === 1,
+  (error) => error?.code === "SOURCE_SNAPSHOT_FAILED" && error.message.includes("JSON validation failed in session record 1"),
 );
 assert.equal(await pathExists(path.join(streamingInvalidOutput, "manifest.json")), false, "the streaming reader must reject invalid JSONL before publishing visible output");
 const routerResult = await exportArchive({ codexHome: routerHome, scope: "all", outputDirectory: routerOutput, exportProfile: "complete", _readerImplementation: SESSION_READER_IMPLEMENTATION.LEGACY_REFERENCE });

@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
-import { exportArchive } from "../bin/export-codex-project-chats.mjs";
+import { exportArchive, readSessionDiscoveryMeta } from "../bin/export-codex-project-chats.mjs";
 
 const execute = promisify(execFile);
 const oldPath = "/synthetic/old-project";
@@ -42,7 +42,7 @@ test("recorded-project recovery uses one inventory, exact cwd and bounded metada
           assert.equal(reason, "no-match");
           assert.equal(projects.length, 3);
           assert.ok(Object.isFrozen(projects) && projects.every(Object.isFrozen));
-          assert.deepEqual(projects.find(p => p.cwd === oldPath), { cwd: oldPath, sessionCount: 2, sourceBytes: oldBytes, lastSessionAt: "2026-08-02T10:00:00.000Z" });
+          assert.deepEqual(projects.find(p => p.cwd === oldPath), { cwd: oldPath, sessionCount: 2, sourceBytes: oldBytes, lastSessionAt: "2026-08-01T10:00:00.000Z" });
           assert.ok(projects.every(p => Object.keys(p).length === 4));
           return oldPath;
         },
@@ -51,13 +51,21 @@ test("recorded-project recovery uses one inventory, exact cwd and bounded metada
       assert.equal(result.exportedSessionCount, 2);
       const manifest = JSON.parse(await fs.readFile(result.manifestPath, "utf8"));
       assert.ok(manifest.sessions.every(s => s.cwd === oldPath || s.project === oldPath));
-      assert.equal(diagnostics.filter(e => e.event === "routing_start").length, exportProfile === "readable" ? 0 : 1);
+      assert.equal(diagnostics.filter(e => e.event === "routing_start").length, 1);
+      assert.equal(diagnostics.filter(e => e.event === "routing_metadata_end").length, 5);
       assert.equal(diagnostics.filter(e => e.event === "discovery_start").length, 1);
     }
     const direct = await exportArchive({ codexHome, outputDirectory: path.join(temp, "direct"), scope: "recorded-project", recordedProjectPath: oldPath });
     assert.equal(direct.exportedSessionCount, 2);
-    const workspace = await exportArchive({ codexHome, outputDirectory: path.join(temp, "workspace"), scope: "project", workspacePath: oldPath });
+    let workspacePickerCalls = 0;
+    const workspaceDiagnostics = [];
+    const workspace = await exportArchive({ codexHome, outputDirectory: path.join(temp, "workspace"), scope: "project", workspacePath: oldPath,
+      onDiagnostic: event => workspaceDiagnostics.push(event),
+      onSelectRecordedProject: () => { workspacePickerCalls += 1; return `${oldPath}-other`; },
+    });
     assert.equal(workspace.exportedSessionCount, 2, "workspace selection must not silently include child paths");
+    assert.equal(workspacePickerCalls, 0, "a matching Current Workspace must not enter the historical project picker");
+    assert.ok(workspaceDiagnostics.filter(event => event.event === "routing_metadata_end").every(event => event.metadata_bytes_read <= 1024 * 1024 + 4095));
   } finally { await fs.rm(temp, { recursive: true, force: true }); }
 });
 
@@ -103,10 +111,10 @@ test("recorded inventory compares actual instants and ignores malformed event da
   const { temp, codexHome } = await fixture();
   try {
     const rows = [
-      { type: "event_msg", timestamp: "2026-08-02T09:30:00-02:00", payload: { type: "synthetic" } },
+      { type: "session_meta", timestamp: "2026-08-02T09:30:00-02:00", payload: { id: "synthetic-date", cwd: oldPath, timestamp: "2026-08-02T09:30:00-02:00" } },
       { type: "event_msg", timestamp: "not-a-date", payload: { type: "synthetic" } },
     ];
-    await fs.appendFile(path.join(codexHome, "sessions", "rollout-0.jsonl"), rows.map(row => JSON.stringify(row)).join("\n") + "\n");
+    await fs.writeFile(path.join(codexHome, "sessions", "rollout-date.jsonl"), rows.map(row => JSON.stringify(row)).join("\n") + "\n");
     for (const exportProfile of ["complete", "readable", "source-snapshots"]) {
       await assert.rejects(() => exportArchive({ codexHome, outputDirectory: path.join(temp, `dates-${exportProfile}`), scope: "recorded-project", exportProfile,
         onSelectRecordedProject: ({ projects }) => {
@@ -115,5 +123,82 @@ test("recorded inventory compares actual instants and ignores malformed event da
         },
       }), error => error.code === "EXPORT_CANCELLED");
     }
+  } finally { await fs.rm(temp, { recursive: true, force: true }); }
+});
+
+test("first-record discovery is bounded, ignores conversation bytes and aborts before a full scan", async () => {
+  const temp = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "recorded-discovery-")));
+  const codexHome = path.join(temp, "source");
+  const sessions = path.join(codexHome, "sessions");
+  const outputDirectory = path.join(temp, "output");
+  await fs.mkdir(sessions, { recursive: true });
+  try {
+    const metadata = { type: "session_meta", timestamp: "2026-08-01T10:00:00Z", payload: { id: "bounded", cwd: oldPath, timestamp: "2026-08-01T10:00:00Z" } };
+    const tail = JSON.stringify({ type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "x".repeat(8 * 1024 * 1024) }] } });
+    const source = path.join(sessions, "rollout-bounded.jsonl");
+    await fs.writeFile(source, `${JSON.stringify(metadata)}\n${tail}\n`);
+    const discovered = await readSessionDiscoveryMeta(source);
+    assert.equal(discovered.cwd, oldPath);
+    assert.ok(discovered.discoverySnapshot.bytesRead <= Buffer.byteLength(JSON.stringify(metadata)) + 4096, "discovery must not scan the large conversation record beyond bounded stream over-read");
+
+    const conversationFirst = path.join(sessions, "rollout-conversation-first.jsonl");
+    await fs.writeFile(conversationFirst, `${tail}\n${JSON.stringify(metadata)}\n`);
+    const ignored = await readSessionDiscoveryMeta(conversationFirst);
+    assert.equal(ignored.cwd, "");
+    assert.ok(ignored.discoverySnapshot.bytesRead <= 64, "a first conversation record must stop as soon as its non-metadata type is known");
+
+    const probes = path.join(temp, "first-record-probes");
+    await fs.mkdir(probes);
+    const reorderedMetadata = path.join(probes, "reordered.jsonl");
+    await fs.writeFile(reorderedMetadata, `${JSON.stringify({ timestamp: metadata.timestamp, payload: metadata.payload, type: "session_meta" })}\n`);
+    assert.equal((await readSessionDiscoveryMeta(reorderedMetadata)).cwd, oldPath, "structured probing must find a metadata type after earlier complete properties");
+    const contextFirst = path.join(probes, "context.jsonl");
+    await fs.writeFile(contextFirst, `${JSON.stringify({ payload: { cwd: oldPath }, type: "turn_context" })}\n`);
+    assert.equal((await readSessionDiscoveryMeta(contextFirst)).cwd, oldPath, "a first-record turn_context is permitted metadata");
+    const duplicateType = path.join(probes, "duplicate-type.jsonl");
+    await fs.writeFile(duplicateType, `{"type":"session_meta","payload":{"cwd":"${oldPath}"},"type":"response_item"}\n`);
+    assert.equal((await readSessionDiscoveryMeta(duplicateType)).cwd, "", "ambiguous duplicate top-level types must not authorize a project path");
+    const delayedType = path.join(probes, "delayed-type.jsonl");
+    await fs.writeFile(delayedType, `${JSON.stringify({ padding: "x".repeat(70 * 1024), type: "session_meta", payload: { cwd: oldPath } })}\n`);
+    const delayed = await readSessionDiscoveryMeta(delayedType);
+    assert.equal(delayed.cwd, "", "a type beyond the bounded prefix probe must not authorize a project path");
+    assert.ok(delayed.discoverySnapshot.bytesRead <= 64 * 1024 + 64);
+    const empty = path.join(probes, "empty.jsonl");
+    await fs.writeFile(empty, "");
+    assert.equal((await readSessionDiscoveryMeta(empty)).cwd, "", "an empty source remains unclassified rather than triggering content fallback");
+
+    const midRecordController = new AbortController();
+    let readCalls = 0;
+    await assert.rejects(() => readSessionDiscoveryMeta(source, {
+      abortSignal: midRecordController.signal,
+      io: {
+        open: async (...args) => {
+          const handle = await fs.open(...args);
+          return {
+            read: async (...readArgs) => {
+              const result = await handle.read(...readArgs);
+              readCalls += 1;
+              midRecordController.abort();
+              return result;
+            },
+            close: () => handle.close(),
+          };
+        },
+      },
+    }), error => error.code === "EXPORT_CANCELLED");
+    assert.equal(readCalls, 1, "cancellation must stop first-record discovery between streamed reads");
+
+    const controller = new AbortController();
+    const diagnostics = [];
+    await assert.rejects(() => exportArchive({ codexHome, outputDirectory, scope: "project", workspacePath: oldPath, abortSignal: controller.signal,
+      onDiagnostic: event => {
+        diagnostics.push(event);
+        if (event.event === "routing_end") controller.abort();
+      },
+    }), error => error.code === "EXPORT_CANCELLED");
+    const metadataDiagnostics = diagnostics.filter(event => event.event === "routing_metadata_end");
+    assert.equal(metadataDiagnostics.length, 2);
+    assert.ok(metadataDiagnostics.every(event => event.metadata_bytes_read <= Buffer.byteLength(JSON.stringify(metadata)) + 4096));
+    assert.equal(await fs.stat(source).then(stat => stat.size), Buffer.byteLength(`${JSON.stringify(metadata)}\n${tail}\n`));
   } finally { await fs.rm(temp, { recursive: true, force: true }); }
 });

@@ -60,7 +60,13 @@ function createFakeVscode(overrides = {}) {
         return items[0];
       },
       showOpenDialog: async (options) => { openDialogs.push(options); return overrides.openDialogResult || []; },
-      withProgress: async (options, task) => { progressCalls.push(options); return task({ report: (event) => progressReports.push(event) }); },
+      withProgress: async (options, task) => {
+        progressCalls.push(options);
+        const callbacks = [];
+        const result = task({ report: (event) => progressReports.push(event) }, { onCancellationRequested(callback) { callbacks.push(callback); return { dispose() {} }; } });
+        if (overrides.cancelProgressImmediately) callbacks.forEach(callback => callback());
+        return result;
+      },
     },
     commands: {
       registerCommand: (name, callback) => { registered.set(name, callback); return { dispose: () => registered.delete(name) }; },
@@ -365,6 +371,7 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
   assert.deepEqual(infoMessage.actions, ["Open HTML Index", "Open Export Folder"]);
   assert.equal(fake.openDialogs[0].title, "Choose Codex export output folder");
   assert.equal(fake.progressCalls[0].title, "Exporting Codex sessions");
+  assert.equal(fake.progressCalls[0].cancellable, true);
   assert.ok(fake.output.includes(`Output directory: ${outputDirectory}`));
   assert.ok(fake.output.includes(`HTML index: ${path.join(outputDirectory, "index.html")}`));
   assert.ok(fake.output.includes(`Manifest: ${path.join(outputDirectory, "manifest.json")}`));
@@ -472,6 +479,20 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
   await adapter.activate(context);
   await fake.registered.get(COMMANDS.exportMenu)();
   assert.equal(lastOptions.exportProfile, "source-snapshots", "the source-snapshot profile must be selectable from the native Quick Pick");
+}
+
+{
+  const fake = createFakeVscode({ workspaceFolders: [folder(oneWorkspace)], config: { outputDirectory }, cancelProgressImmediately: true });
+  const context = createContext(temp);
+  const adapter = createExtensionAdapter(fake.vscode, { loadExporter: async () => ({ async exportArchive(options) {
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(options.abortSignal.aborted, true, "VS Code cancellation must reach the shared core");
+    throw Object.assign(new Error("Cancelled"), { code: "EXPORT_CANCELLED" });
+  } }) });
+  await adapter.activate(context);
+  assert.equal(await adapter.exportCurrentWorkspace(context), undefined);
+  assert.equal(context.globalState.values.size, 0);
+  assert.equal(fake.messages.some(message => message.type === "error" || message.type === "info"), false);
 }
 
 {
