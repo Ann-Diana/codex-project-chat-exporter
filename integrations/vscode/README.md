@@ -67,6 +67,8 @@ Valid bounded HTTP/HTTPS links in PDF are clickable without being fetched. PDF u
 
 Output Directory and Codex Home must be local absolute paths and must be configured as User settings. Network, device, Workspace, and Workspace Folder paths are not supported.
 
+Readable omits `replacement_history` from every derived reading view. Complete retains unmatched stored context in a clearly labelled `Additional stored context` area and preserves the unchanged Raw JSONL snapshot.
+
 ## Privacy
 
 All processing stays on the machine running the extension. The extension adds no telemetry or built-in upload and works only in trusted local VS Code Desktop windows.

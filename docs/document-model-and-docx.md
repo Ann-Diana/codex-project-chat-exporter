@@ -33,7 +33,7 @@ docx/<project-directory>/<session-name>.docx
 
 PNG and JPEG assets are embedded. Repeated uses of identical content share one OOXML media part. GIF, WebP, and `.bin` assets remain clearly labelled attachment references because the exporter does not convert images and does not claim reliable native Word rendering for those formats. Images preserve validated dimensions, fit within a 600 by 700 pixel layout box, and include alternative text tied to the source record.
 
-Attachment occurrences come from the same classified record selection as message text. Tool-only images require `includeTools`; verified source mirrors are not repeated. Unmatched `replacement_history` images appear in a labelled `Additional stored context` section, while equal bytes used in independent genuine turns remain independent document occurrences.
+Attachment occurrences come from the same classified record selection as message text. Tool-only images require `includeTools`; verified source mirrors are not repeated. Readable omits every `replacement_history` occurrence. Complete renders unmatched history images in a labelled `Additional stored context` section. Equal bytes used in independent genuine turns remain independent document occurrences.
 
 Valid, bounded `http:` and `https:` targets become real OOXML hyperlinks whose visible text contains the label and canonical target. Surrounding text and punctuation remain ordinary runs. Invalid, overlong, local, UNC/device, `file:`, `javascript:`, `data:`, and other unsupported targets remain labelled, non-clickable text. Creating or opening a DOCX never downloads the target.
 

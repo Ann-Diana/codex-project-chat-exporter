@@ -80,7 +80,7 @@ Choose one profile:
 - **Readable** (`--profile readable`): deduplicated `assets/`, Markdown transcripts and both indexes plus `manifest.json` and `README.txt`, without new Raw snapshots.
 - **Source snapshots** (`--profile source-snapshots`): `raw/` checked at export time, deduplicated `assets/`, a reduced `index.html`, `manifest.json`, and `README.txt`, without Markdown transcripts or `index.md`.
 
-All reading formats use one record-selection policy. Tool-only images follow `--include-tools`; structurally paired user/tool mirrors render once; equal images in separate genuine turns remain separate uses. Stored compaction images without a visible original appear under `Additional stored context`.
+All reading formats use one record-selection policy. Tool-only images follow `--include-tools`; structurally paired user/tool mirrors render once; equal images in separate genuine turns remain separate uses. **Readable** suppresses every `replacement_history` record from its derived views without changing the source. **Complete** retains unmatched compaction images under `Additional stored context` alongside the unchanged Raw snapshot.
 
 Use **Readable** for browsing and searching exported transcripts. **Complete** and **Source snapshots** can be substantially larger and slower because they copy Raw JSONL and verify it with SHA-256.
 

@@ -602,7 +602,7 @@ async function runCommandInternal(context, { print, profiler, runState }) {
   diagnosticReporter("assets_start", { sessions: tasks.length });
   for (const task of tasks) {
     const parsePath = copyRaw ? path.join(outputDir, task.rawRel) : task.meta.file;
-    task.assetSnapshot = await collectSessionAssets(parsePath, task.parsedSnapshotMeta?.id || task.meta.id || task.meta.session_id, assetStore, context.includeTools, context.readerImplementation, context.readerOptions);
+    task.assetSnapshot = await collectSessionAssets(parsePath, task.parsedSnapshotMeta?.id || task.meta.id || task.meta.session_id, assetStore, context.exportProfile, context.includeTools, context.readerImplementation, context.readerOptions);
     const expectedSha256 = copyRaw ? task.snapshot?.sha256 : task.meta.fileSha256;
     if (expectedSha256 && task.assetSnapshot.sha256 !== expectedSha256) throw new ExportError("SOURCE_CHANGED_DURING_EXPORT", "Session content changed before its assets were collected");
   }
@@ -1117,10 +1117,13 @@ async function assertDiscoveryMetadataUnchanged(meta, abortSignal) {
   }
 }
 
-async function collectSessionAssets(file, sessionId, assetStore, includeTools, readerImplementation, readerOptions = {}) {
+async function collectSessionAssets(file, sessionId, assetStore, exportProfile, includeTools, readerImplementation, readerOptions = {}) {
   const summary = createSessionReaderSummary();
   const classifier = createSessionEventClassifier();
-  const readingSelection = new ReadingAssetSelection({ includeTools });
+  const readingSelection = new ReadingAssetSelection({
+    includeReplacementHistory: exportProfile !== EXPORT_PROFILE.READABLE,
+    includeTools,
+  });
   for await (const _record of streamSessionRecords(file, {
     ...readerOptions,
     calculateSha256: true,
@@ -3189,7 +3192,7 @@ async function writeIndexFiles(dir, rows, profiler = null, context, sourceProtec
   }
   profiler?.addPhase("indexes", performance.now() - indexStart, 0, indexBytes);
   diagnosticReporter("index_end", { duration_ms: roundMs(performance.now() - indexStart), bytes_written: indexBytes });
-  const manifest = `${JSON.stringify({ archive_format_version: ARCHIVE_FORMAT_VERSION, canonical_representation: "raw_jsonl", canonical_representation_included: copyRaw, export_profile: exportProfile, formats: exportFormats, include_tools: Boolean(includeTools), generated_at: generatedAt, codex_home: codexHome, sessions_dir: sessionsDir, archived_sessions_dir: includeArchived ? archivedSessionsDir : "", session_index: sessionIndexPath, path_style: pathStyle, assets_manifest: ASSET_MANIFEST_PATH, asset_occurrences: assetSummary.assetOccurrences, unique_assets: assetSummary.uniqueAssets, unique_asset_bytes: assetSummary.uniqueAssetBytes, deduplicated_asset_bytes_saved: assetSummary.deduplicatedBytesSaved, sessions: rows }, null, 2)}\n`;
+  const manifest = `${JSON.stringify({ archive_format_version: ARCHIVE_FORMAT_VERSION, canonical_representation: "raw_jsonl", canonical_representation_included: copyRaw, export_profile: exportProfile, formats: exportFormats, include_tools: Boolean(includeTools), replacement_history_in_reading_views: exportProfile !== EXPORT_PROFILE.READABLE, replacement_history_source_unchanged: true, generated_at: generatedAt, codex_home: codexHome, sessions_dir: sessionsDir, archived_sessions_dir: includeArchived ? archivedSessionsDir : "", session_index: sessionIndexPath, path_style: pathStyle, assets_manifest: ASSET_MANIFEST_PATH, asset_occurrences: assetSummary.assetOccurrences, unique_assets: assetSummary.uniqueAssets, unique_asset_bytes: assetSummary.uniqueAssetBytes, deduplicated_asset_bytes_saved: assetSummary.deduplicatedBytesSaved, sessions: rows }, null, 2)}\n`;
   return manifest;
 }
 
@@ -3572,6 +3575,8 @@ async function writeSummary(dir, rows, context, sourceProtection, generation, as
   else if (!exportFormats.docx && !exportFormats.pdf) lines.push("- This profile intentionally does not create human-readable session transcripts; attachment provenance still follows the shared streamed reading selection.");
   if (exportFormats.docx) lines.push("- docx/ contains one deterministic, classified DOCX reading view per exported session.");
   if (exportFormats.pdf) lines.push("- pdf/ contains one deterministic, classified PDF reading view per exported session.");
+  if (exportProfile === EXPORT_PROFILE.READABLE) lines.push("- replacement_history records and history-only assets are omitted from derived reading views; source session bytes remain unchanged.");
+  else lines.push("- Unmatched replacement_history assets appear once under Additional stored context; source and Raw session bytes remain unchanged.");
   if (copyRaw) lines.push("- raw/ contains canonical byte-preserving session JSONL snapshots.");
   else lines.push("- This profile does not include canonical raw JSONL snapshots.");
   lines.push("- assets/ contains content-addressed decoded attachments selected for reading views; assets/manifest.json records validated types, provenance, visibility, and verified mirrors.");

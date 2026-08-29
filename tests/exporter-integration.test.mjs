@@ -138,6 +138,8 @@ assert.equal(manifest.unique_asset_bytes, 17);
 assert.equal(manifest.deduplicated_asset_bytes_saved, 0);
 assert.equal(manifest.formats.attachments, true);
 assert.equal(manifest.include_tools, false);
+assert.equal(manifest.replacement_history_in_reading_views, true);
+assert.equal(manifest.replacement_history_source_unchanged, true);
 const assetsManifest = JSON.parse(await fs.readFile(path.join(outputDir, manifest.assets_manifest), "utf8"));
 assert.equal(assetsManifest.schema_version, 2);
 assert.equal(assetsManifest.hash_algorithm, "sha256");

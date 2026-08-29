@@ -40,6 +40,8 @@ The manifest describes archive membership and source mapping. It is not an authe
   "formats": { "raw": true, "markdown": true, "html": true, "docx": false, "pdf": false, "attachments": true },
   "assets_manifest": "assets/manifest.json",
   "include_tools": false,
+  "replacement_history_in_reading_views": false,
+  "replacement_history_source_unchanged": true,
   "asset_occurrences": 2,
   "unique_assets": 1,
   "unique_asset_bytes": 68
@@ -58,6 +60,8 @@ Relevant top-level fields include:
 - `path_style`: `short` or `readable`.
 - `assets_manifest`: the canonical export-relative `assets/manifest.json` path.
 - `include_tools`: the effective tool-record selection used by all derived reading views.
+- `replacement_history_in_reading_views`: whether `replacement_history` may contribute the labelled `Additional stored context` area. It is `false` for Readable and `true` for Complete and Source snapshots.
+- `replacement_history_source_unchanged`: always `true`; profile filtering changes only derived views and selected derived assets, never source or Raw JSONL bytes.
 - `asset_occurrences`, `unique_assets`, and `unique_asset_bytes`: aggregate decoded-asset counts and unique-byte volume. `deduplicated_asset_bytes_saved` additionally reports repeated occurrence bytes not stored again.
 - `sessions`: ordered exported-session metadata.
 
@@ -214,7 +218,7 @@ Markdown includes:
 - labelled subagent inputs, runtime contexts, and unclassified user-role records;
 - tool calls and tool outputs only when explicitly enabled.
 
-Attachments follow the same record selection. Verified user-event and browser/tool-result mirrors render once. `replacement_history` copies of visible messages are not repeated; unmatched stored images appear in a labelled `Additional stored context` section rather than as ordinary turns.
+Attachments follow the same record selection. Verified user-event and browser/tool-result mirrors render once. Readable suppresses every `replacement_history` occurrence from Markdown, HTML, DOCX, and PDF, including history-only assets. Complete retains unmatched history images once in a labelled `Additional stored context` section rather than as ordinary turns. Source snapshots preserve their existing forensic stored-context behavior. Source and Raw JSONL bytes are never changed by this policy.
 
 Reasoning, internal events, invalid JSON lines, and other event types remain available only in raw JSONL unless separately rendered. Markdown masking is best effort and does not make the view safe to share.
 

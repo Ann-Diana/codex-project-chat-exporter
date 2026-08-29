@@ -146,6 +146,8 @@ test("version 0.3.0 reference and streaming readers preserve all profile golden 
       assert.equal(manifest.unique_assets, 1);
       assert.equal(manifest.unique_asset_bytes, Buffer.from(SMALL_PNG_DATA_URL.slice(SMALL_PNG_DATA_URL.indexOf(",") + 1), "base64").length);
       assert.equal(manifest.formats.attachments, true);
+      assert.equal(manifest.replacement_history_in_reading_views, profile !== "readable");
+      assert.equal(manifest.replacement_history_source_unchanged, true);
       const assetManifest = JSON.parse(await fs.readFile(path.join(outputDir, manifest.assets_manifest), "utf8"));
       assert.equal(assetManifest.assets.length, 1);
       assert.equal(assetManifest.assets[0].uses.length, 2);

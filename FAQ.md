@@ -186,7 +186,7 @@ Search transcript content in the exported Markdown files with your editor, opera
 
 ## Are image attachments exported?
 
-Embedded Base64 attachments selected by the shared reading-view policy are decoded into the export-local deduplicated `assets/` store. PNG, JPEG, GIF, and WebP content that passes bounded header validation is rendered through relative reading-view links. Tool-only images require **Include Tools**; verified mirrored records render once, while identical images in independent turns remain independent uses. Unmatched `replacement_history` images appear under `Additional stored context`. Unknown, truncated, SVG, HTML, or MIME-spoofed selected content is retained as a non-renderable `.bin` link. Local-path and remote references are not copied or downloaded. When Raw export is enabled, canonical JSONL still preserves the original attachment representation.
+Embedded Base64 attachments selected by the shared reading-view policy are decoded into the export-local deduplicated `assets/` store. PNG, JPEG, GIF, and WebP content that passes bounded header validation is rendered through relative reading-view links. Tool-only images require **Include Tools**; verified mirrored records render once, while identical images in independent turns remain independent uses. **Readable** omits `replacement_history` records and assets from every derived reading view. **Complete** places unmatched history images under `Additional stored context`; its Raw JSONL remains unchanged. Unknown, truncated, SVG, HTML, or MIME-spoofed selected content is retained as a non-renderable `.bin` link. Local-path and remote references are not copied or downloaded.
 
 ## Can this restore sessions into Codex on another computer?
 

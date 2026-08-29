@@ -38,6 +38,7 @@ function pngWithTextChunk(base64) {
 }
 
 const PNG_D = pngWithTextChunk(PNG_A);
+const PNG_E = pngWithTextChunk(PNG_B);
 
 const dataUrl = (base64) => `data:image/png;base64,${base64}`;
 const sha256 = (base64) => createHash("sha256").update(Buffer.from(base64, "base64")).digest("hex");
@@ -50,7 +51,7 @@ async function writeFixture(codexHome) {
   const file = path.join(directory, `rollout-2026-08-29T10-00-00-${sessionId}.jsonl`);
   const directOne = [{ type: "input_text", text: "First image turn." }, { type: "input_image", image_url: dataUrl(PNG_A) }];
   const directTwo = [{ type: "input_text", text: "Second image turn." }, { type: "input_image", image_url: dataUrl(PNG_A) }];
-  const storedOnly = [{ type: "input_text", text: "Stored context image." }, { type: "input_image", image_url: dataUrl(PNG_A) }];
+  const storedOnly = [{ type: "input_text", text: "Stored context image." }, { type: "input_image", image_url: dataUrl(PNG_E) }];
   const ambiguousRepeated = [{ type: "input_text", text: "Repeated identical turn." }, { type: "input_image", image_url: dataUrl(PNG_A) }];
   const replacementHistory = [
     { type: "message", role: "user", content: directOne },
@@ -76,34 +77,38 @@ async function writeFixture(codexHome) {
     { type: "compacted", timestamp: "2026-08-29T10:00:08.000Z", payload: { message: "compacted again", replacement_history: replacementHistory } },
     { type: "response_item", timestamp: "2026-08-29T10:00:09.000Z", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "Done." }] } },
   ];
-  await fs.writeFile(file, `${items.map(item => JSON.stringify(item)).join("\n")}\n`, "utf8");
-  return { sessionId };
+  const rawBytes = Buffer.from(`${items.map(item => JSON.stringify(item)).join("\n")}\n`, "utf8");
+  await fs.writeFile(file, rawBytes);
+  return { rawBytes, sessionId };
 }
 
-async function inspectExport(output, result, includeTools, documentFormat) {
+async function inspectExport(output, result, exportProfile, includeTools, documentFormat, rawBytes) {
   const rootManifest = JSON.parse(await fs.readFile(result.manifestPath, "utf8"));
   const assetManifest = JSON.parse(await fs.readFile(result.assetManifestPath, "utf8"));
   const session = rootManifest.sessions[0];
   const markdown = await fs.readFile(path.join(output, session.markdown_file), "utf8");
   const html = await fs.readFile(result.htmlIndexPath, "utf8");
-  const expectedVisible = includeTools ? 10 : 7;
-  const expectedUnique = includeTools ? 4 : 2;
+  const includeStoredContext = exportProfile === "complete";
+  const expectedVisible = (includeTools ? 8 : 5) + (includeStoredContext ? 2 : 0);
+  const expectedUnique = (includeTools ? 4 : 2) + (includeStoredContext ? 1 : 0);
 
   assert.equal(rootManifest.include_tools, includeTools);
+  assert.equal(rootManifest.replacement_history_in_reading_views, includeStoredContext);
+  assert.equal(rootManifest.replacement_history_source_unchanged, true);
   assert.equal(assetManifest.schema_version, 2);
   assert.equal(rootManifest.unique_assets, expectedUnique);
   assert.equal(count(markdown, "![Attachment "), expectedVisible);
   assert.equal(count(html, "<img "), expectedVisible);
-  assert.equal(count(markdown, "## Additional stored context"), 1);
-  assert.equal(count(html, "<summary>Additional stored context</summary>"), 1);
+  assert.equal(count(markdown, "## Additional stored context"), includeStoredContext ? 1 : 0);
+  assert.equal(count(html, "<summary>Additional stored context</summary>"), includeStoredContext ? 1 : 0);
   if (documentFormat === "docx") {
     const docx = await JSZip.loadAsync(await fs.readFile(path.join(output, session.docx_file)), { checkCRC32: true });
     const documentXml = await docx.file("word/document.xml").async("string");
     const media = Object.keys(docx.files).filter(name => name.startsWith("word/media/") && !docx.files[name].dir);
     assert.equal(count(documentXml, "<a:blip"), expectedVisible);
     assert.equal(media.length, expectedUnique);
-    assert.equal(count(documentXml, "Additional stored context"), 1);
-    assert.equal(count(documentXml, "Attachments retained in session replacement history"), 1);
+    assert.equal(count(documentXml, "Additional stored context"), includeStoredContext ? 1 : 0);
+    assert.equal(count(documentXml, "Attachments retained in session replacement history"), includeStoredContext ? 1 : 0);
   }
 
   const requiredUseKeys = ["role", "record_type", "content_type", "timestamp", "classification", "tool_origin", "mirror_kind", "canonical_record_ordinal", "canonical_attachment_ordinal", "reading_disposition"];
@@ -113,13 +118,20 @@ async function inspectExport(output, result, includeTools, documentFormat) {
   const assetB = assetManifest.assets.find(asset => asset.sha256 === sha256(PNG_B));
   const assetC = assetManifest.assets.find(asset => asset.sha256 === sha256(PNG_C));
   const assetD = assetManifest.assets.find(asset => asset.sha256 === sha256(PNG_D));
+  const assetE = assetManifest.assets.find(asset => asset.sha256 === sha256(PNG_E));
   assert.ok(assetA && assetC);
   assert.equal(assetA.uses.filter(use => use.reading_disposition === "VISIBLE").length, 4, "identical bytes in genuine turns remain separate displays");
-  assert.equal(assetA.uses.filter(use => use.reading_disposition === "ADDITIONAL_STORED_CONTEXT").length, 2);
+  assert.equal(assetA.uses.filter(use => use.reading_disposition === "ADDITIONAL_STORED_CONTEXT").length, includeStoredContext ? 1 : 0);
   assert.equal(assetA.uses.filter(use => use.mirror_kind === "USER_EVENT").length, 2);
-  assert.equal(assetA.uses.filter(use => use.mirror_kind === "REPLACEMENT_HISTORY").length, 4);
-  const ambiguousAdditional = assetA.uses.filter(use => use.classification === "ADDITIONAL_STORED_CONTEXT");
-  assert.equal(ambiguousAdditional.length, 2, "an incomplete history cannot choose arbitrarily between identical genuine turns");
+  assert.equal(assetA.uses.filter(use => use.mirror_kind === "REPLACEMENT_HISTORY").length, includeStoredContext ? 3 : 2);
+  assert.equal(assetA.uses.filter(use => use.classification === "REPLACEMENT_HISTORY_SUPPRESSED").length, includeStoredContext ? 0 : 2);
+  if (includeStoredContext) {
+    assert.ok(assetE, "Complete must retain a replacement-history-only asset");
+    assert.equal(assetE.uses.filter(use => use.reading_disposition === "ADDITIONAL_STORED_CONTEXT").length, 1);
+    assert.equal(assetE.uses.filter(use => use.mirror_kind === "REPLACEMENT_HISTORY").length, 1);
+  } else {
+    assert.equal(assetE, undefined, "Readable must not publish a replacement-history-only asset");
+  }
   assert.equal(assetC.uses.some(use => use.tool_origin === "VIEW_IMAGE" && use.reading_disposition === (includeTools ? "VISIBLE" : "EXCLUDED")), true);
   assert.equal(assetC.uses.some(use => use.role === "USER" && use.classification === "UNCLASSIFIED_USER_ROLE_RECORD" && use.reading_disposition === "VISIBLE"), true);
   if (includeTools) {
@@ -141,34 +153,39 @@ async function inspectExport(output, result, includeTools, documentFormat) {
     const pdfPath = path.join(output, session.pdf_file);
     try {
       const { stdout } = await execFileAsync("pdftotext", [pdfPath, "-"]);
-      assert.equal(count(stdout, `${sha256(PNG_A)}.png`), 6);
+      assert.equal(count(stdout, `${sha256(PNG_A)}.png`), includeStoredContext ? 5 : 4);
       assert.equal(count(stdout, `${sha256(PNG_B)}.png`), includeTools ? 1 : 0);
       assert.equal(count(stdout, `${sha256(PNG_C)}.png`), includeTools ? 2 : 1);
       assert.equal(count(stdout, `${sha256(PNG_D)}.png`), includeTools ? 1 : 0);
-      assert.equal(count(stdout, "Additional stored context"), 1);
+      assert.equal(count(stdout, `${sha256(PNG_E)}.png`), includeStoredContext ? 1 : 0);
+      assert.equal(count(stdout, "Additional stored context"), includeStoredContext ? 1 : 0);
     } catch (error) {
       if (error?.code !== "ENOENT") throw error;
     }
   }
 }
 
-test("all reading views share canonical image selection, mirror handling, and additional stored context semantics", async () => {
+test("Readable suppresses replacement history while Complete retains labelled stored context across every reading view", async () => {
   const temp = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "reading-assets-")));
   try {
     const codexHome = path.join(temp, ".codex");
-    await writeFixture(codexHome);
-    for (const includeTools of [false, true]) {
-      for (const documentFormat of ["docx", "pdf"]) {
-        const output = path.join(temp, `${includeTools ? "with" : "without"}-tools-${documentFormat}`);
-        const result = await exportArchive({
-          codexHome,
-          scope: "all",
-          outputDirectory: output,
-          exportProfile: "readable",
-          includeTools,
-          documentFormats: [documentFormat],
-        });
-        await inspectExport(output, result, includeTools, documentFormat);
+    const { rawBytes } = await writeFixture(codexHome);
+    for (const exportProfile of ["readable", "complete"]) {
+      for (const includeTools of [false, true]) {
+        for (const documentFormat of ["docx", "pdf"]) {
+          const output = path.join(temp, `${exportProfile}-${includeTools ? "with" : "without"}-tools-${documentFormat}`);
+          const result = await exportArchive({
+            codexHome,
+            scope: "all",
+            outputDirectory: output,
+            exportProfile,
+            includeTools,
+            documentFormats: [documentFormat],
+          });
+          await inspectExport(output, result, exportProfile, includeTools, documentFormat, rawBytes);
+          const rootManifest = JSON.parse(await fs.readFile(result.manifestPath, "utf8"));
+          if (exportProfile === "complete") assert.deepEqual(await fs.readFile(path.join(output, rootManifest.sessions[0].raw_export_file)), rawBytes);
+        }
       }
     }
   } finally {
