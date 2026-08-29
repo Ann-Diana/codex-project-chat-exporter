@@ -39,6 +39,7 @@ import {
   validateCanonicalPdfFile,
 } from "../lib/pdf-renderer.mjs";
 import { extractReadingText } from "../lib/reading-content.mjs";
+import { streamJsonlTokens } from "../lib/jsonl-token-adapter.mjs";
 
 const VERSION = "0.3.0";
 const ARCHIVE_FORMAT_VERSION = 1;
@@ -154,6 +155,7 @@ async function main() {
 }
 
 async function exportArchive(options = {}) {
+  const scope = options.scope || (options.workspacePath ? "project" : "all");
   const context = createExportContext(argsFromExportOptions(options), options.cwd || process.cwd(), {
     onProgress: options.onProgress,
     progressThrottleMs: options.progressThrottleMs,
@@ -163,7 +165,7 @@ async function exportArchive(options = {}) {
     assetStoreOptions: options._assetStoreOptions,
     docxOptions: options._docxOptions,
     pdfOptions: options._pdfOptions,
-    exactWorkspacePath: typeof options.workspacePath === "string",
+    exactWorkspacePath: scope === "project" && typeof options.workspacePath === "string",
     onSelectRecordedProject: options.onSelectRecordedProject,
     abortSignal: options.abortSignal,
   });
@@ -234,6 +236,7 @@ function createExportContext(args = {}, cwd = process.cwd(), runtimeOptions = {}
     exportAll,
     recordedProjectSelection,
     exactProjectMatch: recordedProjectSelection || runtimeOptions.exactWorkspacePath === true,
+    exactWorkspacePath: runtimeOptions.exactWorkspacePath === true,
     onSelectRecordedProject: runtimeOptions.onSelectRecordedProject,
     abortSignal: runtimeOptions.abortSignal,
     includeTools: Boolean(args["include-tools"]),
@@ -474,7 +477,9 @@ async function runCommandInternal(context, { print, profiler, runState }) {
   }
 
   let exactSelection = !exportAll && context.exactProjectMatch;
-  let selected = metas.filter((meta) => exportAll || (projectFilter && (exactSelection ? meta.cwd === projectFilter : matchesProject(meta.cwd, projectFilter))));
+  let selected = metas.filter((meta) => exportAll || (projectFilter && (context.exactWorkspacePath
+    ? sameRecordedPathIdentity(meta.cwd, projectFilter)
+    : exactSelection ? meta.cwd === projectFilter : matchesProject(meta.cwd, projectFilter))));
   const requestedSelection = context.recordedProjectSelection && !projectFilter;
   if ((requestedSelection || !selected.length) && typeof context.onSelectRecordedProject === "function") {
     const projects = recordedProjectInventory(metas);
@@ -896,32 +901,86 @@ async function readSessionMeta(file, {
   return meta;
 }
 
-const DISCOVERY_RECORD_MAX_BYTES = 1024 * 1024;
+const DISCOVERY_RECORD_MAX_BYTES = 16 * 1024 * 1024;
 const DISCOVERY_TYPE_PROBE_MAX_BYTES = 64 * 1024;
 // Type probing stays small so a non-metadata first record stops immediately.
-// Confirmed metadata is streamed in larger blocks; at most 4095 bytes beyond
-// its newline can enter the read buffer, and those bytes are never parsed,
-// retained, hashed, or exposed as metadata.
+// Confirmed metadata is tokenized from a bounded first-record stream without
+// retaining unrelated fields. At most 4095 bytes beyond its newline can enter
+// the read buffer, and those bytes are never tokenized, hashed, or exposed.
 const DISCOVERY_TYPE_READ_CHUNK_BYTES = 64;
 const DISCOVERY_METADATA_READ_CHUNK_BYTES = 4096;
+const DISCOVERY_FIELD_LIMITS = Object.freeze({
+  type: 64,
+  "payload.cwd": 32 * 1024,
+  "payload.id": 4 * 1024,
+  "payload.session_id": 4 * 1024,
+  "payload.timestamp": 256,
+  "payload.source": 4 * 1024,
+  "payload.thread_source": 4 * 1024,
+  "payload.parent_thread_id": 4 * 1024,
+});
 
 async function readSessionDiscoveryMeta(file, { abortSignal, maxRecordBytes = DISCOVERY_RECORD_MAX_BYTES, io = {} } = {}) {
+  if (!Number.isSafeInteger(maxRecordBytes) || maxRecordBytes <= 0) throw new TypeError("maxRecordBytes must be a positive safe integer");
   throwIfExportAborted(abortSignal);
   const before = await (io.stat || fsp.stat)(file, { bigint: true });
   throwIfExportAborted(abortSignal);
   const beforeIdentity = reliableFileIdentity(before);
   if (!before.isFile() || !beforeIdentity) throw new ExportError("UNSAFE_SESSION_SOURCE", "Session discovery requires a regular source with reliable identity");
+  const probe = await probeDiscoveryRecordType(file, { abortSignal, io });
+  throwIfExportAborted(abortSignal);
+  const metadataTypeConfirmed = probe.type.status === "FOUND" && ["session_meta", "turn_context"].includes(probe.type.value);
+  const streamed = metadataTypeConfirmed
+    ? await streamDiscoveryRecordFields(file, { abortSignal, maxRecordBytes, io })
+    : null;
+  throwIfExportAborted(abortSignal);
+  const after = await (io.stat || fsp.stat)(file, { bigint: true });
+  if (reliableFileIdentity(after) !== beforeIdentity || before.size !== after.size || before.mtimeNs !== after.mtimeNs) {
+    throw new ExportError("SOURCE_CHANGED_DURING_EXPORT", "Session metadata changed while it was discovered");
+  }
+  const filenameId = extractSessionIdFromFilename(file);
+  const fields = streamed?.fields || null;
+  const firstRecordSha256 = streamed?.firstRecordSha256 || probe.firstRecordPrefixSha256;
+  const payloadId = fields?.type === "session_meta" ? fields.id || fields.sessionId || "" : "";
+  const fallbackId = `metadata-${firstRecordSha256.slice(0, 16)}`;
+  return {
+    file,
+    id: filenameId || payloadId || fallbackId,
+    session_id: filenameId || fields?.sessionId || payloadId || fallbackId,
+    idSource: filenameId ? "filename" : (payloadId ? "session_meta" : "metadata_fallback"),
+    metadataId: payloadId,
+    metadataIdMismatch: Boolean(filenameId && payloadId && filenameId !== payloadId),
+    cwd: fields?.cwd || "",
+    timestamp: fields?.timestamp || new Date(Number(before.mtimeMs)).toISOString(),
+    recordedLastSessionAt: fields?.timestamp || "",
+    source: fields?.source || "",
+    threadSource: fields?.threadSource || "",
+    parentThreadId: fields?.parentThreadId || "",
+    hasSessionMeta: fields?.type === "session_meta",
+    fileSize: Number(before.size),
+    discoverySnapshot: Object.freeze({
+      bytesRead: probe.bytesRead + (streamed?.bytesRead || 0),
+      firstRecordSizeBytes: streamed?.firstRecordSizeBytes ?? probe.prefixSizeBytes,
+      firstRecordTruncated: streamed?.truncated === true,
+      firstRecordSha256,
+      identity: beforeIdentity,
+      sizeBytes: Number(before.size),
+      mtimeNs: before.mtimeNs.toString(),
+    }),
+  };
+}
+
+async function probeDiscoveryRecordType(file, { abortSignal, io }) {
   const handle = await (io.open || fsp.open)(file, "r");
+  const chunks = [];
+  let prefixSizeBytes = 0;
   let bytesRead = 0;
-  let recordBytes = Buffer.alloc(0);
+  let position = 0;
+  let type = { status: "UNCERTAIN", value: "" };
   try {
-    const chunks = [];
-    let recordLength = 0;
-    let position = 0;
-    let metadataTypeConfirmed = false;
-    while (true) {
+    while (prefixSizeBytes <= DISCOVERY_TYPE_PROBE_MAX_BYTES) {
       throwIfExportAborted(abortSignal);
-      const buffer = Buffer.allocUnsafe(metadataTypeConfirmed ? DISCOVERY_METADATA_READ_CHUNK_BYTES : DISCOVERY_TYPE_READ_CHUNK_BYTES);
+      const buffer = Buffer.allocUnsafe(DISCOVERY_TYPE_READ_CHUNK_BYTES);
       const result = await handle.read(buffer, 0, buffer.length, position);
       if (!result.bytesRead) break;
       bytesRead += result.bytesRead;
@@ -929,68 +988,122 @@ async function readSessionDiscoveryMeta(file, { abortSignal, maxRecordBytes = DI
       const chunk = buffer.subarray(0, result.bytesRead);
       const newline = chunk.indexOf(0x0a);
       const part = newline >= 0 ? chunk.subarray(0, newline) : chunk;
-      const remaining = maxRecordBytes - recordLength;
-      const retainedPart = part.subarray(0, Math.max(0, remaining));
-      chunks.push(Buffer.from(retainedPart));
-      recordLength += retainedPart.length;
-      if (!metadataTypeConfirmed) {
-        if (recordLength > DISCOVERY_TYPE_PROBE_MAX_BYTES) break;
-        const probe = Buffer.concat(chunks, recordLength).toString("utf8");
-        const prefixType = readTopLevelJsonEventTypePrefix(probe.charCodeAt(0) === 0xfeff ? probe.slice(1) : probe);
-        if (prefixType.status === "FOUND") {
-          if (!["session_meta", "turn_context"].includes(prefixType.value)) break;
-          metadataTypeConfirmed = true;
-        }
-      }
-      if (part.length > retainedPart.length || recordLength === maxRecordBytes) break;
-      if (newline >= 0) break;
+      chunks.push(Buffer.from(part));
+      prefixSizeBytes += part.length;
+      const probeText = Buffer.concat(chunks, prefixSizeBytes).toString("utf8");
+      type = readTopLevelJsonEventTypePrefix(probeText.charCodeAt(0) === 0xfeff ? probeText.slice(1) : probeText);
+      if (type.status === "FOUND" || newline >= 0 || prefixSizeBytes > DISCOVERY_TYPE_PROBE_MAX_BYTES) break;
     }
-    recordBytes = Buffer.concat(chunks, recordLength);
   } finally {
     await handle.close();
   }
-  throwIfExportAborted(abortSignal);
-  if (recordBytes.at(-1) === 0x0d) recordBytes = recordBytes.subarray(0, recordBytes.length - 1);
-  let item;
-  try {
-    const text = new TextDecoder("utf-8", { fatal: true }).decode(recordBytes);
-    const normalized = text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
-    const eventType = readTopLevelJsonEventType(normalized);
-    item = eventType.status === "FOUND" && ["session_meta", "turn_context"].includes(eventType.value) ? JSON.parse(normalized) : null;
-  } catch { item = null; }
-  const after = await (io.stat || fsp.stat)(file, { bigint: true });
-  if (reliableFileIdentity(after) !== beforeIdentity || before.size !== after.size || before.mtimeNs !== after.mtimeNs) {
-    throw new ExportError("SOURCE_CHANGED_DURING_EXPORT", "Session metadata changed while it was discovered");
+  const prefixBytes = Buffer.concat(chunks, prefixSizeBytes);
+  return { bytesRead, firstRecordPrefixSha256: createHash("sha256").update(prefixBytes).digest("hex"), prefixSizeBytes, type };
+}
+
+async function streamDiscoveryRecordFields(file, { abortSignal, maxRecordBytes, io }) {
+  const handle = await (io.open || fsp.open)(file, "r");
+  const state = { bytesRead: 0, firstRecordSizeBytes: 0, firstChunk: true, inputError: null, truncated: false };
+  const firstRecordHash = createHash("sha256");
+  async function* firstRecordChunks() {
+    let position = 0;
+    try {
+      while (true) {
+        throwIfExportAborted(abortSignal);
+        const buffer = Buffer.allocUnsafe(DISCOVERY_METADATA_READ_CHUNK_BYTES);
+        let result;
+        try { result = await handle.read(buffer, 0, buffer.length, position); }
+        catch (error) { state.inputError = error; throw error; }
+        if (!result.bytesRead) return;
+        state.bytesRead += result.bytesRead;
+        position += result.bytesRead;
+        const chunk = buffer.subarray(0, result.bytesRead);
+        const newline = chunk.indexOf(0x0a);
+        const part = newline >= 0 ? chunk.subarray(0, newline) : chunk;
+        const remaining = maxRecordBytes - state.firstRecordSizeBytes;
+        if (part.length > remaining) {
+          const retained = part.subarray(0, Math.max(0, remaining));
+          if (retained.length) {
+            firstRecordHash.update(retained);
+            state.firstRecordSizeBytes += retained.length;
+            yield state.firstChunk && retained.subarray(0, 3).equals(Buffer.from([0xef, 0xbb, 0xbf])) ? retained.subarray(3) : retained;
+          }
+          state.truncated = true;
+          return;
+        }
+        firstRecordHash.update(part);
+        state.firstRecordSizeBytes += part.length;
+        const tokenBytes = state.firstChunk && part.subarray(0, 3).equals(Buffer.from([0xef, 0xbb, 0xbf])) ? part.subarray(3) : part;
+        state.firstChunk = false;
+        if (tokenBytes.length) yield tokenBytes;
+        if (newline >= 0) return;
+      }
+    } finally {
+      await handle.close();
+    }
   }
-  const filenameId = extractSessionIdFromFilename(file);
-  const firstRecordSha256 = createHash("sha256").update(recordBytes).digest("hex");
-  const payload = item?.type === "session_meta" && item.payload && typeof item.payload === "object" ? item.payload : null;
-  const routingPayload = (item?.type === "session_meta" || item?.type === "turn_context") && item.payload && typeof item.payload === "object" ? item.payload : null;
-  const payloadId = payload?.id || payload?.session_id || "";
-  const fallbackId = `metadata-${firstRecordSha256.slice(0, 16)}`;
+
+  let fields = null;
+  try {
+    fields = await collectDiscoveryFields(streamJsonlTokens(firstRecordChunks(), { maxStringChunkChars: 256 }), abortSignal);
+  } catch (error) {
+    throwIfExportAborted(abortSignal);
+    if (state.inputError) throw state.inputError;
+    fields = null;
+  }
   return {
-    file,
-    id: filenameId || payloadId || fallbackId,
-    session_id: filenameId || payload?.session_id || payloadId || fallbackId,
-    idSource: filenameId ? "filename" : (payloadId ? "session_meta" : "metadata_fallback"),
-    metadataId: payloadId,
-    metadataIdMismatch: Boolean(filenameId && payloadId && filenameId !== payloadId),
-    cwd: routingPayload?.cwd || "",
-    timestamp: payload?.timestamp || new Date(Number(before.mtimeMs)).toISOString(),
-    recordedLastSessionAt: payload?.timestamp || "",
-    source: payload?.source || "",
-    threadSource: payload?.thread_source || "",
-    parentThreadId: payload?.parent_thread_id || "",
-    hasSessionMeta: Boolean(payload),
-    fileSize: Number(before.size),
-    discoverySnapshot: Object.freeze({
-      bytesRead,
-      firstRecordSha256,
-      identity: beforeIdentity,
-      sizeBytes: Number(before.size),
-      mtimeNs: before.mtimeNs.toString(),
-    }),
+    bytesRead: state.bytesRead,
+    fields: state.truncated ? null : fields,
+    firstRecordSha256: firstRecordHash.digest("hex"),
+    firstRecordSizeBytes: state.firstRecordSizeBytes,
+    truncated: state.truncated,
   };
+}
+
+async function collectDiscoveryFields(tokens, abortSignal) {
+  const values = new Map(Object.keys(DISCOVERY_FIELD_LIMITS).map((field) => [field, []]));
+  const keyCounts = new Map(Object.keys(DISCOVERY_FIELD_LIMITS).map((field) => [field, 0]));
+  let payloadKeyCount = 0;
+  let payloadObjectCount = 0;
+  let active = null;
+  for await (const token of tokens) {
+    throwIfExportAborted(abortSignal);
+    if (token.recordIndex !== 1) break;
+    const field = discoveryFieldForPath(token.path);
+    if (token.type === "key" && field) keyCounts.set(field, keyCounts.get(field) + 1);
+    if (token.type === "key" && token.path.length === 1 && token.path[0] === "payload") payloadKeyCount += 1;
+    if (token.type === "object_start" && token.path.length === 1 && token.path[0] === "payload") payloadObjectCount += 1;
+    if (token.type === "string_start" && field) active = { field, length: 0, overflow: false, parts: [] };
+    else if (token.type === "string_chunk" && active?.field === field) {
+      active.length += token.value.length;
+      if (active.length > DISCOVERY_FIELD_LIMITS[field]) active.overflow = true;
+      else active.parts.push(token.value);
+    } else if (token.type === "string_end" && active?.field === field) {
+      values.get(field).push(active.overflow ? null : active.parts.join(""));
+      active = null;
+    }
+    if (token.type === "record_end") break;
+  }
+  const single = (field) => keyCounts.get(field) === 1 && values.get(field).length === 1 ? values.get(field)[0] : null;
+  const type = single("type");
+  if (!["session_meta", "turn_context"].includes(type) || payloadKeyCount !== 1 || payloadObjectCount !== 1) return null;
+  return {
+    type,
+    cwd: single("payload.cwd") || "",
+    id: single("payload.id") || "",
+    sessionId: single("payload.session_id") || "",
+    timestamp: single("payload.timestamp") || "",
+    source: single("payload.source") || "",
+    threadSource: single("payload.thread_source") || "",
+    parentThreadId: single("payload.parent_thread_id") || "",
+  };
+}
+
+function discoveryFieldForPath(tokenPath) {
+  if (tokenPath.length === 1 && tokenPath[0] === "type") return "type";
+  if (tokenPath.length !== 2 || tokenPath[0] !== "payload") return "";
+  const field = `payload.${tokenPath[1]}`;
+  return Object.hasOwn(DISCOVERY_FIELD_LIMITS, field) ? field : "";
 }
 
 async function assertDiscoveryMetadataUnchanged(meta, abortSignal) {
@@ -2585,6 +2698,38 @@ function normalizePathForCompare(value) {
   return process.platform === "win32" ? resolved.toLowerCase() : resolved;
 }
 
+function recordedPathIdentity(value, platform = process.platform) {
+  if (typeof value !== "string" || !value) return "";
+  if (platform !== "win32") return path.posix.isAbsolute(value) ? trimNonRootTrailingSeparators(path.posix.normalize(value), path.posix) : "";
+  let candidate = value.replaceAll("/", "\\");
+  const lowerCandidate = candidate.toLowerCase();
+  if (lowerCandidate.startsWith("\\\\?\\unc\\")) {
+    candidate = `\\\\${candidate.slice(8)}`;
+  } else if (candidate.startsWith("\\\\?\\") && candidate.length >= 7 && candidate[5] === ":" && candidate[6] === "\\" && isAsciiLetter(candidate[4])) {
+    candidate = candidate.slice(4);
+  }
+  if (!path.win32.isAbsolute(candidate)) return "";
+  return trimNonRootTrailingSeparators(path.win32.normalize(candidate), path.win32).toLowerCase();
+}
+
+function trimNonRootTrailingSeparators(value, pathApi) {
+  const root = pathApi.parse(value).root;
+  let end = value.length;
+  while (end > root.length && (value[end - 1] === "/" || value[end - 1] === "\\")) end -= 1;
+  return value.slice(0, end);
+}
+
+function isAsciiLetter(value) {
+  if (typeof value !== "string" || value.length !== 1) return false;
+  const code = value.charCodeAt(0) | 32;
+  return code >= 97 && code <= 122;
+}
+
+function sameRecordedPathIdentity(left, right, platform = process.platform) {
+  const leftIdentity = recordedPathIdentity(left, platform);
+  return Boolean(leftIdentity && leftIdentity === recordedPathIdentity(right, platform));
+}
+
 function isPathInside(candidate, root) {
   const normalizedCandidate = normalizePathForCompare(candidate);
   const normalizedRoot = normalizePathForCompare(root);
@@ -3702,6 +3847,8 @@ export {
   readSessionDiscoveryMeta,
   readSessionRoutingMeta,
   readTopLevelJsonEventType,
+  recordedPathIdentity,
+  sameRecordedPathIdentity,
   inspectUnprefixedEmbeddedImage,
   classifyAttachmentReference,
   resolveExportProfile,

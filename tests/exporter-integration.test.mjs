@@ -581,7 +581,7 @@ for (const event of ["core_start", "discovery_start", "discovery_end", "routing_
   assert.ok(diagnosticEvents.some((entry) => entry.event === event), `diagnostic trace should contain ${event}`);
 }
 assert.equal(diagnosticEvents.filter((event) => event.event === "routing_metadata_end").length, diagnosticEvents.find((event) => event.event === "discovery_end").scanned_sessions, "each scanned source must contribute only first-record routing metadata");
-assert.ok(diagnosticEvents.filter((event) => event.event === "routing_metadata_end").every(event => event.metadata_bytes_read <= 1024 * 1024 + 4095));
+assert.ok(diagnosticEvents.filter((event) => event.event === "routing_metadata_end").every(event => event.metadata_bytes_read <= 16 * 1024 * 1024 + 64 * 1024 + 4095));
 assert.equal(diagnosticEvents.filter((event) => event.event === "source_hash_start").length, sourceSnapshotsManifest.sessions.length, "only selected sources should receive a complete source hash pass");
 assert.equal(diagnosticEvents.filter((event) => event.event === "export_hash_start").length, sourceSnapshotsManifest.sessions.length, "each source snapshot must receive exactly one export hash pass");
 assert.equal(diagnosticEvents.filter((event) => event.event === "verification_hash_start").length, 0, "final verification must not hash Raw snapshots a second time");

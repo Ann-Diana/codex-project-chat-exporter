@@ -132,6 +132,9 @@ function createExtensionAdapter(vscode, injected = {}) {
 
       const config = getConfig();
       const exporter = await deps.loadExporter(context);
+      const sameWorkspaceIdentity = typeof exporter.sameRecordedPathIdentity === "function"
+        ? exporter.sameRecordedPathIdentity
+        : (left, right) => left === right;
       const configuredProfile = resolveConfiguredProfile(explicitProfile);
       const options = {
         scope: scopeOptions.scope,
@@ -162,7 +165,7 @@ function createExtensionAdapter(vscode, injected = {}) {
             project,
           })), { placeHolder: "Choose recorded project path…", matchOnDescription: true, matchOnDetail: true });
           if (!picked || !projects.includes(picked.project)) return null;
-          if (picked.project.cwd !== scopeOptions.workspacePath) {
+          if (!sameWorkspaceIdentity(picked.project.cwd, scopeOptions.workspacePath)) {
             const confirmed = await vscode.window.showWarningMessage(
               `Export all ${picked.project.sessionCount} sessions recorded under ${displayRecordedPath(picked.project.cwd)}? This differs from the current workspace path. Several logically different projects may be mixed under this historical cwd.`,
               { modal: true }, "Export recorded sessions",

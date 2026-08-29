@@ -936,6 +936,20 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
   for (const session of directPdfManifest.sessions) {
     assert.deepEqual(await fsp.readFile(path.join(adapterPdfOutput, session.pdf_file)), await fsp.readFile(path.join(directPdfOutput, session.pdf_file)), "VS Code and direct shared-core PDF bytes must match");
   }
+
+  if (process.platform === "win32") {
+    const identityOutput = path.join(temp, "real-core-workspace-identity-output");
+    const workspaceVariant = `${oneWorkspace[0].toLowerCase()}${oneWorkspace.slice(1)}\\`;
+    const identityFake = createFakeVscode({ workspaceFolders: [folder(workspaceVariant)], config: { outputDirectory: identityOutput, codexHome: realCodexHome } });
+    const identityContext = createContext(temp);
+    let identityOptions;
+    const identityAdapter = createExtensionAdapter(identityFake.vscode, { loadExporter: async () => ({ ...realExporter, exportArchive(options) { identityOptions = options; return realExporter.exportArchive(options); } }) });
+    await identityAdapter.activate(identityContext);
+    const identityResult = await identityAdapter.exportCurrentWorkspace(identityContext);
+    assert.equal(identityResult.exportedSessionCount, 1);
+    assert.equal(identityOptions.workspacePath, workspaceVariant, "the adapter must pass uri.fsPath to the shared core without rewriting it");
+    assert.equal(identityFake.messages.some(message => message.message.startsWith("No sessions were recorded")), false, "a Windows-equivalent workspace spelling must not enter historical recovery");
+  }
 }
 
 // Recovery is explicit at every boundary and never stores a cwd alias.
