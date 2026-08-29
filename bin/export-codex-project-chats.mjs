@@ -39,6 +39,7 @@ import {
   validateCanonicalPdfFile,
 } from "../lib/pdf-renderer.mjs";
 import { extractReadingText } from "../lib/reading-content.mjs";
+import { ReadingAssetSelection } from "../lib/reading-asset-selection.mjs";
 import { streamJsonlTokens } from "../lib/jsonl-token-adapter.mjs";
 
 const VERSION = "0.3.0";
@@ -601,7 +602,7 @@ async function runCommandInternal(context, { print, profiler, runState }) {
   diagnosticReporter("assets_start", { sessions: tasks.length });
   for (const task of tasks) {
     const parsePath = copyRaw ? path.join(outputDir, task.rawRel) : task.meta.file;
-    task.assetSnapshot = await collectSessionAssets(parsePath, task.parsedSnapshotMeta?.id || task.meta.id || task.meta.session_id, assetStore, context.readerImplementation, context.readerOptions);
+    task.assetSnapshot = await collectSessionAssets(parsePath, task.parsedSnapshotMeta?.id || task.meta.id || task.meta.session_id, assetStore, context.includeTools, context.readerImplementation, context.readerOptions);
     const expectedSha256 = copyRaw ? task.snapshot?.sha256 : task.meta.fileSha256;
     if (expectedSha256 && task.assetSnapshot.sha256 !== expectedSha256) throw new ExportError("SOURCE_CHANGED_DURING_EXPORT", "Session content changed before its assets were collected");
   }
@@ -1116,8 +1117,10 @@ async function assertDiscoveryMetadataUnchanged(meta, abortSignal) {
   }
 }
 
-async function collectSessionAssets(file, sessionId, assetStore, readerImplementation, readerOptions = {}) {
+async function collectSessionAssets(file, sessionId, assetStore, includeTools, readerImplementation, readerOptions = {}) {
   const summary = createSessionReaderSummary();
+  const classifier = createSessionEventClassifier();
+  const readingSelection = new ReadingAssetSelection({ includeTools });
   for await (const _record of streamSessionRecords(file, {
     ...readerOptions,
     calculateSha256: true,
@@ -1125,10 +1128,17 @@ async function collectSessionAssets(file, sessionId, assetStore, readerImplement
     summary,
     onAttachmentStart: (info) => assetStore.beginAttachment(info),
     onRecordAbort: (recordNumber) => assetStore.abortRecord(recordNumber),
-    beforeRecordCommit: (record, recordNumber) => assetStore.commitRecord(sessionId, recordNumber, record.attachments),
+    beforeRecordCommit: (record, recordNumber) => {
+      classifier.observe(record.item, recordNumber);
+      const selection = readingSelection.observe(record.item, recordNumber);
+      return assetStore.commitRecord(sessionId, recordNumber, record.attachments, selection);
+    },
   })) {}
   if (!summary.stable) throw new ExportError("SOURCE_CHANGED_DURING_EXPORT", "A session source changed while its assets were collected");
-  return Object.freeze({ sha256: summary.fileSha256, sizeBytes: summary.afterSizeBytes });
+  const eventAnalysis = classifier.finish();
+  readingSelection.finish(eventAnalysis);
+  assetStore.applyReadingAnnotations(sessionId, readingSelection.manifestAnnotations());
+  return Object.freeze({ eventAnalysis, readingSelection, sha256: summary.fileSha256, sizeBytes: summary.afterSizeBytes });
 }
 
 async function processExportTask(task, titleIndex, profiler, context, sourceProtection, generation, assetStore) {
@@ -1174,6 +1184,7 @@ async function processExportTask(task, titleIndex, profiler, context, sourceProt
       title: displayTitle,
       titleSource: titleResolution.source,
       updatedAt: indexed.updatedAt || meta.updatedAt || "",
+      eventAnalysis: assetSnapshot?.eventAnalysis || parsedMeta.eventAnalysis,
     };
     const sessionSlug = slug(renderMeta.displayTitle || renderMeta.title || renderMeta.id || sourceOriginalFilename).slice(0, 80);
     const start = renderMeta.timestamp ? stampForName(new Date(renderMeta.timestamp)) : stampForName(new Date());
@@ -1476,6 +1487,7 @@ function createSessionEventClassifier() {
   let previousParsed = null;
   let firstPairedInputText = "";
   const userRecords = [];
+  const mirrorPairs = new Map();
 
   function observe(item, recordNumber) {
     if (item.type === "session_meta" && item.payload) {
@@ -1503,6 +1515,7 @@ function createSessionEventClassifier() {
     if (item.type === "event_msg" && item.payload?.type === "user_message" && previousParsed?.userRecord) {
       if (isMirroredUserEvent(previousParsed.item, item)) {
         previousParsed.userRecord.paired = true;
+        mirrorPairs.set(recordNumber, previousParsed.recordNumber);
         if (!firstPairedInputText) firstPairedInputText = previousParsed.userRecord.fullText;
       } else {
         previousParsed.userRecord.mirrorRejected = true;
@@ -1568,6 +1581,7 @@ function createSessionEventClassifier() {
       classifications,
       directUserMessages,
       firstDirectUserText: sessionKind === SESSION_KIND.DIRECT_USER ? firstPairedInputText : "",
+      mirrorPairs,
       nonDirectTitleCandidates,
       runtimeContexts,
       sessionKind,
@@ -2486,8 +2500,8 @@ function collectPreviousGenerationPaths(manifest, assetManifest = null) {
   if (manifest.formats.markdown === true) addAuthorizedGenerationPath(authorized, "index.md", "root");
   if ((manifest.formats.attachments === true) !== Boolean(assetManifest)) throw new ExportError("INVALID_PREVIOUS_MANIFEST", "The previous root and asset manifest attachment declarations disagree");
   if (assetManifest) {
-    if (manifest.assets_manifest !== ASSET_MANIFEST_PATH || assetManifest.schema_version !== 1 || assetManifest.hash_algorithm !== "sha256" || !Array.isArray(assetManifest.assets)) {
-      throw new ExportError("INVALID_PREVIOUS_MANIFEST", "The previous asset manifest does not match schema version 1");
+    if (manifest.assets_manifest !== ASSET_MANIFEST_PATH || ![1, 2].includes(assetManifest.schema_version) || assetManifest.hash_algorithm !== "sha256" || !Array.isArray(assetManifest.assets)) {
+      throw new ExportError("INVALID_PREVIOUS_MANIFEST", "The previous asset manifest does not match a supported schema version");
     }
     addAuthorizedGenerationPath(authorized, ASSET_MANIFEST_PATH, "asset_manifest");
     const sortedAssetHashes = assetManifest.assets.map((asset) => asset?.sha256);
@@ -2500,7 +2514,7 @@ function collectPreviousGenerationPaths(manifest, assetManifest = null) {
       sessionOrder.set(sessionId, index);
     }
     for (const asset of assetManifest.assets) {
-      if (!isValidPreviousAssetEntry(asset, sessionOrder)) throw new ExportError("INVALID_PREVIOUS_MANIFEST", "The previous asset manifest contains an invalid asset record");
+      if (!isValidPreviousAssetEntry(asset, sessionOrder, assetManifest.schema_version)) throw new ExportError("INVALID_PREVIOUS_MANIFEST", "The previous asset manifest contains an invalid asset record");
       addAuthorizedGenerationPath(authorized, asset.path, "asset");
     }
     const occurrences = assetManifest.assets.reduce((sum, asset) => sum + asset.uses.length, 0);
@@ -2526,26 +2540,46 @@ function collectPreviousGenerationPaths(manifest, assetManifest = null) {
   return authorized;
 }
 
-function isValidPreviousAssetEntry(asset, sessionOrder) {
+function isValidPreviousAssetEntry(asset, sessionOrder, schemaVersion) {
   if (!asset || typeof asset !== "object" || !isLowerHexSha256Text(asset.sha256) || !ASSET_EXTENSIONS.includes(asset.extension)) return false;
   if (asset.path !== `assets/${asset.sha256}.${asset.extension}` || !Number.isSafeInteger(asset.bytes) || asset.bytes < 0 || typeof asset.renderable !== "boolean" || !Array.isArray(asset.uses)) return false;
   const expectedMime = { bin: "application/octet-stream", gif: "image/gif", jpg: "image/jpeg", png: "image/png", webp: "image/webp" }[asset.extension];
   const allowedKeys = new Set(["sha256", "path", "mime_type", "extension", "bytes", "renderable", "uses"]);
-  if (Object.keys(asset).some((key) => !allowedKeys.has(key)) || !asset.uses.every((use) => isValidPreviousAssetUse(use, expectedMime, sessionOrder))) return false;
+  if (Object.keys(asset).some((key) => !allowedKeys.has(key)) || !asset.uses.every((use) => isValidPreviousAssetUse(use, expectedMime, sessionOrder, schemaVersion))) return false;
   for (let index = 1; index < asset.uses.length; index += 1) {
     if (compareAssetUses(asset.uses[index - 1], asset.uses[index], sessionOrder) > 0) return false;
   }
   return asset.mime_type === expectedMime && asset.renderable === (asset.extension !== "bin");
 }
 
-function isValidPreviousAssetUse(use, canonicalMime, sessionOrder) {
+function isValidPreviousAssetUse(use, canonicalMime, sessionOrder, schemaVersion) {
   if (!use || typeof use !== "object" || !isSafeAssetSessionReference(use.session_id) || !sessionOrder.has(use.session_id) || !Number.isSafeInteger(use.record_ordinal) || use.record_ordinal <= 0 || !Number.isSafeInteger(use.attachment_ordinal) || use.attachment_ordinal <= 0) return false;
   const hasMime = Object.hasOwn(use, "declared_mime");
-  const allowedKeys = hasMime
+  const legacyKeys = hasMime
     ? new Set(["attachment_ordinal", "record_ordinal", "session_id", "declared_mime", "mime_mismatch"])
     : new Set(["attachment_ordinal", "record_ordinal", "session_id"]);
+  const provenanceKeys = new Set([
+    "canonical_attachment_ordinal", "canonical_record_ordinal", "classification", "content_type", "mirror_kind",
+    "reading_disposition", "record_type", "role", "timestamp", "tool_origin",
+  ]);
+  const allowedKeys = schemaVersion === 2 ? new Set([...legacyKeys, ...provenanceKeys]) : legacyKeys;
   if (Object.keys(use).some((key) => !allowedKeys.has(key))) return false;
-  return !hasMime || (isSafeDeclaredMime(use.declared_mime) && use.mime_mismatch === (use.declared_mime !== canonicalMime));
+  if (hasMime && (!isSafeDeclaredMime(use.declared_mime) || use.mime_mismatch !== (use.declared_mime !== canonicalMime))) return false;
+  if (schemaVersion === 1) return true;
+  if ([...provenanceKeys].some((key) => !Object.hasOwn(use, key))) return false;
+  const nullableOrdinal = (value) => value === null || (Number.isSafeInteger(value) && value > 0);
+  return nullableOrdinal(use.canonical_attachment_ordinal)
+    && nullableOrdinal(use.canonical_record_ordinal)
+    && [use.classification, use.content_type, use.mirror_kind, use.reading_disposition, use.record_type, use.role, use.timestamp, use.tool_origin].every(isSafeManifestUseText);
+}
+
+function isSafeManifestUseText(value) {
+  if (typeof value !== "string" || value.length > 256) return false;
+  for (const character of value) {
+    const code = character.charCodeAt(0);
+    if (code < 0x20 || code === 0x7f) return false;
+  }
+  return true;
 }
 
 function compareAssetUses(left, right, sessionOrder) {
@@ -2828,7 +2862,16 @@ async function writeSessionDocuments(meta, paths, profiler = null, profileSessio
   const stats = { userMessages: 0, assistantMessages: 0, subagentInputs: 0, runtimeContexts: 0, unclassifiedUserRoleRecords: 0, toolEvents: 0, model: meta.model || "", updatedAt: meta.latestTimestamp || meta.updatedAt || meta.timestamp || "" };
   const readerSummary = createSessionReaderSummary();
   const documentMessages = [];
+  const additionalStoredContext = [];
+  const readingSelection = assetSnapshot?.readingSelection;
   const renderedImageChecks = new Map();
+  const selectedAttachments = (item, recordNumber, kind = "visible") => {
+    const descriptors = collectAttachmentDescriptorsInOrder(item);
+    const ordinals = new Set(kind === "additional"
+      ? readingSelection?.additionalAttachmentOrdinals(recordNumber) || []
+      : readingSelection?.visibleAttachmentOrdinals(recordNumber) || descriptors.map((_descriptor, index) => index + 1));
+    return descriptors.filter((_descriptor, index) => ordinals.has(index + 1));
+  };
   const readingMessageText = async (content, recordNumber) => {
     if (!Array.isArray(content) || !content.some(part => part?.type === "input_text" && String(part.text || "").startsWith("<image"))) return extractText(content);
     const candidates = new Set();
@@ -2887,12 +2930,17 @@ async function writeSessionDocuments(meta, paths, profiler = null, profileSessio
     })) {
       if (item.timestamp && (!stats.updatedAt || item.timestamp > stats.updatedAt)) stats.updatedAt = item.timestamp;
       if (item.type === "turn_context" && item.payload?.model && !stats.model) stats.model = item.payload.model;
+      if (item.type === "compacted") {
+        const attachments = selectedAttachments(item, recordNumber, "additional");
+        if (attachments.length) additionalStoredContext.push({ attachments, recordNumber, timestamp: item.timestamp });
+        continue;
+      }
       if (item.type !== "response_item" || !item.payload) continue;
       const payload = item.payload;
       if (payload.type === "message" && payload.role === "user") {
         const text = await readingMessageText(payload.content, recordNumber);
         const renderedText = redactMarkdown ? redactSecrets(text) : text;
-        const attachments = collectAttachmentDescriptorsInOrder(payload.content);
+        const attachments = selectedAttachments(item, recordNumber);
         if (!text.trim() && !attachments.length) continue;
         const classification = meta.eventAnalysis?.classifications?.get(recordNumber) || { kind: USER_RECORD_KIND.UNCLASSIFIED_USER_ROLE_RECORD, runtimeContextTypes: [] };
         if (classification.kind === USER_RECORD_KIND.DIRECT_USER_TURN) {
@@ -2933,7 +2981,7 @@ async function writeSessionDocuments(meta, paths, profiler = null, profileSessio
       if (payload.type === "message" && payload.role === "assistant") {
         const text = await readingMessageText(payload.content, recordNumber);
         const renderedText = redactMarkdown ? redactSecrets(text) : text;
-        const attachments = collectAttachmentDescriptorsInOrder(payload.content);
+        const attachments = selectedAttachments(item, recordNumber);
         if (!text.trim() && !attachments.length) continue;
         stats.assistantMessages += 1;
         if (out) {
@@ -2950,7 +2998,7 @@ async function writeSessionDocuments(meta, paths, profiler = null, profileSessio
         if (includeTools) {
           const toolText = payload.arguments || payload.input || payload.output || JSON.stringify(payload, null, 2);
           const renderedToolText = redactMarkdown ? redactSecrets(String(toolText)) : String(toolText);
-          const attachments = collectAttachmentDescriptorsInOrder(payload);
+          const attachments = selectedAttachments(item, recordNumber);
           const label = `Tool ${payload.type}${payload.name ? ` – ${payload.name}` : ""}`;
           const fence = markdownFence(renderedToolText);
           if (out) {
@@ -2964,6 +3012,27 @@ async function writeSessionDocuments(meta, paths, profiler = null, profileSessio
           }
           addDocumentMessage(DOCUMENT_ROLE.TOOL, label, `${fence}text\n${renderedToolText}\n${fence}`, attachments, item.timestamp, recordNumber);
         }
+      }
+    }
+
+    if (additionalStoredContext.length) {
+      if (out) {
+        writeLine(out, "## Additional stored context");
+        writeLine(out, "");
+        writeLine(out, "> Attachments retained in session replacement history without a matching visible original occurrence.");
+        writeLine(out, "");
+        for (const entry of additionalStoredContext) writeAssetReferences(out, entry.attachments, assetStore, markdownPath);
+      }
+      for (let index = 0; index < additionalStoredContext.length; index += 1) {
+        const entry = additionalStoredContext[index];
+        addDocumentMessage(
+          DOCUMENT_ROLE.UNCLASSIFIED,
+          index === 0 ? "Additional stored context" : "Additional stored context (continued)",
+          index === 0 ? "Attachments retained in session replacement history without a matching visible original occurrence." : "",
+          entry.attachments,
+          entry.timestamp,
+          entry.recordNumber,
+        );
       }
     }
   };
@@ -3087,7 +3156,7 @@ function redactSecrets(text) {
 }
 
 async function writeIndexFiles(dir, rows, profiler = null, context, sourceProtection, generation, assetSummary, assetStore) {
-  const { diagnosticReporter, exportFormats, exportProfile, copyRaw, codexHome, sessionsDir, includeArchived, archivedSessionsDir, sessionIndexPath, pathStyle } = context;
+  const { diagnosticReporter, exportFormats, exportProfile, copyRaw, codexHome, sessionsDir, includeArchived, archivedSessionsDir, sessionIndexPath, pathStyle, includeTools } = context;
   const generatedAt = generation?.generatedAt || new Date().toISOString();
   const indexRows = [...rows].sort((a, b) => (b.updated_at || b.started_at || "").localeCompare(a.updated_at || a.started_at || ""));
   const includeRawColumn = indexRows.some((row) => Boolean(row.raw_export_file));
@@ -3120,7 +3189,7 @@ async function writeIndexFiles(dir, rows, profiler = null, context, sourceProtec
   }
   profiler?.addPhase("indexes", performance.now() - indexStart, 0, indexBytes);
   diagnosticReporter("index_end", { duration_ms: roundMs(performance.now() - indexStart), bytes_written: indexBytes });
-  const manifest = `${JSON.stringify({ archive_format_version: ARCHIVE_FORMAT_VERSION, canonical_representation: "raw_jsonl", canonical_representation_included: copyRaw, export_profile: exportProfile, formats: exportFormats, generated_at: generatedAt, codex_home: codexHome, sessions_dir: sessionsDir, archived_sessions_dir: includeArchived ? archivedSessionsDir : "", session_index: sessionIndexPath, path_style: pathStyle, assets_manifest: ASSET_MANIFEST_PATH, asset_occurrences: assetSummary.assetOccurrences, unique_assets: assetSummary.uniqueAssets, unique_asset_bytes: assetSummary.uniqueAssetBytes, deduplicated_asset_bytes_saved: assetSummary.deduplicatedBytesSaved, sessions: rows }, null, 2)}\n`;
+  const manifest = `${JSON.stringify({ archive_format_version: ARCHIVE_FORMAT_VERSION, canonical_representation: "raw_jsonl", canonical_representation_included: copyRaw, export_profile: exportProfile, formats: exportFormats, include_tools: Boolean(includeTools), generated_at: generatedAt, codex_home: codexHome, sessions_dir: sessionsDir, archived_sessions_dir: includeArchived ? archivedSessionsDir : "", session_index: sessionIndexPath, path_style: pathStyle, assets_manifest: ASSET_MANIFEST_PATH, asset_occurrences: assetSummary.assetOccurrences, unique_assets: assetSummary.uniqueAssets, unique_asset_bytes: assetSummary.uniqueAssetBytes, deduplicated_asset_bytes_saved: assetSummary.deduplicatedBytesSaved, sessions: rows }, null, 2)}\n`;
   return manifest;
 }
 
@@ -3500,12 +3569,12 @@ async function writeSummary(dir, rows, context, sourceProtection, generation, as
   const archivedCount = rows.filter((row) => row.storage === "archived").length;
   const lines = ["Codex Project Chat Export", "=========================", "", `Generated: ${generation?.generatedAt || new Date().toISOString()}`, `Codex home: ${codexHome}`, `Sessions dir: ${sessionsDir}`, `Archived sessions dir: ${includeArchived ? archivedSessionsDir : "disabled"}`, `Export profile: ${exportProfile}`, `Path style: ${pathStyle}`, `Sessions exported: ${rows.length}`, `Active sessions: ${activeCount}`, `Archived sessions: ${archivedCount}`, `Attachment occurrences: ${assetSummary.assetOccurrences}`, `Unique assets: ${assetSummary.uniqueAssets}`, `Unique asset bytes: ${assetSummary.uniqueAssetBytes}`, `Deduplicated asset bytes saved: ${assetSummary.deduplicatedBytesSaved}`, "", "Projects:", ...Array.from(projects.entries()).map(([project, count]) => `- ${project}: ${count}`), "", "Notes:"];
   if (exportFormats.markdown) lines.push(`- ${markdownDirName}/ contains classified, derived reading views.`);
-  else if (!exportFormats.docx && !exportFormats.pdf) lines.push("- This profile intentionally does not create human-readable session transcripts or classify session events.");
+  else if (!exportFormats.docx && !exportFormats.pdf) lines.push("- This profile intentionally does not create human-readable session transcripts; attachment provenance still follows the shared streamed reading selection.");
   if (exportFormats.docx) lines.push("- docx/ contains one deterministic, classified DOCX reading view per exported session.");
   if (exportFormats.pdf) lines.push("- pdf/ contains one deterministic, classified PDF reading view per exported session.");
   if (copyRaw) lines.push("- raw/ contains canonical byte-preserving session JSONL snapshots.");
   else lines.push("- This profile does not include canonical raw JSONL snapshots.");
-  lines.push("- assets/ contains content-addressed decoded attachments; assets/manifest.json records validated types and every stable usage occurrence.");
+  lines.push("- assets/ contains content-addressed decoded attachments selected for reading views; assets/manifest.json records validated types, provenance, visibility, and verified mirrors.");
   lines.push("- Raw export file names may be collision-safe archive names; manifest.json preserves the original name and portable restore path.", "- raw_copy_status=VERIFIED_AT_EXPORT means the export-time hash check completed at raw_verified_at and the bytes read from the published Raw path matched raw_sha256 during that check; Raw files remain mutable afterward.", "- A future importer must hash the current Raw file again and reject any mismatch; no Codex import path is implemented or validated.", "- Event order is the physical line order inside each canonical raw JSONL file; the manifest does not duplicate that sequence.");
   if (exportFormats.html && exportProfile === EXPORT_PROFILE.SOURCE_SNAPSHOTS) lines.push("- index.html uses only project, storage, start time, session ID, and Raw links because this profile intentionally skips complete readable metadata.");
   else if (exportFormats.html) lines.push("- index.html can be filtered by project, title, date, model, or storage location.");
@@ -3723,13 +3792,16 @@ function htmlEscape(value) { return String(value ?? "").replace(/&/g, "&amp;").r
 function htmlLink(relPath, label) { const link = toPosixPath(relPath); return link ? `<a href="${htmlEscape(encodeURI(link))}">${htmlEscape(label || path.posix.basename(link))}</a>` : ""; }
 function renderHtmlAssetReferences(references) {
   if (!references.length) return "";
-  return `<div class="assets">${references.map((reference, index) => {
+  const render = (items, offset = 0) => `<div class="assets">${items.map((reference, index) => {
     const target = htmlEscape(encodeURI(toPosixPath(reference.path)));
-    const label = `Attachment ${index + 1}`;
+    const label = `Attachment ${offset + index + 1}`;
     return reference.renderable
       ? `<a href="${target}"><img src="${target}" alt="${label}" loading="lazy"></a>`
       : `<a href="${target}">${label} (file)</a>`;
   }).join("")}</div>`;
+  const ordinary = references.filter(reference => reference.reading_disposition !== "ADDITIONAL_STORED_CONTEXT");
+  const additional = references.filter(reference => reference.reading_disposition === "ADDITIONAL_STORED_CONTEXT");
+  return `${ordinary.length ? render(ordinary) : ""}${additional.length ? `<details class="additional-context"><summary>Additional stored context</summary>${render(additional, ordinary.length)}</details>` : ""}`;
 }
 function renderHtmlIndex(rows, generatedAt, options = {}) {
   const reducedMetadata = Boolean(options.reducedMetadata);
@@ -3748,7 +3820,7 @@ function renderHtmlIndex(rows, generatedAt, options = {}) {
     const markdownCell = includeMarkdownColumn ? `<td>${row.markdown_file ? htmlLink(row.markdown_file, path.posix.basename(toPosixPath(row.markdown_file))) : ""}</td>` : "";
     const docxCell = includeDocxColumn ? `<td>${row.docx_file ? htmlLink(row.docx_file, path.posix.basename(toPosixPath(row.docx_file))) : ""}</td>` : "";
     const pdfCell = includePdfColumn ? `<td>${row.pdf_file ? htmlLink(row.pdf_file, path.posix.basename(toPosixPath(row.pdf_file))) : ""}</td>` : "";
-    const assetsCell = `<td>${renderHtmlAssetReferences(assetStore?.referencesForSession(row.session_id) || [])}</td>`;
+    const assetsCell = `<td>${renderHtmlAssetReferences(assetStore?.readingReferencesForSession(row.session_id) || [])}</td>`;
     if (reducedMetadata) return `      <tr data-search="${htmlEscape(searchable)}"><td>${htmlEscape(row.project_name || row.project)}</td><td>${htmlEscape(row.storage || "active")}</td><td>${htmlEscape(startedAt)}</td><td>${htmlEscape(row.session_id)}</td>${assetsCell}${docxCell}${pdfCell}${rawCell}</tr>`;
     return `      <tr data-search="${htmlEscape(searchable)}"><td>${htmlEscape(row.project_name || row.project)}</td><td>${htmlEscape(row.title || row.session_id)}</td><td>${htmlEscape(row.storage || "active")}</td><td>${htmlEscape(startedAt)}</td><td>${htmlEscape(row.model || "")}</td>${assetsCell}${markdownCell}${docxCell}${pdfCell}${rawCell}</tr>`;
   }).join("\n");
@@ -3776,6 +3848,8 @@ function renderHtmlIndex(rows, generatedAt, options = {}) {
     a { color: #075985; }
     .assets { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: flex-start; }
     .assets img { display: block; max-width: 8rem; max-height: 6rem; object-fit: contain; border: 1px solid #e5e7eb; border-radius: 0.25rem; }
+    .additional-context { margin-top: 0.6rem; }
+    .additional-context summary { cursor: pointer; font-weight: 650; }
   </style>
 </head>
 <body>

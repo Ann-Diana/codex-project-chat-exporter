@@ -16,6 +16,8 @@ PDFs follow the existing session-relative naming under `pdf/<project>/<session>.
 
 PNG and JPEG assets are embedded proportionally within the printable page. Repeated content reuses one PDF image object. GIF, WebP, and `.bin` remain labelled attachment references and are never converted. Missing, changed, or corrupt assets abort that session document.
 
+Attachment occurrences use the same classified record selection as text. Tool-only images require `includeTools`; verified source mirrors render once. Unmatched `replacement_history` images appear in a labelled `Additional stored context` section, while equal bytes in independent genuine turns remain separate visible occurrences.
+
 Canonical bounded HTTP/HTTPS links become URI annotations. Invalid, overlong, local, UNC/device, `file:`, `javascript:`, `data:`, and other targets remain non-clickable labelled text. The renderer never downloads a target. It creates no external images, file actions, launch actions, JavaScript, forms, embedded files, or other active content.
 
 ## Structural validation and reading fidelity

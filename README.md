@@ -22,7 +22,7 @@ Core behavior:
 - All detected sessions or only one matching project/work folder.
 - Markdown reading views distinguish direct user turns, assistant responses, subagent inputs, automatic runtime contexts, and unclassified user-role records. Canonical Raw events remain unchanged.
 - A filterable local HTML index and a machine-readable manifest.
-- A per-export content-addressed `assets/` store for decoded embedded attachments, with one file per unique SHA-256 and a complete usage manifest.
+- A per-export content-addressed `assets/` store for reading-view-selected embedded attachments, with one file per unique SHA-256 and a provenance-aware usage manifest.
 - Optional deterministic DOCX or PDF reading views, with exactly one document per exported session.
 - Optional byte-preserving raw JSONL snapshots with an export-time SHA-256 verification.
 - Recorded tool-call inputs and outputs can optionally be included in Markdown and selected DOCX or PDF reading views.
@@ -79,6 +79,8 @@ Choose one profile:
 - **Complete** (`--profile complete`, default): `raw/` checked at export time, deduplicated `assets/`, Markdown transcripts in `md/`, `index.html`, `index.md`, `manifest.json`, and `README.txt`.
 - **Readable** (`--profile readable`): deduplicated `assets/`, Markdown transcripts and both indexes plus `manifest.json` and `README.txt`, without new Raw snapshots.
 - **Source snapshots** (`--profile source-snapshots`): `raw/` checked at export time, deduplicated `assets/`, a reduced `index.html`, `manifest.json`, and `README.txt`, without Markdown transcripts or `index.md`.
+
+All reading formats use one record-selection policy. Tool-only images follow `--include-tools`; structurally paired user/tool mirrors render once; equal images in separate genuine turns remain separate uses. Stored compaction images without a visible original appear under `Additional stored context`.
 
 Use **Readable** for browsing and searching exported transcripts. **Complete** and **Source snapshots** can be substantially larger and slower because they copy Raw JSONL and verify it with SHA-256.
 

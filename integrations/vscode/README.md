@@ -62,7 +62,7 @@ Valid bounded HTTP/HTTPS links in PDF are clickable without being fetched. PDF u
 - **Output Directory** – local folder for generated exports. If empty, the extension asks on the first export.
 - **Codex Home** – optional location of the local Codex data. If empty, the extension uses `CODEX_HOME` or the default `.codex` folder.
 - **Path Style** – choose compact or longer readable filenames.
-- **Include Tools** – include recorded tool-call inputs and outputs in Markdown and selected DOCX or PDF reading views. This data can be sensitive.
+- **Include Tools** – include recorded tool-call inputs, outputs, and tool-only images in Markdown, responsive HTML, and selected DOCX or PDF reading views. Structurally paired technical records still render only once. This data can be sensitive.
 - **Diagnostic Output** – add redacted timing details to the output channel for troubleshooting.
 
 Output Directory and Codex Home must be local absolute paths and must be configured as User settings. Network, device, Workspace, and Workspace Folder paths are not supported.

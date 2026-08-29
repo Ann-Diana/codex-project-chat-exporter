@@ -137,8 +137,9 @@ assert.equal(manifest.unique_assets, 2);
 assert.equal(manifest.unique_asset_bytes, 17);
 assert.equal(manifest.deduplicated_asset_bytes_saved, 0);
 assert.equal(manifest.formats.attachments, true);
+assert.equal(manifest.include_tools, false);
 const assetsManifest = JSON.parse(await fs.readFile(path.join(outputDir, manifest.assets_manifest), "utf8"));
-assert.equal(assetsManifest.schema_version, 1);
+assert.equal(assetsManifest.schema_version, 2);
 assert.equal(assetsManifest.hash_algorithm, "sha256");
 assert.equal(assetsManifest.assets.length, 2);
 assert.deepEqual(assetsManifest.assets.map((asset) => asset.sha256), assetsManifest.assets.map((asset) => asset.sha256).toSorted());
@@ -884,6 +885,27 @@ assert.deepEqual(await fs.readFile(path.join(generationOutput, JSON.parse(await 
 assert.equal(await fs.readFile(repeatedGeneration.manifestPath, "utf8"), firstGenerationManifest, "an unchanged repetition must reuse verified identical files without replacing the previous generation");
 assert.equal(repeatedGenerationDiagnostics.filter((event) => event.event === "export_hash_start").length, 1, "an unchanged repetition must still verify the published Raw path exactly once");
 assert.notEqual(firstGenerationManifest, "", "the first generation manifest must be complete before repetition");
+
+const additiveRootOutput = path.join(temp, "generation-additive-root-field");
+await fs.cp(generationOutput, additiveRootOutput, { recursive: true });
+const additiveRootManifestPath = path.join(additiveRootOutput, "manifest.json");
+const additiveRootManifest = JSON.parse(await fs.readFile(additiveRootManifestPath, "utf8"));
+additiveRootManifest.future_optional_metadata = { opaque: "ignored by version-1 consumers", path: "future.bin" };
+const additiveRootManifestBytes = Buffer.from(`${JSON.stringify(additiveRootManifest, null, 2)}\n`, "utf8");
+await fs.writeFile(additiveRootManifestPath, additiveRootManifestBytes);
+const additiveRootProtection = Object.freeze({ rootCanonicalPaths: new Set(), fileCanonicalPaths: new Set(), fileIdentities: new Set() });
+const additiveRootGeneration = await beginExportGeneration(additiveRootOutput, additiveRootProtection, { plannedPaths: [] });
+assert.equal(await pathExists(path.join(additiveRootOutput, INCOMPLETE_MARKER_NAME)), true, "a version-1 consumer must tolerate unknown additive root-manifest fields");
+await completeExportGeneration(additiveRootGeneration);
+assert.equal(await pathExists(path.join(additiveRootOutput, INCOMPLETE_MARKER_NAME)), false, "the additive-field compatibility check must clean its run-owned marker");
+assert.deepEqual(await fs.readFile(additiveRootManifestPath), additiveRootManifestBytes, "the version-1 consumer must ignore rather than rewrite unknown additive root fields");
+await fs.writeFile(path.join(additiveRootOutput, "future.bin"), "foreign future file", "utf8");
+await assert.rejects(
+  () => beginExportGeneration(additiveRootOutput, additiveRootProtection, { plannedPaths: ["future.bin"] }),
+  (error) => error?.code === "INVALID_PREVIOUS_MANIFEST" && /unexpected export path/.test(error.message),
+  "an unknown additive root field must never authorize an additional generation path",
+);
+assert.equal(await pathExists(path.join(additiveRootOutput, INCOMPLETE_MARKER_NAME)), false, "rejected unknown-field path authorization must fail before generation mutation");
 
 const repeatedRawPath = path.join(generationOutput, firstGenerationRecord.sessions[0].raw_export_file);
 const repeatedRawBeforeProfileChange = await fs.readFile(repeatedRawPath);

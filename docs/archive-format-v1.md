@@ -39,6 +39,7 @@ The manifest describes archive membership and source mapping. It is not an authe
   "export_profile": "complete",
   "formats": { "raw": true, "markdown": true, "html": true, "docx": false, "pdf": false, "attachments": true },
   "assets_manifest": "assets/manifest.json",
+  "include_tools": false,
   "asset_occurrences": 2,
   "unique_assets": 1,
   "unique_asset_bytes": 68
@@ -56,24 +57,31 @@ Relevant top-level fields include:
 - `codex_home`, `sessions_dir`, `archived_sessions_dir`, and `session_index`: local diagnostic paths.
 - `path_style`: `short` or `readable`.
 - `assets_manifest`: the canonical export-relative `assets/manifest.json` path.
+- `include_tools`: the effective tool-record selection used by all derived reading views.
 - `asset_occurrences`, `unique_assets`, and `unique_asset_bytes`: aggregate decoded-asset counts and unique-byte volume. `deduplicated_asset_bytes_saved` additionally reports repeated occurrence bytes not stored again.
 - `sessions`: ordered exported-session metadata.
 
 Top-level absolute paths are local diagnostics. They are not needed to reconstruct the portable source mapping and are not share-safe.
 
-## Asset manifest schema 1
+The version-1 root manifest has an open, forward-compatible content model. A consumer that supports `archive_format_version: 1` must ignore unknown top-level fields while continuing to validate every field it uses for format selection, path authorization, integrity, or source mapping. Producers may add optional root metadata without changing the archive-format version only when it does not alter the meaning or required validation of existing fields. Consumers are not required to preserve unknown fields when writing a new generation. An incompatible semantic or structural change requires a new `archive_format_version`.
+
+This rule applies only to additive fields in the root `manifest.json`. It does not relax the separately versioned and deliberately strict `assets/manifest.json` schema, and an unknown root field never authorizes an additional archive path.
+
+## Asset manifest schema 2
 
 Every profile includes `assets/manifest.json`, even when no embedded attachments occur. Its stable header is:
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "hash_algorithm": "sha256",
   "assets": []
 }
 ```
 
-Each unique decoded byte sequence appears once as `assets/<lowercase-sha256>.<validated-extension>`. The asset entry records the SHA-256, path, canonical MIME type, validated extension, byte count, renderability, and every ordered use. A use contains only the export-internal session ID, record ordinal, attachment ordinal, and optionally a syntactically bounded declared MIME type plus mismatch flag. Duplicate uses remain duplicate. Asset entries are sorted by SHA-256; uses retain export order; JSON ends with one newline.
+Each selected unique decoded byte sequence appears once as `assets/<lowercase-sha256>.<validated-extension>`. The asset entry records the SHA-256, path, canonical MIME type, validated extension, byte count, renderability, and every retained ordered use. Uses include role, record/content type, timestamp, classification, tool origin, reading disposition, and canonical/mirror ordinals in addition to the schema-1 identity and optional MIME fields. Equal bytes in different genuine turns remain separate uses; only structurally proven mirrors share a canonical occurrence.
+
+Schema 2 preserves the schema-1 asset-entry and path contract but is an explicit consumer compatibility boundary. Consumers that require version 1 must add schema-2 handling. Root `archive_format_version` remains 1 because Raw/session layout and canonical restore semantics are unchanged; the exporter accepts prior asset schema 1 during safe replacement validation.
 
 PNG, JPEG, GIF, and WebP require bounded decoded-header validation. Other bytes, SVG, HTML, truncated signatures, and MIME spoofing are retained as non-renderable `.bin` with `application/octet-stream`. Declared MIME never determines a filename or renderability. Local and remote references are not copied or downloaded.
 
@@ -206,6 +214,8 @@ Markdown includes:
 - labelled subagent inputs, runtime contexts, and unclassified user-role records;
 - tool calls and tool outputs only when explicitly enabled.
 
+Attachments follow the same record selection. Verified user-event and browser/tool-result mirrors render once. `replacement_history` copies of visible messages are not repeated; unmatched stored images appear in a labelled `Additional stored context` section rather than as ordinary turns.
+
 Reasoning, internal events, invalid JSON lines, and other event types remain available only in raw JSONL unless separately rendered. Markdown masking is best effort and does not make the view safe to share.
 
 `index.html` and, where present, `index.md` provide metadata navigation. Complete and Readable HTML indexes filter project, title, date, model, and storage status; they are not transcript full-text search engines.
@@ -214,7 +224,7 @@ When DOCX is selected, each session manifest entry includes one `docx_file` expo
 
 When PDF is selected, each session entry similarly includes one `pdf_file` path. PDF is rendered directly from the same common document contract, not through DOCX. It embeds repository-local hash-verified fonts and PNG/JPEG assets, uses attachment references for GIF/WebP/`.bin`, and permits only controlled HTTP/HTTPS URI actions. File, launch, JavaScript, forms, embedded files, external images, and remote retrieval are forbidden.
 
-Without DOCX or PDF selection, the `source-snapshots` profile intentionally omits Markdown transcripts and `index.md`. Its reduced HTML metadata index links to Raw snapshots checked at export time and to any extracted assets, but it does not imply that event classification was performed; classification-derived counters are `null`. Selecting DOCX or PDF explicitly adds the per-session classified document pass, populated counters, document links, and the corresponding full metadata index while still omitting Markdown.
+Without DOCX or PDF selection, the `source-snapshots` profile intentionally omits Markdown transcripts and `index.md`. Its reduced HTML metadata index links to Raw snapshots checked at export time and to assets selected by the same streamed reading policy; classification-derived session counters remain `null`. Selecting DOCX or PDF explicitly adds the per-session document pass, populated counters, document links, and the corresponding full metadata index while still omitting Markdown.
 
 ## Import boundary
 

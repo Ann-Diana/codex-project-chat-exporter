@@ -24,6 +24,21 @@ function sha256(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
+function defaultProvenance(recordOrdinal, attachmentOrdinal) {
+  return {
+    canonical_attachment_ordinal: attachmentOrdinal,
+    canonical_record_ordinal: recordOrdinal,
+    classification: "UNCLASSIFIED_ATTACHMENT_RECORD",
+    content_type: "attachment",
+    mirror_kind: "",
+    reading_disposition: "VISIBLE",
+    record_type: "unknown",
+    role: "UNCLASSIFIED",
+    timestamp: "",
+    tool_origin: "NONE",
+  };
+}
+
 function statIdentity(stat) {
   return `${stat.dev}:${stat.ino}`;
 }
@@ -151,7 +166,7 @@ test("deduplication preserves every ordered usage while canonical bytes control 
     await addRecord(store, "session-a", 7, [{ bytes: JPEG, declaredMime: "image/jpeg" }, { bytes: SVG, declaredMime: "image/svg+xml" }]);
     const publication = await store.publish();
     const manifest = JSON.parse(publication.content);
-    assert.equal(manifest.schema_version, 1);
+    assert.equal(manifest.schema_version, 2);
     assert.equal(manifest.hash_algorithm, "sha256");
     assert.deepEqual(manifest.assets.map((asset) => asset.sha256), manifest.assets.map((asset) => asset.sha256).toSorted());
     assert.equal(manifest.assets.length, 3);
@@ -165,9 +180,9 @@ test("deduplication preserves every ordered usage while canonical bytes control 
     assert.equal(png.mime_type, "image/png");
     assert.equal(png.renderable, true);
     assert.deepEqual(png.uses, [
-      { attachment_ordinal: 1, record_ordinal: 2, session_id: "session-a", declared_mime: "image/jpeg", mime_mismatch: true },
-      { attachment_ordinal: 2, record_ordinal: 2, session_id: "session-a", declared_mime: "image/png", mime_mismatch: false },
-      { attachment_ordinal: 1, record_ordinal: 4, session_id: "session-b", declared_mime: "image/png", mime_mismatch: false },
+      { attachment_ordinal: 1, record_ordinal: 2, session_id: "session-a", ...defaultProvenance(2, 1), declared_mime: "image/jpeg", mime_mismatch: true },
+      { attachment_ordinal: 2, record_ordinal: 2, session_id: "session-a", ...defaultProvenance(2, 2), declared_mime: "image/png", mime_mismatch: false },
+      { attachment_ordinal: 1, record_ordinal: 4, session_id: "session-b", ...defaultProvenance(4, 1), declared_mime: "image/png", mime_mismatch: false },
     ]);
     const svg = manifest.assets.find((asset) => asset.sha256 === sha256(SVG));
     assert.equal(svg.extension, "bin");
@@ -195,7 +210,7 @@ test("an attachment-free export still publishes the stable empty schema", async 
     const { store } = await createHarness(temp);
     await store.commitRecord("session-empty", 1, []);
     const publication = await store.publish();
-    assert.equal(publication.content, '{\n  "schema_version": 1,\n  "hash_algorithm": "sha256",\n  "assets": []\n}\n');
+    assert.equal(publication.content, '{\n  "schema_version": 2,\n  "hash_algorithm": "sha256",\n  "assets": []\n}\n');
     assert.deepEqual(publication.summary, { assetOccurrences: 0, deduplicatedBytesSaved: 0, maxWriteBlockBytes: 0, uniqueAssetBytes: 0, uniqueAssets: 0 });
   } finally {
     await fs.rm(temp, { recursive: true, force: true });
