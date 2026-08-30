@@ -9,7 +9,17 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { buildVsix } from "../scripts/build-vsix.mjs";
 
 const require = createRequire(import.meta.url);
-const { COMMANDS, DIAGNOSTIC_BUILD_ID, EXPORT_PROFILES, STATE_LATEST_HTML, STATE_LATEST_HTML_TARGET, STATE_OUTPUT_DIR, STATE_OUTPUT_TARGET, createExtensionAdapter, defaultLoadExporter, formatExportSummary, isWindowsNetworkOrDevicePath, resolveConfiguredProfile } = require("../src/vscode-adapter.cjs");
+const { COMMANDS, DIAGNOSTIC_BUILD_ID, DOCUMENT_FORMATS, EXPORT_PROFILES, EXPORT_SCOPES, STATE_LATEST_HTML, STATE_LATEST_HTML_TARGET, STATE_OUTPUT_DIR, STATE_OUTPUT_TARGET, createExtensionAdapter: createExtensionAdapterCore, defaultLoadExporter, formatExportSummary, isWindowsNetworkOrDevicePath, resolveConfiguredProfile } = require("../src/vscode-adapter.cjs");
+
+function createExtensionAdapter(vscode, injected = {}) {
+  const recordedPathIdentity = (value) => String(value || "").replaceAll("/", "\\").replace(/[\\]+$/, "").toLowerCase();
+  return createExtensionAdapterCore(vscode, {
+    discoverRecordedProjectInventory: defaultInventoryProvider,
+    recordedPathIdentity,
+    sameRecordedPathIdentity: (left, right) => recordedPathIdentity(left) === recordedPathIdentity(right),
+    ...injected,
+  });
+}
 
 function createState() {
   const values = new Map();
@@ -111,9 +121,29 @@ await fsp.mkdir(oneWorkspace, { recursive: true });
 await fsp.mkdir(twoWorkspace, { recursive: true });
 await fsp.mkdir(outputDirectory, { recursive: true });
 
+async function defaultInventoryProvider() {
+  return {
+    sessionCount: 4,
+    projects: [{
+      cwd: oneWorkspace,
+      recordedPaths: [oneWorkspace],
+      sessionCount: 2,
+      sourceBytes: 12_345,
+      firstSessionAt: "2026-08-01T10:00:00.000Z",
+      lastSessionAt: "2026-08-02T10:00:00.000Z",
+    }],
+  };
+}
+
 let lastOptions;
 let exportCallCount = 0;
 const exporter = {
+  recordedPathIdentity(value) { return String(value || "").replaceAll("/", "\\").replace(/[\\]+$/, "").toLowerCase(); },
+  sameRecordedPathIdentity(left, right) {
+    const normalize = (value) => String(value || "").replaceAll("/", "\\").replace(/[\\]+$/, "").toLowerCase();
+    return normalize(left) === normalize(right);
+  },
+  async readSessionDiscoveryMeta() { throw new Error("The injected adapter inventory must own synthetic discovery"); },
   async exportArchive(options) {
     exportCallCount += 1;
     lastOptions = options;
@@ -167,6 +197,7 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
   assert.equal(extensionPackage.contributes.configuration.properties["codexProjectChatExporter.outputDirectory"].scope, "machine");
   assert.equal(extensionPackage.contributes.configuration.properties["codexProjectChatExporter.codexHome"].scope, "machine");
   assert.equal(extensionPackage.contributes.configuration.properties["codexProjectChatExporter.includeTools"].scope, "application");
+  assert.equal(extensionPackage.contributes.configuration.properties["codexProjectChatExporter.includeTools"].description, "Include potentially sensitive Tool, Browser, and view_image content and their assets in Markdown, HTML, DOCX, and PDF reading views. When disabled, those records and assets are excluded from reading views.");
   assert.deepEqual(Object.fromEntries(Object.entries(extensionPackage.contributes.configuration.properties).map(([key, value]) => [key, value.default])), {
     "codexProjectChatExporter.outputDirectory": "",
     "codexProjectChatExporter.codexHome": "",
@@ -492,7 +523,9 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
   await adapter.activate(context);
   assert.equal(await adapter.exportCurrentWorkspace(context), undefined);
   assert.equal(context.globalState.values.size, 0);
-  assert.equal(fake.messages.some(message => message.type === "error" || message.type === "info"), false);
+  assert.equal(fake.messages.some(message => message.type === "error"), false);
+  assert.deepEqual(fake.messages.filter(message => message.type === "info").map(message => message.message), ["Export cancelled."]);
+  assert.equal(fake.output.at(-1), "Export cancelled.");
 }
 
 {
@@ -952,44 +985,248 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
   }
 }
 
-// Recovery is explicit at every boundary and never stores a cwd alias.
+assert.deepEqual(EXPORT_SCOPES.map(({ label, detail }) => ({ label, detail })), [
+  { label: "Current Workspace", detail: "Export sessions recorded for the folder currently open in VS Code" },
+  { label: "Project from Codex history…", detail: "Choose sessions recorded for a different, moved, or renamed project folder" },
+  { label: "All Sessions", detail: "Export all local Codex sessions" },
+]);
+assert.deepEqual(DOCUMENT_FORMATS.map(item => item.label), ["Standard formats only", "Add DOCX", "Add PDF", "Add DOCX and PDF"]);
+
+// Historical recovery is resolved before profile, formats, or output and never stores a cwd alias.
 for (const mode of ["recover", "menu", "dismiss-recovery", "dismiss-picker", "dismiss-confirmation"]) {
-  const recorded = { cwd: "/synthetic/historical", sessionCount: 2, sourceBytes: 12345, lastSessionAt: "2026-08-02T10:00:00.000Z" };
-  let selected;
-  const fake = createFakeVscode({ workspaceFolders: [folder(oneWorkspace)], config: { outputDirectory },
-    warningSelector: (message) => message.startsWith("No sessions were recorded")
-      ? (mode === "dismiss-recovery" ? undefined : "Choose recorded project path…")
-      : (mode === "dismiss-confirmation" ? undefined : "Export recorded sessions"),
+  const recordedVariants = ["C:\\Synthetic\\Historical", "c:/synthetic/historical/"];
+  const recorded = {
+    cwd: recordedVariants[0],
+    recordedPaths: recordedVariants,
+    sessionCount: 2,
+    sourceBytes: Math.round(5.3 * 1024 ** 3),
+    firstSessionAt: "2026-08-01T10:00:00.000Z",
+    lastSessionAt: "2026-08-02T10:00:00.000Z",
+  };
+  const modeOutput = path.join(temp, `historical-${mode}`);
+  let coreCalls = 0;
+  let selectedOptions;
+  let historicalConfirmed = false;
+  const fake = createFakeVscode({ workspaceFolders: [folder(oneWorkspace)], config: { outputDirectory: modeOutput },
+    warningSelector: (message) => {
+      if (message.startsWith("No sessions were recorded")) return mode === "dismiss-recovery" ? undefined : "Choose project from Codex history";
+      if (mode === "dismiss-confirmation") return "Cancel";
+      historicalConfirmed = true;
+      return "Export recorded sessions";
+    },
     quickPickSelector: (items, options) => {
-      if (options.placeHolder === "Choose what to export") return items.find(item => item.scope === "recorded-project");
-      if (options.placeHolder === "Choose recorded project path…") return mode === "dismiss-picker" ? undefined : items[0];
+      if (options.placeHolder === "Choose what to export") return items.find(item => item.scope === (mode === "menu" ? "recorded-project" : "project"));
+      if (options.title === "Choose a project folder from Codex history") return mode === "dismiss-picker" ? undefined : items[0];
       return items[0];
     },
   });
   const context = createContext(temp);
-  const adapter = createExtensionAdapter(fake.vscode, { loadExporter: async () => ({ async exportArchive(options) {
-    selected = await options.onSelectRecordedProject({ projects: [recorded], reason: mode === "menu" ? "requested" : "no-match" });
-    if (selected === null) throw Object.assign(new Error("Cancelled"), { code: "EXPORT_CANCELLED" });
-    return exporter.exportArchive(options);
-  } }) });
+  const adapter = createExtensionAdapter(fake.vscode, {
+    discoverRecordedProjectInventory: async () => ({ sessionCount: 2, projects: [recorded] }),
+    loadExporter: async () => ({ ...exporter, async exportArchive(options) {
+      coreCalls += 1;
+      selectedOptions = options;
+      assert.equal(historicalConfirmed, true, "historical confirmation must precede the core call");
+      assert.equal(await options.onSelectRecordedProject({ projects: [recorded], reason: "requested" }), recorded.cwd);
+      return exporter.exportArchive(options);
+    } }),
+  });
   await adapter.activate(context);
-  const result = mode === "menu" ? await adapter.exportFromQuickPick(context) : await adapter.exportCurrentWorkspace(context);
+  const result = await adapter.exportFromQuickPick(context);
   if (mode.startsWith("dismiss")) {
     assert.equal(result, undefined);
-    assert.equal(selected, null);
+    assert.equal(coreCalls, 0);
     assert.equal(context.globalState.values.size, 0);
-    assert.equal(fake.messages.some(m => m.type === "info" || m.type === "error"), false);
+    assert.equal(fake.messages.some(message => message.type === "info" || message.type === "error"), false);
+    assert.equal(fs.existsSync(modeOutput), false, "selection cancellation must not create even a configured output folder");
+    assert.equal(fake.openDialogs.length, 0);
   } else {
-    assert.equal(selected, recorded.cwd);
-    const picker = fake.quickPicks.find(p => p.options.placeHolder === "Choose recorded project path…");
+    assert.equal(coreCalls, 1);
+    assert.equal(selectedOptions.scope, "recorded-project");
+    assert.equal(selectedOptions.recordedProjectPath, undefined);
+    assert.equal(typeof selectedOptions.onSelectRecordedProject, "function");
+    const picker = fake.quickPicks.find(entry => entry.options.title === "Choose a project folder from Codex history");
+    assert.equal(picker.options.placeHolder, "Choose a project folder from Codex history");
     assert.equal(picker.items[0].label, recorded.cwd);
-    assert.ok(picker.items[0].description.includes("2 sessions") && picker.items[0].description.includes("12345 bytes"));
-    assert.ok(picker.items[0].detail.includes(recorded.lastSessionAt));
-    const confirmation = fake.messages.find(m => m.message.includes("Several logically different projects"));
-    assert.deepEqual(confirmation.actions, [{ modal: true }, "Export recorded sessions"]);
+    assert.equal(picker.items[0].description, "2 sessions · 5.3 GiB · 2026-08-01 – 2026-08-02");
+    assert.match(picker.items[0].detail, /^2 stored path variants:/);
+    for (const variant of recordedVariants) assert.ok(picker.items[0].detail.includes(variant));
+    const expectedWarning = `Export 2 sessions recorded under ${recorded.cwd}? This differs from the current workspace folder. Codex history may contain sessions from multiple logical projects under the same recorded folder.`;
+    const confirmation = fake.messages.find(message => message.message === expectedWarning);
+    assert.deepEqual(confirmation.actions, [{ modal: true }, "Export recorded sessions", "Cancel"]);
+    assert.ok(fake.quickPicks.indexOf(picker) < fake.quickPicks.findIndex(entry => entry.options.placeHolder === "Choose an export profile"));
+    assert.ok(fake.quickPicks.findIndex(entry => entry.options.placeHolder === "Choose an export profile") < fake.quickPicks.findIndex(entry => entry.options.placeHolder === "Choose optional document formats"));
     assert.equal([...context.globalState.values.values()].includes(recorded.cwd), false);
-    if (mode === "menu") assert.equal(lastOptions.scope, "recorded-project");
   }
+  if (mode !== "menu") {
+    const recovery = fake.messages.find(message => message.message.startsWith("No sessions were recorded"));
+    assert.equal(recovery.message, "No sessions were recorded for the current workspace folder. The project may have moved, been renamed, or previously opened from another folder.");
+    assert.deepEqual(recovery.actions, ["Choose project from Codex history"]);
+  }
+}
+
+{
+  const expectedProject = { cwd: "C:\\Synthetic\\Stable", recordedPaths: ["C:\\Synthetic\\Stable"], sessionCount: 2, sourceBytes: 100, firstSessionAt: "2026-08-01T00:00:00.000Z", lastSessionAt: "2026-08-02T00:00:00.000Z" };
+  const changedProject = { ...expectedProject, sessionCount: 3 };
+  const changedOutput = path.join(temp, "historical-inventory-changed");
+  const fake = createFakeVscode({ workspaceFolders: [folder(oneWorkspace)], config: { outputDirectory: changedOutput }, warningSelector: () => "Export recorded sessions", quickPickSelector: (items, options) => {
+    if (options.placeHolder === "Choose what to export") return items.find(item => item.scope === "recorded-project");
+    return items[0];
+  } });
+  const adapter = createExtensionAdapter(fake.vscode, {
+    discoverRecordedProjectInventory: async () => ({ sessionCount: 2, projects: [expectedProject] }),
+    loadExporter: async () => ({ ...exporter, async exportArchive(options) {
+      await options.onSelectRecordedProject({ projects: [changedProject], reason: "requested" });
+      throw new Error("unreachable");
+    } }),
+  });
+  const context = createContext(temp);
+  await adapter.activate(context);
+  await assert.rejects(() => adapter.exportFromQuickPick(context), error => error?.code === "RECORDED_PROJECT_INVENTORY_CHANGED");
+  assert.equal(fake.messages.filter(message => message.type === "error").length, 1);
+  assert.equal(fake.messages.some(message => message.type === "info"), false);
+  assert.equal(fs.existsSync(changedOutput), false, "a changed confirmed inventory must fail before a synthetic core publishes output");
+}
+
+{
+  const bothOutput = path.join(temp, "both-document-formats");
+  let coreCalls = 0;
+  const diagnostics = [];
+  const fake = createFakeVscode({ config: { outputDirectory: bothOutput, diagnosticOutput: true }, quickPickSelector: (items, options) => {
+    if (options.placeHolder === "Choose what to export") return items.find(item => item.scope === "all");
+    if (options.placeHolder === "Choose an export profile") return items.find(item => item.profile === "readable");
+    return items.find(item => item.label === "Add DOCX and PDF");
+  } });
+  const context = createContext(temp);
+  const adapter = createExtensionAdapter(fake.vscode, { loadExporter: async () => ({ ...exporter, async exportArchive(options) {
+    coreCalls += 1;
+    options.onDiagnostic?.({ scope: "core", event: "discovery_start" });
+    options.onDiagnostic?.({ scope: "core", event: "routing_start" });
+    diagnostics.push(...(options.documentFormats || []));
+    return exporter.exportArchive(options);
+  } }) });
+  const activation = await adapter.activate(context);
+  await adapter.exportFromQuickPick(context);
+  assert.equal(coreCalls, 1, "DOCX and PDF must share one core export call");
+  assert.deepEqual(diagnostics, ["docx", "pdf"]);
+  const coreEvents = activation.getDiagnosticEvents().filter(event => event.scope === "core");
+  assert.equal(coreEvents.filter(event => event.event === "discovery_start").length, 1);
+  assert.equal(coreEvents.filter(event => event.event === "routing_start").length, 1);
+}
+
+{
+  const discoveryHome = path.join(temp, "adapter-metadata-discovery");
+  const activeRoot = path.join(discoveryHome, "sessions", "2026", "08", "30");
+  const archivedRoot = path.join(discoveryHome, "archived_sessions", "2026", "08", "29");
+  const discoveryOutput = path.join(temp, "adapter-metadata-output-must-not-exist");
+  const workspaceFile = path.join(oneWorkspace, "must-not-be-read.txt");
+  await fsp.mkdir(activeRoot, { recursive: true });
+  await fsp.mkdir(archivedRoot, { recursive: true });
+  await fsp.writeFile(workspaceFile, "workspace sentinel", "utf8");
+  const storedCurrent = `${oneWorkspace[0].toLowerCase()}${oneWorkspace.slice(1).replaceAll("\\", "/")}/`;
+  const historicalVariants = ["C:\\Synthetic\\Grouped", "c:/synthetic/grouped/"];
+  const currentSource = path.join(activeRoot, "rollout-current.jsonl");
+  const currentMetadata = { type: "session_meta", timestamp: "2026-08-03T10:00:00Z", payload: { id: "adapter-current", cwd: storedCurrent, timestamp: "2026-08-03T10:00:00Z" } };
+  const largeConversationRecord = { type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "x".repeat(1024 * 1024) }] } };
+  await fsp.writeFile(currentSource, `${JSON.stringify(currentMetadata)}\n${JSON.stringify(largeConversationRecord)}\n`, "utf8");
+  for (let index = 0; index < historicalVariants.length; index += 1) {
+    const timestamp = `2026-08-0${index + 1}T10:00:00Z`;
+    const record = { type: "session_meta", timestamp, payload: { id: `adapter-historical-${index}`, cwd: historicalVariants[index], timestamp } };
+    await fsp.writeFile(path.join(activeRoot, `rollout-history-${index}.jsonl`), `${JSON.stringify(record)}\n`, "utf8");
+    if (index === 0) await fsp.writeFile(path.join(archivedRoot, "rollout-history-duplicate.jsonl"), `${JSON.stringify(record)}\n`, "utf8");
+  }
+  const corePath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "bin", "export-codex-project-chats.mjs");
+  const realExporter = await import(pathToFileURL(corePath).href);
+  const metadataReads = [];
+  const exporterWithObservedDiscovery = {
+    ...realExporter,
+    async readSessionDiscoveryMeta(file, options) {
+      const meta = await realExporter.readSessionDiscoveryMeta(file, options);
+      metadataReads.push({ file, bytesRead: meta.discoverySnapshot.bytesRead, fileSize: meta.fileSize });
+      return meta;
+    },
+  };
+  const adapterFsPaths = [];
+  const trackingFsp = {
+    ...fsp,
+    async readdir(candidate, options) { adapterFsPaths.push(path.resolve(candidate)); return fsp.readdir(candidate, options); },
+    async stat(candidate, options) { adapterFsPaths.push(path.resolve(candidate)); return fsp.stat(candidate, options); },
+  };
+  const fake = createFakeVscode({ workspaceFolders: [folder(oneWorkspace)], config: { codexHome: discoveryHome, outputDirectory: discoveryOutput }, quickPickSelector: (items, options) => {
+    if (options.placeHolder === "Choose what to export") return items.find(item => item.scope === "project");
+    if (options.placeHolder === "Choose an export profile") return undefined;
+    return items[0];
+  } });
+  const context = createContext(temp);
+  const adapter = createExtensionAdapterCore(fake.vscode, { fsp: trackingFsp, loadExporter: async () => exporterWithObservedDiscovery });
+  await adapter.activate(context);
+  assert.equal(await adapter.exportFromQuickPick(context), undefined);
+  assert.equal(fake.quickPicks.some(entry => entry.options.title === "Choose a project folder from Codex history"), false, "a canonical Current Workspace match must not load the historical picker");
+  assert.equal(fake.messages.some(message => message.message.startsWith("No sessions were recorded")), false);
+  assert.equal(metadataReads.length, 4, "active and archived files are probed once before duplicate-ID retention");
+  const bounded = metadataReads.find(entry => entry.file === currentSource);
+  assert.ok(bounded.bytesRead < bounded.fileSize / 4, "Current Workspace discovery must not read the large conversation tail");
+  assert.equal(adapterFsPaths.some(candidate => candidate === path.resolve(workspaceFile) || candidate.startsWith(`${path.resolve(oneWorkspace)}${path.sep}`)), false, "adapter discovery must never inspect workspace files");
+  assert.equal(fs.existsSync(discoveryOutput), false, "profile cancellation after successful metadata discovery must not create the configured output folder");
+
+  const historyFake = createFakeVscode({ workspaceFolders: [folder(oneWorkspace)], config: { codexHome: discoveryHome, outputDirectory: discoveryOutput }, quickPickSelector: (items, options) => {
+    if (options.placeHolder === "Choose what to export") return items.find(item => item.scope === "recorded-project");
+    if (options.title === "Choose a project folder from Codex history") return undefined;
+    return items[0];
+  } });
+  const historyAdapter = createExtensionAdapterCore(historyFake.vscode, { loadExporter: async () => realExporter });
+  await historyAdapter.activate(createContext(temp));
+  assert.equal(await historyAdapter.exportFromQuickPick(createContext(temp)), undefined);
+  const historyPicker = historyFake.quickPicks.find(entry => entry.options.title === "Choose a project folder from Codex history");
+  const grouped = historyPicker.items.find(item => item.detail.startsWith("2 stored path variants:"));
+  assert.ok(grouped, "canonical Windows spellings must form one visible project identity");
+  assert.match(grouped.description, /^2 sessions · \d+ bytes · 2026-08-01 – 2026-08-02$/);
+  for (const variant of historicalVariants) assert.ok(grouped.detail.includes(variant));
+  assert.equal(fs.existsSync(discoveryOutput), false);
+}
+
+{
+  const multiOutput = path.join(temp, "multi-root-cancelled");
+  const fake = createFakeVscode({ workspaceFolders: [folder(oneWorkspace), folder(twoWorkspace)], config: { outputDirectory: multiOutput }, quickPickSelector: (items, options) => {
+    if (options.placeHolder === "Choose what to export") return items.find(item => item.scope === "project");
+    if (options.placeHolder === "Choose the local workspace folder to export") return items.find(item => item.folder.uri.fsPath === twoWorkspace);
+    if (options.placeHolder === "Choose an export profile") return undefined;
+    return items[0];
+  } });
+  const adapter = createExtensionAdapter(fake.vscode, { discoverRecordedProjectInventory: async () => ({ sessionCount: 1, projects: [{ cwd: twoWorkspace, recordedPaths: [twoWorkspace], sessionCount: 1, sourceBytes: 1, firstSessionAt: "2026-08-01T00:00:00.000Z", lastSessionAt: "2026-08-01T00:00:00.000Z" }] }), loadExporter: async () => exporter });
+  await adapter.activate(createContext(temp));
+  assert.equal(await adapter.exportFromQuickPick(createContext(temp)), undefined);
+  assert.equal(fake.quickPicks.some(entry => entry.options.title === "Choose a project folder from Codex history"), false);
+  assert.equal(fs.existsSync(multiOutput), false);
+}
+
+{
+  const cancelledOutput = path.join(temp, "discovery-cancelled-output");
+  let sawAbort = false;
+  const fake = createFakeVscode({ cancelProgressImmediately: true, config: { outputDirectory: cancelledOutput }, quickPickSelector: (items, options) => options.placeHolder === "Choose what to export" ? items.find(item => item.scope === "all") : items[0] });
+  const adapter = createExtensionAdapter(fake.vscode, { discoverRecordedProjectInventory: async ({ abortSignal }) => {
+    await new Promise(resolve => setImmediate(resolve));
+    sawAbort = abortSignal.aborted;
+    throw Object.assign(new Error("Cancelled"), { code: "EXPORT_CANCELLED" });
+  }, loadExporter: async () => ({ async exportArchive() { throw new Error("must not run"); } }) });
+  await adapter.activate(createContext(temp));
+  assert.equal(await adapter.exportFromQuickPick(createContext(temp)), undefined);
+  assert.equal(sawAbort, true);
+  assert.equal(fake.messages.length, 0, "pre-export discovery cancellation is a silent picker-stage cancellation");
+  assert.equal(fs.existsSync(cancelledOutput), false);
+}
+
+{
+  let coreCalls = 0;
+  const fake = createFakeVscode({ quickPickSelector: (items, options) => {
+    if (options.placeHolder === "Choose what to export") return items.find(item => item.scope === "all");
+    return items[0];
+  }, openDialogResult: [] });
+  const adapter = createExtensionAdapter(fake.vscode, { loadExporter: async () => ({ async exportArchive() { coreCalls += 1; } }) });
+  await adapter.activate(createContext(temp));
+  assert.equal(await adapter.exportFromQuickPick(createContext(temp)), undefined);
+  assert.equal(coreCalls, 0);
+  assert.equal(fake.messages.some(message => message.type === "info" || message.type === "error" || message.message === "No export folder selected."), false);
 }
 
 const after = await fsp.readFile(sourceFile, "utf8");

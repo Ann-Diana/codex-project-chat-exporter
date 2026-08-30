@@ -158,10 +158,10 @@ test("regular VSIX builds are byte-identical and their packaged runtime exports 
     const { defaultLoadExporter } = require(path.join(installedRoot, "src", "vscode-adapter.cjs"));
     const codexHome = path.join(temp, "synthetic-codex-home");
     const outputDirectory = path.join(temp, "output");
-    const syntheticSession = await writeSyntheticSession(codexHome);
+    await writeSyntheticSession(codexHome);
     const exporter = await withoutNetwork(() => defaultLoadExporter({ extensionPath: installedRoot }));
     let choices = 0;
-    const result = await withoutNetwork(() => exporter.exportArchive({ codexHome, scope: "project", workspacePath: "C:\\Synthetic\\renamed", outputDirectory, exportProfile: "readable", documentFormats: ["docx"], onSelectRecordedProject: ({ projects, reason }) => {
+    const result = await withoutNetwork(() => exporter.exportArchive({ codexHome, scope: "project", workspacePath: "C:\\Synthetic\\renamed", outputDirectory, exportProfile: "readable", documentFormats: ["docx", "pdf"], onSelectRecordedProject: ({ projects, reason }) => {
       choices++;
       assert.equal(reason, "no-match");
       assert.equal(projects.length, 1);
@@ -196,14 +196,7 @@ test("regular VSIX builds are byte-identical and their packaged runtime exports 
     assert.ok(elementText(parsedDocument).includes("ANSI ."));
     assert.equal(elementText(parsedDocument).includes("invalid XML character U+001B"), false);
 
-    const pdfOutputDirectory = path.join(temp, "pdf-output");
-    const cleanRecords = (await fs.readFile(syntheticSession, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
-    cleanRecords[1].payload.content[0].text = cleanRecords[1].payload.content[0].text.replaceAll("\u001b", "");
-    cleanRecords[2].payload.message = cleanRecords[2].payload.message.replaceAll("\u001b", "");
-    await fs.writeFile(syntheticSession, `${cleanRecords.map((record) => JSON.stringify(record)).join("\n")}\n`, "utf8");
-    const pdfResult = await withoutNetwork(() => exporter.exportArchive({ codexHome, scope: "all", outputDirectory: pdfOutputDirectory, exportProfile: "readable", documentFormats: ["pdf"] }));
-    const pdfManifest = JSON.parse(await fs.readFile(pdfResult.manifestPath, "utf8"));
-    const pdf = await fs.readFile(path.join(pdfOutputDirectory, pdfManifest.sessions[0].pdf_file));
+    const pdf = await fs.readFile(path.join(outputDirectory, manifest.sessions[0].pdf_file));
     const pdfSource = pdf.toString("latin1");
     assert.ok(pdfSource.startsWith("%PDF-") && pdfSource.includes("/S /URI") && pdfSource.includes("/URI (https://openai.com/)"));
     assert.ok(pdfSource.includes("/URI (https://example.invalid/3D?a=1&b=2)"));
