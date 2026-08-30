@@ -25,6 +25,11 @@ const activeEvents = [
     },
   },
   {
+    type: "turn_context",
+    timestamp: "2026-01-02T10:00:00.050Z",
+    payload: { cwd: PROJECT_PATH, model: "gpt-5.5", turn_id: "active-turn" },
+  },
+  {
     type: "response_item",
     timestamp: "2026-01-02T10:00:00.100Z",
     payload: {
@@ -58,6 +63,11 @@ const activeEvents = [
     payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "Fixture assistant answer." }] },
   },
   {
+    type: "turn_context",
+    timestamp: "2026-01-02T10:00:02.500Z",
+    payload: { cwd: PROJECT_PATH, model: "gpt-5.6-sol", turn_id: "active-turn-2" },
+  },
+  {
     type: "response_item",
     timestamp: "2026-01-02T10:00:03.000Z",
     payload: {
@@ -86,6 +96,11 @@ const subagentEvents = [
       thread_source: "subagent",
       parent_thread_id: ACTIVE_SESSION_ID,
     },
+  },
+  {
+    type: "turn_context",
+    timestamp: "2026-01-03T11:00:00.500Z",
+    payload: { cwd: PROJECT_PATH, model: "codex-auto-review", turn_id: "subagent-turn" },
   },
   {
     type: "response_item",

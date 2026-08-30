@@ -11,7 +11,7 @@ import { Packer } from "docx";
 import xmlJs from "xml-js";
 
 import { exportArchive, INCOMPLETE_MARKER_NAME } from "../bin/export-codex-project-chats.mjs";
-import { writeReadingOutputFixture } from "./fixtures/reading-output/sessions.mjs";
+import { ACTIVE_SESSION_ID, writeReadingOutputFixture } from "./fixtures/reading-output/sessions.mjs";
 
 const execFileAsync = promisify(execFile);
 const { xml2js } = xmlJs;
@@ -78,6 +78,10 @@ test("opt-in DOCX export creates exactly one deterministic document per session"
       assert.deepEqual(left, right, "equivalent exports into different folders must be byte-identical");
       const zip = await JSZip.loadAsync(left, { checkCRC32: true });
       assert.ok(zip.file("word/document.xml"));
+      if (firstManifest.sessions[index].session_id === ACTIVE_SESSION_ID) {
+        const xml = await zip.file("word/document.xml").async("string");
+        assert.ok(xml.includes("Models: ") && xml.includes("gpt-5.5 → gpt-5.6-sol"), "the packaged session pipeline must place the full model history in DOCX metadata");
+      }
       const relationships = relationshipElements(await zip.file("word/_rels/document.xml.rels").async("string"));
       assert.ok(relationships.filter((relationship) => relationship.attributes?.TargetMode === "External").every((relationship) => relationship.attributes?.Type.endsWith("/hyperlink") && ["http:", "https:"].includes(new URL(relationship.attributes.Target).protocol)));
     }

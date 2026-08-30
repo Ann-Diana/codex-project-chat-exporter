@@ -148,6 +148,15 @@ test("version 0.3.0 reference and streaming readers preserve all profile golden 
       assert.equal(manifest.formats.attachments, true);
       assert.equal(manifest.replacement_history_in_reading_views, profile !== "readable");
       assert.equal(manifest.replacement_history_source_unchanged, true);
+      const histories = new Map(manifest.session_model_histories.map((entry) => [entry.session_id, entry]));
+      if (profile === "complete" || profile === "readable") {
+        assert.deepEqual(histories.get(ACTIVE_SESSION_ID).models, ["gpt-5.5", "gpt-5.6-sol"]);
+        assert.deepEqual(histories.get(SUBAGENT_SESSION_ID).models, ["codex-auto-review"]);
+        assert.equal(active.model, "gpt-5.6-sol", "the version-1 compatibility field remains the last confirmed model");
+        assert.equal(histories.get(ACTIVE_SESSION_ID).models.includes("codex-auto-review"), false);
+      } else {
+        assert.ok([...histories.values()].every((entry) => entry.models.length === 0), "metadata-only source snapshots must not claim models without parsing turns");
+      }
       const assetManifest = JSON.parse(await fs.readFile(path.join(outputDir, manifest.assets_manifest), "utf8"));
       assert.equal(assetManifest.assets.length, 1);
       assert.equal(assetManifest.assets[0].uses.length, 2);
@@ -167,12 +176,14 @@ test("version 0.3.0 reference and streaming readers preserve all profile golden 
           "## Tool function_call – fixture_tool",
         ]);
         assert.match(subagentMarkdown, /<summary>Subagent input \/ parent-agent handoff/);
+        assert.match(activeMarkdown, /- Models: gpt-5\.5 → gpt-5\.6-sol/);
         assert.equal(activeMarkdown.includes(SMALL_PNG_DATA_URL), false, "the current reading view must not inline the embedded image payload");
         assert.match(activeMarkdown, /!\[Attachment 1\]\(\.\.\/\.\.\/assets\/[0-9a-f]{64}\.png\)/);
         const markdownIndex = await fs.readFile(path.join(outputDir, "index.md"), "utf8");
         const htmlIndex = await fs.readFile(path.join(outputDir, "index.html"), "utf8");
         assert.ok(markdownIndex.includes(portable(active.markdown_file)));
         assert.ok(htmlIndex.includes(`href="${portable(active.markdown_file)}"`));
+        assert.ok(htmlIndex.includes("gpt-5.5 → gpt-5.6-sol"));
         assert.match(htmlIndex, /<img src="assets\/[0-9a-f]{64}\.png" alt="Attachment 1" loading="lazy">/);
       } else {
         assert.equal(await pathExists(path.join(outputDir, "index.md")), false);

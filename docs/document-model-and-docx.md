@@ -14,7 +14,7 @@ The shared JavaScript API uses `documentFormats: ["docx"]`. The VS Code adapter 
 
 ## Document contract
 
-`lib/document-model.mjs` defines the exporter-independent session-document contract. A header contains a title, a stable session origin, and limited project, storage, timestamp, model, and optional Raw-reference metadata. Each message contains:
+`lib/document-model.mjs` defines the exporter-independent session-document contract. A header contains a title, a stable session origin, and limited project, storage, timestamp, confirmed model history, and optional Raw-reference metadata. One confirmed model is labelled `Model`; multiple chronological values are labelled `Models` and joined with ` → `. The history comes only from turn runtime metadata and never merges a coupled subagent into its parent. Each message contains:
 
 - a stable session ID and physical JSONL record ordinal;
 - an explicit role: `USER`, `ASSISTANT`, `SUBAGENT`, `RUNTIME_CONTEXT`, `UNCLASSIFIED`, or `TOOL`;

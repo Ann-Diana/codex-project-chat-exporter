@@ -158,6 +158,7 @@ function createRepresentativeDocument(repeatedPng = true) {
     cwd: "C:\\Projects\\alpha",
     timestamp: "2026-08-24T10:00:00.000Z",
     updatedAt: "2026-08-24T10:02:00.000Z",
+    models: ["gpt-5.5", "gpt-5.6-sol"],
   });
   const message = createDocumentMessage({
     sessionId,
@@ -181,6 +182,12 @@ test("PDF project metadata keeps only a non-path display name", () => {
   assert.equal(safePdfProjectDisplayName("/srv/private/beta"), "beta");
   assert.equal(safePdfProjectDisplayName("\\\\server\\share\\gamma"), "gamma");
   assert.equal(safePdfProjectDisplayName("C:\\"), "");
+});
+
+test("PDF header renders the shared chronological model summary", async () => {
+  const header = createSessionDocumentHeader({ id: "model-history", models: ["gpt-5.5", "gpt-5.6-sol"] });
+  const { fragments } = await captureRenderedPdfFragments({ header, messages: [], resolveAsset: async () => null });
+  assert.ok(fragments.map((fragment) => fragment.text).join("").includes("Models: gpt-5.5 → gpt-5.6-sol"));
 });
 
 test("PDF renderer creates deterministic offline A4 documents with safe links and deduplicated images", async () => {

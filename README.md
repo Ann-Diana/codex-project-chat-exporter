@@ -166,7 +166,7 @@ The exporter does not:
 - guarantee complete secret or personal-data removal;
 - guarantee compatibility with future changes to Codex's internal JSONL format.
 
-Complete and Readable HTML indexes filter metadata such as project, title, date, model, and active/archived status. Source snapshots instead uses a reduced index with project, storage, start time, session ID, and Raw links; it has no title, model, or Markdown columns. Search transcript content from Complete or Readable in the Markdown files with an editor or a dedicated search tool.
+Complete and Readable HTML indexes filter metadata such as project, title, date, confirmed model history, and active/archived status. Consecutive duplicate runtime model values are collapsed; a multi-model session is shown chronologically as `gpt-5.5 → gpt-5.6-sol`. Models from separate subagent sessions are not merged into the parent. Source snapshots instead uses a reduced index with project, storage, start time, session ID, and Raw links; it has no title, model, or Markdown columns. Search transcript content from Complete or Readable in the Markdown files with an editor or a dedicated search tool.
 
 ## Experimental VS Code extension
 

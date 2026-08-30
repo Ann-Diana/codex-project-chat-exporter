@@ -41,6 +41,12 @@ import {
 import { extractReadingText } from "../lib/reading-content.mjs";
 import { ReadingAssetSelection } from "../lib/reading-asset-selection.mjs";
 import { streamJsonlTokens } from "../lib/jsonl-token-adapter.mjs";
+import {
+  MODEL_HISTORY_STATUS,
+  createRuntimeModelHistoryTracker,
+  formatModelHistory,
+  normalizeModelHistory,
+} from "../lib/model-history.mjs";
 
 const VERSION = "0.3.0";
 const ARCHIVE_FORMAT_VERSION = 1;
@@ -73,6 +79,7 @@ const USER_RECORD_KIND = Object.freeze({
 const SESSION_KIND = Object.freeze({
   DIRECT_USER: "DIRECT_USER",
   SUBAGENT: "SUBAGENT",
+  FORK: "FORK",
   UNKNOWN: "UNKNOWN",
 });
 const { args: cliArgs, error: argumentError } = parseCliInvocation(process.argv.slice(2));
@@ -811,6 +818,7 @@ async function readSessionMeta(file, {
   const stat = await fsp.stat(file).catch(() => null);
   const readerSummary = createSessionReaderSummary();
   const classifier = createSessionEventClassifier();
+  const modelHistoryTracker = createRuntimeModelHistoryTracker();
   const meta = {
     file,
     id: filenameId || fallbackSessionId,
@@ -823,7 +831,10 @@ async function readSessionMeta(file, {
     source: "",
     threadSource: "",
     parentThreadId: "",
+    forkedFromId: "",
     model: "",
+    modelHistory: Object.freeze([]),
+    modelHistoryStatus: MODEL_HISTORY_STATUS.NOT_OBSERVED,
     firstUserText: "",
     firstCwdText: "",
     hasSessionMeta: false,
@@ -849,6 +860,7 @@ async function readSessionMeta(file, {
   })) {
     if (meta.attachmentMetrics) observeAttachmentMetrics(item, meta.attachmentMetrics);
     classifier.observe(item, recordNumber);
+    modelHistoryTracker.observe(item, recordNumber);
     observeRecordedTimestamp(meta, item.timestamp);
     if (item.timestamp && (!meta.latestTimestamp || item.timestamp > meta.latestTimestamp)) meta.latestTimestamp = item.timestamp;
     if (item.type === "session_meta" && item.payload) {
@@ -868,6 +880,7 @@ async function readSessionMeta(file, {
         meta.source = item.payload.source || meta.source;
         meta.threadSource = item.payload.thread_source || meta.threadSource;
         meta.parentThreadId = item.payload.parent_thread_id || meta.parentThreadId;
+        meta.forkedFromId = item.payload.forked_from_id || meta.forkedFromId;
       } else {
         meta.cwd = meta.cwd || item.payload.cwd || "";
         meta.timestamp = meta.timestamp || item.payload.timestamp || item.timestamp || "";
@@ -875,7 +888,6 @@ async function readSessionMeta(file, {
     }
     if (item.type === "turn_context" && item.payload) {
       meta.cwd = item.payload.cwd || meta.cwd;
-      meta.model = item.payload.model || meta.model;
     }
     if (item.type === "response_item" && item.payload?.type === "message" && item.payload?.role === "user" && !meta.firstCwdText) {
       meta.firstCwdText = extractText(item.payload.content);
@@ -887,9 +899,14 @@ async function readSessionMeta(file, {
   meta.parsedEventCount = readerSummary.recordCount;
   meta.invalidJsonLines = readerSummary.invalidRecordCount;
   const eventAnalysis = classifier.finish();
+  const modelHistory = modelHistoryTracker.finish();
   meta.eventAnalysis = eventAnalysis;
   meta.firstUserText = eventAnalysis.firstDirectUserText;
   meta.sessionKind = eventAnalysis.sessionKind;
+  meta.modelHistory = modelHistory.models;
+  meta.modelHistoryChanges = modelHistory.changes;
+  meta.modelHistoryStatus = modelHistory.status;
+  meta.model = modelHistory.models.at(-1) || "";
   if (!meta.cwd && meta.firstCwdText) meta.cwd = extractCwdFromText(meta.firstCwdText) || meta.cwd;
   if (!meta.timestamp) meta.timestamp = fallbackTimestamp || (stat ? stat.mtime.toISOString() : "");
   if (!meta.latestTimestamp) meta.latestTimestamp = meta.timestamp;
@@ -919,6 +936,7 @@ const DISCOVERY_FIELD_LIMITS = Object.freeze({
   "payload.source": 4 * 1024,
   "payload.thread_source": 4 * 1024,
   "payload.parent_thread_id": 4 * 1024,
+  "payload.forked_from_id": 4 * 1024,
 });
 
 async function readSessionDiscoveryMeta(file, { abortSignal, maxRecordBytes = DISCOVERY_RECORD_MAX_BYTES, io = {} } = {}) {
@@ -957,6 +975,7 @@ async function readSessionDiscoveryMeta(file, { abortSignal, maxRecordBytes = DI
     source: fields?.source || "",
     threadSource: fields?.threadSource || "",
     parentThreadId: fields?.parentThreadId || "",
+    forkedFromId: fields?.forkedFromId || "",
     hasSessionMeta: fields?.type === "session_meta",
     fileSize: Number(before.size),
     discoverySnapshot: Object.freeze({
@@ -1097,6 +1116,7 @@ async function collectDiscoveryFields(tokens, abortSignal) {
     source: single("payload.source") || "",
     threadSource: single("payload.thread_source") || "",
     parentThreadId: single("payload.parent_thread_id") || "",
+    forkedFromId: single("payload.forked_from_id") || "",
   };
 }
 
@@ -1148,7 +1168,17 @@ async function processExportTask(task, titleIndex, profiler, context, sourceProt
   const { exportFormats, copyRaw, outputDir, redactMarkdown, pathStyle, markdownDirName } = context;
   const { meta, projectDir, sessionCode, sourceOriginalFilename, rawExportName, rawRel, snapshot, assetSnapshot, parsedSnapshotMeta, metadataAlreadyParsed } = task;
   let renderMeta = meta;
-  let stats = { userMessages: 0, assistantMessages: 0, subagentInputs: 0, runtimeContexts: 0, unclassifiedUserRoleRecords: 0, toolEvents: 0, model: meta.model || "", updatedAt: meta.updatedAt || meta.timestamp || "" };
+  let stats = {
+    userMessages: 0,
+    assistantMessages: 0,
+    subagentInputs: 0,
+    runtimeContexts: 0,
+    unclassifiedUserRoleRecords: 0,
+    toolEvents: 0,
+    models: normalizeModelHistory(meta.modelHistory),
+    modelHistoryStatus: meta.modelHistoryStatus || MODEL_HISTORY_STATUS.NOT_OBSERVED,
+    updatedAt: meta.updatedAt || meta.timestamp || "",
+  };
   let markdownRel = "";
   let docxRel = "";
   let pdfRel = "";
@@ -1230,7 +1260,9 @@ async function processExportTask(task, titleIndex, profiler, context, sourceProt
     session_kind: renderMeta.sessionKind || SESSION_KIND.UNKNOWN,
     started_at: renderMeta.timestamp || "",
     updated_at: stats.updatedAt || renderMeta.updatedAt || "",
-    model: stats.model || renderMeta.model || "",
+    model: stats.models.at(-1) || renderMeta.model || "",
+    model_history: [...stats.models],
+    model_history_status: stats.modelHistoryStatus,
     user_messages: documentViewEnabled ? stats.userMessages : null,
     assistant_messages: documentViewEnabled ? stats.assistantMessages : null,
     subagent_inputs: documentViewEnabled ? stats.subagentInputs : null,
@@ -1485,8 +1517,7 @@ function sortedSessionValues(map) {
 }
 
 function createSessionEventClassifier() {
-  let sessionMeta = {};
-  let sessionKind = SESSION_KIND.UNKNOWN;
+  const sessionKindEvidence = createSessionKindEvidence();
   let previousParsed = null;
   let firstPairedInputText = "";
   const userRecords = [];
@@ -1494,8 +1525,7 @@ function createSessionEventClassifier() {
 
   function observe(item, recordNumber) {
     if (item.type === "session_meta" && item.payload) {
-      sessionMeta = { ...sessionMeta, ...item.payload };
-      sessionKind = classifySessionKind(sessionMeta);
+      observeSessionKindEvidence(sessionKindEvidence, item.payload);
     }
 
     const current = { item, recordNumber, userRecord: null };
@@ -1531,6 +1561,7 @@ function createSessionEventClassifier() {
 
   function finish() {
     if (previousParsed?.userRecord) delete previousParsed.userRecord.fullText;
+    const sessionKind = resolveSessionKindEvidence(sessionKindEvidence);
     const recordsByTurn = new Map();
     for (const record of userRecords) {
       if (!recordsByTurn.has(record.turnId)) recordsByTurn.set(record.turnId, []);
@@ -1597,10 +1628,48 @@ function createSessionEventClassifier() {
 }
 
 function classifySessionKind(payload = {}) {
-  if (payload.thread_source === "subagent" || payload.source?.subagent) return SESSION_KIND.SUBAGENT;
-  if (payload.thread_source === "user") return SESSION_KIND.DIRECT_USER;
-  if (typeof payload.source === "string" && ["cli", "exec", "vscode"].includes(payload.source.toLowerCase())) return SESSION_KIND.DIRECT_USER;
+  const evidence = createSessionKindEvidence();
+  observeSessionKindEvidence(evidence, payload);
+  return resolveSessionKindEvidence(evidence);
+}
+
+function createSessionKindEvidence() {
+  return {
+    hasParent: false,
+    hasFork: false,
+    threadSources: new Set(),
+    sourceDirect: false,
+    sourceSubagent: false,
+  };
+}
+
+function observeSessionKindEvidence(evidence, payload = {}) {
+  if (usableMetadataIdentifier(payload.parent_thread_id)) evidence.hasParent = true;
+  if (usableMetadataIdentifier(payload.forked_from_id)) evidence.hasFork = true;
+  if (typeof payload.thread_source === "string") {
+    const threadSource = payload.thread_source.trim().toLowerCase();
+    if (threadSource === "user" || threadSource === "subagent") evidence.threadSources.add(threadSource);
+  }
+  if (payload.source?.subagent) evidence.sourceSubagent = true;
+  if (typeof payload.source === "string" && ["cli", "exec", "vscode"].includes(payload.source.trim().toLowerCase())) evidence.sourceDirect = true;
+}
+
+function resolveSessionKindEvidence(evidence) {
+  if (evidence.hasParent) return SESSION_KIND.SUBAGENT;
+  if (evidence.hasFork) return SESSION_KIND.FORK;
+  const saysUser = evidence.threadSources.has("user");
+  const saysSubagent = evidence.threadSources.has("subagent");
+  if ((saysUser && saysSubagent) || (saysUser && evidence.sourceSubagent)) return SESSION_KIND.UNKNOWN;
+  if (saysSubagent) return SESSION_KIND.SUBAGENT;
+  if (saysUser) return SESSION_KIND.DIRECT_USER;
+  if (evidence.sourceSubagent && evidence.sourceDirect) return SESSION_KIND.UNKNOWN;
+  if (evidence.sourceSubagent) return SESSION_KIND.SUBAGENT;
+  if (evidence.sourceDirect) return SESSION_KIND.DIRECT_USER;
   return SESSION_KIND.UNKNOWN;
+}
+
+function usableMetadataIdentifier(value) {
+  return typeof value === "string" && value.trim().length > 0;
 }
 
 function isMirroredUserEvent(responseItem, eventMessage) {
@@ -2862,7 +2931,18 @@ async function writeSessionDocuments(meta, paths, profiler = null, profileSessio
   const { redactMarkdown, includeTools } = context;
   const { markdownPath, docxPath, pdfPath, rawRel } = paths;
   const renderStart = performance.now();
-  const stats = { userMessages: 0, assistantMessages: 0, subagentInputs: 0, runtimeContexts: 0, unclassifiedUserRoleRecords: 0, toolEvents: 0, model: meta.model || "", updatedAt: meta.latestTimestamp || meta.updatedAt || meta.timestamp || "" };
+  const stats = {
+    userMessages: 0,
+    assistantMessages: 0,
+    subagentInputs: 0,
+    runtimeContexts: 0,
+    unclassifiedUserRoleRecords: 0,
+    toolEvents: 0,
+    models: normalizeModelHistory(meta.modelHistory),
+    modelHistoryStatus: meta.modelHistoryStatus || MODEL_HISTORY_STATUS.NOT_OBSERVED,
+    updatedAt: meta.latestTimestamp || meta.updatedAt || meta.timestamp || "",
+  };
+  const modelSummary = formatModelHistory(stats.models);
   const readerSummary = createSessionReaderSummary();
   const documentMessages = [];
   const additionalStoredContext = [];
@@ -2917,7 +2997,7 @@ async function writeSessionDocuments(meta, paths, profiler = null, profileSessio
       writeLine(out, `- Session ID: ${meta.id || ""}`);
       writeLine(out, `- Started: ${formatDerivedTimestamp(meta.timestamp)}`);
       writeLine(out, `- Updated: ${formatDerivedTimestamp(stats.updatedAt)}`);
-      if (meta.model) writeLine(out, `- Model: ${meta.model}`);
+      if (modelSummary.value) writeLine(out, `- ${modelSummary.label}: ${modelSummary.value}`);
       if (rawRel) writeLine(out, `- Raw JSONL: ${rawRel.replace(/\\/g, "/")}`);
       writeLine(out, "");
       writeLine(out, "> Markdown is a classified, derived reading view. The raw JSONL file is the canonical lossless session snapshot.");
@@ -2932,7 +3012,6 @@ async function writeSessionDocuments(meta, paths, profiler = null, profileSessio
       summary: readerSummary,
     })) {
       if (item.timestamp && (!stats.updatedAt || item.timestamp > stats.updatedAt)) stats.updatedAt = item.timestamp;
-      if (item.type === "turn_context" && item.payload?.model && !stats.model) stats.model = item.payload.model;
       if (item.type === "compacted") {
         const attachments = selectedAttachments(item, recordNumber, "additional");
         if (attachments.length) additionalStoredContext.push({ attachments, recordNumber, timestamp: item.timestamp });
@@ -3070,7 +3149,7 @@ async function writeSessionDocuments(meta, paths, profiler = null, profileSessio
     const header = createSessionDocumentHeader({
       ...meta,
       latestTimestamp: stats.updatedAt,
-      model: stats.model,
+      models: stats.models,
       rawReference: rawRel ? rawRel.replaceAll("\\", "/") : "",
     });
     const resolveAsset = context.docxOptions.resolveAsset || ((attachment) => resolveVerifiedAsset(assetStore, context.outputDir, attachment));
@@ -3087,7 +3166,7 @@ async function writeSessionDocuments(meta, paths, profiler = null, profileSessio
     const header = createSessionDocumentHeader({
       ...meta,
       latestTimestamp: stats.updatedAt,
-      model: stats.model,
+      models: stats.models,
       rawReference: rawRel ? rawRel.replaceAll("\\", "/") : "",
     });
     const resolveAsset = context.pdfOptions.resolveAsset || ((attachment) => resolveVerifiedPdfAsset(assetStore, context.outputDir, attachment));
@@ -3192,7 +3271,13 @@ async function writeIndexFiles(dir, rows, profiler = null, context, sourceProtec
   }
   profiler?.addPhase("indexes", performance.now() - indexStart, 0, indexBytes);
   diagnosticReporter("index_end", { duration_ms: roundMs(performance.now() - indexStart), bytes_written: indexBytes });
-  const manifest = `${JSON.stringify({ archive_format_version: ARCHIVE_FORMAT_VERSION, canonical_representation: "raw_jsonl", canonical_representation_included: copyRaw, export_profile: exportProfile, formats: exportFormats, include_tools: Boolean(includeTools), replacement_history_in_reading_views: exportProfile !== EXPORT_PROFILE.READABLE, replacement_history_source_unchanged: true, generated_at: generatedAt, codex_home: codexHome, sessions_dir: sessionsDir, archived_sessions_dir: includeArchived ? archivedSessionsDir : "", session_index: sessionIndexPath, path_style: pathStyle, assets_manifest: ASSET_MANIFEST_PATH, asset_occurrences: assetSummary.assetOccurrences, unique_assets: assetSummary.uniqueAssets, unique_asset_bytes: assetSummary.uniqueAssetBytes, deduplicated_asset_bytes_saved: assetSummary.deduplicatedBytesSaved, sessions: rows }, null, 2)}\n`;
+  const sessionModelHistories = rows.map((row) => ({
+    session_id: row.session_id,
+    models: [...normalizeModelHistory(row.model_history)],
+    status: row.model_history_status || MODEL_HISTORY_STATUS.NOT_OBSERVED,
+  }));
+  const manifestSessions = rows.map(({ model_history: _modelHistory, model_history_status: _modelHistoryStatus, ...row }) => row);
+  const manifest = `${JSON.stringify({ archive_format_version: ARCHIVE_FORMAT_VERSION, canonical_representation: "raw_jsonl", canonical_representation_included: copyRaw, export_profile: exportProfile, formats: exportFormats, include_tools: Boolean(includeTools), replacement_history_in_reading_views: exportProfile !== EXPORT_PROFILE.READABLE, replacement_history_source_unchanged: true, session_model_histories: sessionModelHistories, generated_at: generatedAt, codex_home: codexHome, sessions_dir: sessionsDir, archived_sessions_dir: includeArchived ? archivedSessionsDir : "", session_index: sessionIndexPath, path_style: pathStyle, assets_manifest: ASSET_MANIFEST_PATH, asset_occurrences: assetSummary.assetOccurrences, unique_assets: assetSummary.uniqueAssets, unique_asset_bytes: assetSummary.uniqueAssetBytes, deduplicated_asset_bytes_saved: assetSummary.deduplicatedBytesSaved, sessions: manifestSessions }, null, 2)}\n`;
   return manifest;
 }
 
@@ -3818,16 +3903,17 @@ function renderHtmlIndex(rows, generatedAt, options = {}) {
   const bodyRows = rows.map((row) => {
     const startedAt = formatDerivedTimestamp(row.started_at);
     const updatedAt = formatDerivedTimestamp(row.updated_at);
+    const modelSummary = formatModelHistory(row.model_history);
     const searchable = reducedMetadata
       ? [row.project_name || row.project, row.storage, startedAt, row.session_id].join(" ").toLowerCase()
-      : [row.project_name || row.project, row.title || row.session_id, row.storage, startedAt, updatedAt, row.model].join(" ").toLowerCase();
+      : [row.project_name || row.project, row.title || row.session_id, row.storage, startedAt, updatedAt, modelSummary.value].join(" ").toLowerCase();
     const rawCell = includeRawColumn ? `<td>${row.raw_export_file ? htmlLink(row.raw_export_file, path.posix.basename(toPosixPath(row.raw_export_file))) : ""}</td>` : "";
     const markdownCell = includeMarkdownColumn ? `<td>${row.markdown_file ? htmlLink(row.markdown_file, path.posix.basename(toPosixPath(row.markdown_file))) : ""}</td>` : "";
     const docxCell = includeDocxColumn ? `<td>${row.docx_file ? htmlLink(row.docx_file, path.posix.basename(toPosixPath(row.docx_file))) : ""}</td>` : "";
     const pdfCell = includePdfColumn ? `<td>${row.pdf_file ? htmlLink(row.pdf_file, path.posix.basename(toPosixPath(row.pdf_file))) : ""}</td>` : "";
     const assetsCell = `<td>${renderHtmlAssetReferences(assetStore?.readingReferencesForSession(row.session_id) || [])}</td>`;
     if (reducedMetadata) return `      <tr data-search="${htmlEscape(searchable)}"><td>${htmlEscape(row.project_name || row.project)}</td><td>${htmlEscape(row.storage || "active")}</td><td>${htmlEscape(startedAt)}</td><td>${htmlEscape(row.session_id)}</td>${assetsCell}${docxCell}${pdfCell}${rawCell}</tr>`;
-    return `      <tr data-search="${htmlEscape(searchable)}"><td>${htmlEscape(row.project_name || row.project)}</td><td>${htmlEscape(row.title || row.session_id)}</td><td>${htmlEscape(row.storage || "active")}</td><td>${htmlEscape(startedAt)}</td><td>${htmlEscape(row.model || "")}</td>${assetsCell}${markdownCell}${docxCell}${pdfCell}${rawCell}</tr>`;
+    return `      <tr data-search="${htmlEscape(searchable)}"><td>${htmlEscape(row.project_name || row.project)}</td><td>${htmlEscape(row.title || row.session_id)}</td><td>${htmlEscape(row.storage || "active")}</td><td>${htmlEscape(startedAt)}</td><td>${htmlEscape(modelSummary.value)}</td>${assetsCell}${markdownCell}${docxCell}${pdfCell}${rawCell}</tr>`;
   }).join("\n");
   const filterPlaceholder = reducedMetadata ? "Project, storage, date, or session ID" : "Project, title, date, model, active or archived";
   const profileNote = reducedMetadata ? "\n  <p class=\"meta\">Source snapshots intentionally use a reduced index and do not inspect complete readable metadata.</p>" : "";

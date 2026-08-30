@@ -71,6 +71,8 @@ The version-1 root manifest has an open, forward-compatible content model. A con
 
 This rule applies only to additive fields in the root `manifest.json`. It does not relax the separately versioned and deliberately strict `assets/manifest.json` schema, and an unknown root field never authorizes an additional archive path.
 
+`session_model_histories` is additive root metadata. It contains one entry per exported session with the session ID, the chronological sequence of models confirmed by `turn_context.payload.model` after consecutive duplicates are collapsed, and a status. `thread_settings.model` is corroborating configuration only and cannot add a model to this sequence. The legacy `sessions[].model` field remains the last confirmed value for version-1 consumers; reading views and the HTML index use the complete root history. A fork whose copied records cannot be separated reliably from fork-local turns has status `WITHHELD_FORK_INHERITANCE` and an empty sequence rather than an inferred history.
+
 ## Asset manifest schema 2
 
 Every profile includes `assets/manifest.json`, even when no embedded attachments occur. Its stable header is:
@@ -171,6 +173,8 @@ The parser separates:
 - `UNCLASSIFIED_USER_ROLE_RECORD`: a user-role record whose role cannot be established safely.
 
 Subagent inputs are not counted as direct human user turns. Runtime-context labels can identify bounded AGENTS, plugin, or environment markers, but text keywords alone do not promote an arbitrary record to a trusted classification.
+
+Session origin uses explicit first-party metadata before source heuristics. A non-empty `parent_thread_id` establishes a coupled `SUBAGENT`; without a parent, a non-empty `forked_from_id` establishes `FORK`. `thread_source: user` establishes `DIRECT_USER` only when neither parent nor fork metadata is present. Contradictory explicit evidence and missing session metadata remain `UNKNOWN`; a source-string heuristic is considered only when usable explicit origin fields are absent.
 
 Classification affects only derived metadata and reading-view labels. It never deletes or rewrites raw JSONL events.
 

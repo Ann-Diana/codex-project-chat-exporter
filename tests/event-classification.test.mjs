@@ -126,6 +126,23 @@ async function fileIdentity(file) {
 }
 
 {
+  const direct = classify([sessionMeta({ source: "vscode", thread_source: "user", parent_thread_id: undefined, forked_from_id: undefined })]);
+  assert.equal(direct.sessionKind, SESSION_KIND.DIRECT_USER, "thread_source=user without parent or fork proves a direct main session");
+
+  const coupled = classify([sessionMeta({ source: "vscode", thread_source: "user", parent_thread_id: "parent-session" })]);
+  assert.equal(coupled.sessionKind, SESSION_KIND.SUBAGENT, "an explicit parent must override the old direct-user heuristic");
+
+  const fork = classify([sessionMeta({ source: "vscode", thread_source: "user", forked_from_id: "parent-session" })]);
+  assert.equal(fork.sessionKind, SESSION_KIND.FORK, "an explicit fork origin must not be classified as direct user");
+
+  const contradictory = classify([sessionMeta({ source: { subagent: { other: "review" } }, thread_source: "user" })]);
+  assert.equal(contradictory.sessionKind, SESSION_KIND.UNKNOWN, "contradictory explicit origin evidence must fail closed");
+
+  const missing = classify([{ type: "turn_context", payload: { model: "gpt-5.5" } }]);
+  assert.equal(missing.sessionKind, SESSION_KIND.UNKNOWN, "missing session_meta must not fall back to a direct-user claim");
+}
+
+{
   const result = classify([
     sessionMeta({ source: "unknown", thread_source: undefined }),
     responseUser("Possibly user-authored, but structurally unconfirmed", "turn-only", "2026-08-16T10:00:01.000Z"),

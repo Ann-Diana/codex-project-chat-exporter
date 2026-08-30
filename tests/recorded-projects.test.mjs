@@ -173,12 +173,14 @@ test("first-record discovery is bounded, ignores conversation bytes and aborts b
   const outputDirectory = path.join(temp, "output");
   await fs.mkdir(sessions, { recursive: true });
   try {
-    const metadata = { type: "session_meta", timestamp: "2026-08-01T10:00:00Z", payload: { id: "bounded", cwd: oldPath, timestamp: "2026-08-01T10:00:00Z" } };
+    const metadata = { type: "session_meta", timestamp: "2026-08-01T10:00:00Z", payload: { id: "bounded", cwd: oldPath, timestamp: "2026-08-01T10:00:00Z", thread_source: "user", parent_thread_id: "parent", forked_from_id: "fork-origin" } };
     const tail = JSON.stringify({ type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "x".repeat(8 * 1024 * 1024) }] } });
     const source = path.join(sessions, "rollout-bounded.jsonl");
     await fs.writeFile(source, `${JSON.stringify(metadata)}\n${tail}\n`);
     const discovered = await readSessionDiscoveryMeta(source);
     assert.equal(discovered.cwd, oldPath);
+    assert.equal(discovered.parentThreadId, "parent");
+    assert.equal(discovered.forkedFromId, "fork-origin");
     assert.ok(discovered.discoverySnapshot.bytesRead <= Buffer.byteLength(JSON.stringify(metadata)) + 4096, "discovery must not scan the large conversation record beyond bounded stream over-read");
 
     const conversationFirst = path.join(sessions, "rollout-conversation-first.jsonl");

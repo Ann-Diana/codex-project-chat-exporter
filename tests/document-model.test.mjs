@@ -20,10 +20,13 @@ test("document model preserves roles, block structure, links, and stable origins
     storage: "active",
     timestamp: "2026-08-24T10:00:00.000Z",
     updatedAt: "2026-08-24T10:01:00.000Z",
-    model: "gpt-test",
+    models: ["gpt-5.5", "gpt-5.6-sol"],
   });
   assert.deepEqual(header.origin, { sessionId });
   assert.equal(header.metadata.sessionId, sessionId);
+  assert.deepEqual(header.metadata.models, ["gpt-5.5", "gpt-5.6-sol"]);
+  assert.equal(header.metadata.modelLabel, "Models");
+  assert.equal(header.metadata.model, "gpt-5.5 → gpt-5.6-sol");
   assert.equal(Object.hasOwn(header, "rawSession"), false, "the document contract must not retain a complete Raw session");
 
   const message = createDocumentMessage({

@@ -8,7 +8,7 @@ import { promisify } from "node:util";
 
 import { exportArchive, INCOMPLETE_MARKER_NAME } from "../bin/export-codex-project-chats.mjs";
 import { validateCanonicalPdf } from "../lib/pdf-renderer.mjs";
-import { writeReadingOutputFixture } from "./fixtures/reading-output/sessions.mjs";
+import { ACTIVE_SESSION_ID, writeReadingOutputFixture } from "./fixtures/reading-output/sessions.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -41,7 +41,7 @@ async function writeSingleSession(codexHome) {
   return { file, sessionId };
 }
 
-test("opt-in PDF export creates exactly one byte-identical document per session", async () => {
+test("opt-in PDF export creates exactly one byte-identical document per session", async (t) => {
   const temp = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "pdf-export-integration-")));
   try {
     const codexHome = path.join(temp, ".codex");
@@ -63,6 +63,18 @@ test("opt-in PDF export creates exactly one byte-identical document per session"
       const right = await fs.readFile(path.join(secondOutput, secondManifest.sessions[index].pdf_file));
       assert.deepEqual(left, right, "equivalent exports into different folders must be byte-identical");
       validateCanonicalPdf(left);
+      if (firstManifest.sessions[index].session_id === ACTIVE_SESSION_ID) {
+        const pdfPath = path.join(firstOutput, firstManifest.sessions[index].pdf_file);
+        const popplerBin = process.env.POPPLER_BIN || "";
+        const executable = popplerBin ? path.join(popplerBin, process.platform === "win32" ? "pdftotext.exe" : "pdftotext") : "pdftotext";
+        try {
+          const { stdout } = await execFileAsync(executable, [pdfPath, "-"], { encoding: "utf8" });
+          assert.ok(stdout.replace(/\s+/g, " ").includes("Models: gpt-5.5 → gpt-5.6-sol"), "the exported PDF must expose the full model history as selectable text");
+        } catch (error) {
+          if (error?.code === "ENOENT") t.diagnostic("Poppler text extraction unavailable; renderer-level selectable-text regression remains authoritative");
+          else throw error;
+        }
+      }
     }
     assert.equal(await fs.stat(path.join(firstOutput, INCOMPLETE_MARKER_NAME)).then(() => true, () => false), false);
     assert.equal((await listFiles(firstOutput)).some((file) => file.includes(".partial-") || file.includes(".previous-")), false);

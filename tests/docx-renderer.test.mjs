@@ -185,6 +185,7 @@ test("DOCX renderer creates deterministic safe OOXML with deduplicated PNG/JPEG 
     cwd: "C:\\Projects\\alpha",
     timestamp: "2026-08-24T10:00:00.000Z",
     updatedAt: "2026-08-24T10:02:00.000Z",
+    models: ["gpt-5.5", "gpt-5.6-sol"],
   });
   const messages = [
     createDocumentMessage({
@@ -226,6 +227,7 @@ test("DOCX renderer creates deterministic safe OOXML with deduplicated PNG/JPEG 
   assert.equal(hyperlinkRelationships[0].attributes.Id, "rIdHyperlink0001");
   assert.equal(relationships.toLowerCase().includes("file:"), false);
   assert.ok(documentXml.includes("Sitzung äöü &amp; &lt;XML&gt;"));
+  assert.ok(elementText(xml2js(documentXml, { compact: false, alwaysChildren: true })).includes("Models: gpt-5.5 → gpt-5.6-sol"));
   assert.ok(documentXml.indexOf("User") < documentXml.indexOf("Assistant") && documentXml.indexOf("Assistant") < documentXml.indexOf("Unclassified user-role record"));
   assert.ok(documentXml.includes("descr=\"Attachment 1 from session record 2\""), "embedded images need alternative text");
   assert.ok(documentXml.includes(`assets/${gif.sha256}.gif`.split("/").at(-1)));

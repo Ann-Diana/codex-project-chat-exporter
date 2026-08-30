@@ -12,7 +12,7 @@ The shared JavaScript API uses `documentFormats: ["pdf"]`. In VS Code, run **Cod
 
 ## Rendering contract
 
-PDFs follow the existing session-relative naming under `pdf/<project>/<session>.pdf`. They use A4 portrait pages, fixed 54-point side/top margins, a 60-point bottom margin, deterministic page numbers, and stable wrapping. Titles, limited metadata, roles including unclassified records, headings, paragraphs, lists, code blocks, and message order come from the common model. The visible project field is reduced to its final display-name segment so an absolute source path does not enter the PDF.
+PDFs follow the existing session-relative naming under `pdf/<project>/<session>.pdf`. They use A4 portrait pages, fixed 54-point side/top margins, a 60-point bottom margin, deterministic page numbers, and stable wrapping. Titles, limited metadata including the shared confirmed model history, roles including unclassified records, headings, paragraphs, lists, code blocks, and message order come from the common model. One model is labelled `Model`; a chronological multi-model history is labelled `Models` and joined with ` → `. The visible project field is reduced to its final display-name segment so an absolute source path does not enter the PDF.
 
 PNG and JPEG assets are embedded proportionally within the printable page. Repeated content reuses one PDF image object. GIF, WebP, and `.bin` remain labelled attachment references and are never converted. Missing, changed, or corrupt assets abort that session document.
 
