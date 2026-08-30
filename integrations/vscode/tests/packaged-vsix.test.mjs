@@ -70,13 +70,16 @@ async function writeSyntheticSession(codexHome) {
   const sessionId = "aaaaaaaa-aaaa-7aaa-8aaa-aaaaaaaaaaaa";
   const directory = path.join(codexHome, "sessions", "2026", "08", "24");
   await fs.mkdir(directory, { recursive: true });
+  const message = "# Linktest\n\nUmlaute äöü & <XML>. Symbole → ← ↑ ↓ ✓ ⚠ ± ≤ ≥. ANSI \u001b[31m.\n\nLink: [OpenAI](https://openai.com/).\n\n- eins\n- zwei\n\n```js\nconst value = '<&> → ✓ ⚠ ≤ ≥';\n```";
   const records = [
     { type: "session_meta", timestamp: "2026-08-24T10:00:00.000Z", payload: { id: sessionId, cwd: "C:\\Synthetic\\link-check", timestamp: "2026-08-24T10:00:00.000Z", source: "vscode", thread_source: "user" } },
-    { type: "response_item", timestamp: "2026-08-24T10:00:01.000Z", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "# Linktest\n\nUmlaute äöü & <XML>. Symbole → ← ↑ ↓ ✓ ⚠ ± ≤ ≥.\n\nLink: [OpenAI](https://openai.com/).\n\n- eins\n- zwei\n\n```js\nconst value = '<&> → ✓ ⚠ ≤ ≥';\n```" }], internal_chat_message_metadata_passthrough: { turn_id: "turn-1" } } },
-    { type: "event_msg", timestamp: "2026-08-24T10:00:01.001Z", payload: { type: "user_message", message: "# Linktest\n\nUmlaute äöü & <XML>. Symbole → ← ↑ ↓ ✓ ⚠ ± ≤ ≥.\n\nLink: [OpenAI](https://openai.com/).\n\n- eins\n- zwei\n\n```js\nconst value = '<&> → ✓ ⚠ ≤ ≥';\n```" } },
+    { type: "response_item", timestamp: "2026-08-24T10:00:01.000Z", payload: { type: "message", role: "user", content: [{ type: "input_text", text: message }], internal_chat_message_metadata_passthrough: { turn_id: "turn-1" } } },
+    { type: "event_msg", timestamp: "2026-08-24T10:00:01.001Z", payload: { type: "user_message", message } },
     { type: "response_item", timestamp: "2026-08-24T10:00:02.000Z", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "Antwort. [Query](https://example.invalid/3D?a=1&b=2)." }] } },
   ];
-  await fs.writeFile(path.join(directory, `rollout-2026-08-24T10-00-00-${sessionId}.jsonl`), `${records.map((record) => JSON.stringify(record)).join("\n")}\n`, "utf8");
+  const file = path.join(directory, `rollout-2026-08-24T10-00-00-${sessionId}.jsonl`);
+  await fs.writeFile(file, `${records.map((record) => JSON.stringify(record)).join("\n")}\n`, "utf8");
+  return file;
 }
 
 test("regular VSIX builds are byte-identical and their packaged runtime exports controlled DOCX/PDF links offline", async () => {
@@ -128,7 +131,7 @@ test("regular VSIX builds are byte-identical and their packaged runtime exports 
     const { defaultLoadExporter } = require(path.join(installedRoot, "src", "vscode-adapter.cjs"));
     const codexHome = path.join(temp, "synthetic-codex-home");
     const outputDirectory = path.join(temp, "output");
-    await writeSyntheticSession(codexHome);
+    const syntheticSession = await writeSyntheticSession(codexHome);
     const exporter = await withoutNetwork(() => defaultLoadExporter({ extensionPath: installedRoot }));
     let choices = 0;
     const result = await withoutNetwork(() => exporter.exportArchive({ codexHome, scope: "project", workspacePath: "C:\\Synthetic\\renamed", outputDirectory, exportProfile: "readable", documentFormats: ["docx"], onSelectRecordedProject: ({ projects, reason }) => {
@@ -163,8 +166,14 @@ test("regular VSIX builds are byte-identical and their packaged runtime exports 
     const index = children.findIndex((element) => element.name === "w:hyperlink");
     assert.ok(elementText(children[index - 1]).endsWith("Link: "));
     assert.equal(elementText(children[index + 1]), ".");
+    assert.ok(elementText(parsedDocument).includes("ANSI ."));
+    assert.equal(elementText(parsedDocument).includes("invalid XML character U+001B"), false);
 
     const pdfOutputDirectory = path.join(temp, "pdf-output");
+    const cleanRecords = (await fs.readFile(syntheticSession, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+    cleanRecords[1].payload.content[0].text = cleanRecords[1].payload.content[0].text.replaceAll("\u001b", "");
+    cleanRecords[2].payload.message = cleanRecords[2].payload.message.replaceAll("\u001b", "");
+    await fs.writeFile(syntheticSession, `${cleanRecords.map((record) => JSON.stringify(record)).join("\n")}\n`, "utf8");
     const pdfResult = await withoutNetwork(() => exporter.exportArchive({ codexHome, scope: "all", outputDirectory: pdfOutputDirectory, exportProfile: "readable", documentFormats: ["pdf"] }));
     const pdfManifest = JSON.parse(await fs.readFile(pdfResult.manifestPath, "utf8"));
     const pdf = await fs.readFile(path.join(pdfOutputDirectory, pdfManifest.sessions[0].pdf_file));

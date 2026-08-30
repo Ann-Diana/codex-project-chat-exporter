@@ -7,6 +7,7 @@ import test from "node:test";
 import { promisify } from "node:util";
 
 import JSZip from "jszip";
+import { Packer } from "docx";
 import xmlJs from "xml-js";
 
 import { exportArchive, INCOMPLETE_MARKER_NAME } from "../bin/export-codex-project-chats.mjs";
@@ -139,6 +140,63 @@ test("DOCX failures preserve existing targets and remove run-owned temporary fil
     assert.deepEqual(await fs.readFile(existing), sentinel, "an existing DOCX target must never be silently overwritten");
     const files = await listFiles(collisionOutput);
     assert.equal(files.some((file) => file.includes(".partial-") || file.includes(".previous-")), false);
+  } finally {
+    await fs.rm(temp, { recursive: true, force: true });
+  }
+});
+
+test("diagnosed ANSI SGR input is removed only from DOCX while Raw JSONL stays byte-identical", async () => {
+  const temp = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "docx-xml-controls-")));
+  try {
+    const codexHome = path.join(temp, ".codex");
+    const { file } = await writeSingleSession(codexHome);
+    const records = (await fs.readFile(file, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+    const diagnosed = "# Heading\u000c\n\n- List\u001b[31m\n\n[Label\u000b](https://openai.com/).\n\nMessage\u0000 and valid \t \r \n 🙂.";
+    records[1].payload.content[0].text = diagnosed;
+    records[2].payload.message = diagnosed;
+    const source = Buffer.from(`${records.map((record) => JSON.stringify(record)).join("\n")}\n`, "utf8");
+    await fs.writeFile(file, source);
+    const outputDirectory = path.join(temp, "output");
+    const result = await exportArchive({ codexHome, scope: "all", outputDirectory, exportProfile: "complete", documentFormats: ["docx"] });
+    const manifest = JSON.parse(await fs.readFile(result.manifestPath, "utf8"));
+    const rawFile = (await listFiles(outputDirectory)).find((name) => name.endsWith(".jsonl"));
+    assert.deepEqual(await fs.readFile(path.join(outputDirectory, rawFile)), source);
+    const zip = await JSZip.loadAsync(await fs.readFile(path.join(outputDirectory, manifest.sessions[0].docx_file)), { checkCRC32: true });
+    const documentXml = await zip.file("word/document.xml").async("string");
+    for (const code of ["0000", "000B", "000C"]) assert.ok(documentXml.includes(`[invalid XML character U+${code}]`), code);
+    assert.equal(documentXml.includes("[invalid XML character U+001B]"), false);
+    assert.equal(documentXml.includes("[31m"), false);
+    for (const entry of Object.values(zip.files)) if (!entry.dir && (entry.name.endsWith(".xml") || entry.name.endsWith(".rels"))) xml2js(await entry.async("string"));
+    assert.equal(await fs.stat(path.join(outputDirectory, INCOMPLETE_MARKER_NAME)).then(() => true, () => false), false);
+    assert.equal((await listFiles(outputDirectory)).some((name) => name.includes(".partial-") || name.includes(".previous-")), false);
+  } finally {
+    await fs.rm(temp, { recursive: true, force: true });
+  }
+});
+
+test("invalid packed OOXML publishes no failed DOCX or temporary file and leaves the generation visibly incomplete", async () => {
+  const temp = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "docx-invalid-package-cleanup-")));
+  try {
+    const codexHome = path.join(temp, ".codex");
+    await writeSingleSession(codexHome);
+    const outputDirectory = path.join(temp, "output");
+    const invalidPacker = {
+      async toBuffer(document) {
+        const bytes = await Packer.toBuffer(document);
+        const zip = await JSZip.loadAsync(bytes);
+        const xml = await zip.file("word/document.xml").async("string");
+        zip.file("word/document.xml", xml.replace("</w:body>", "\u001b</w:body>"));
+        return zip.generateAsync({ type: "nodebuffer" });
+      },
+    };
+    await assert.rejects(
+      () => exportArchive({ codexHome, scope: "all", outputDirectory, exportProfile: "readable", documentFormats: ["docx"], _docxOptions: { packer: invalidPacker } }),
+      (error) => error.code === "DOCX_XML_INVALID",
+    );
+    const files = await listFiles(outputDirectory);
+    assert.equal(files.some((name) => name.endsWith(".docx") || name.includes(".partial-") || name.includes(".previous-")), false);
+    assert.ok(files.includes(INCOMPLETE_MARKER_NAME));
+    assert.equal(files.includes("manifest.json"), false);
   } finally {
     await fs.rm(temp, { recursive: true, force: true });
   }

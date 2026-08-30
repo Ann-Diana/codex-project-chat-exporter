@@ -15,6 +15,7 @@ import xmlJs from "xml-js";
 
 import { DOCUMENT_ROLE, createDocumentMessage, createSessionDocumentHeader } from "../lib/document-model.mjs";
 import { DocxExportError, buildDeterministicDocx, normalizeAndValidateDocx, resolveVerifiedAsset, validateCanonicalDocx } from "../lib/docx-renderer.mjs";
+import { findFirstInvalidXml10Character, normalizeOoxmlText, replaceInvalidXml10Characters } from "../lib/ooxml-text.mjs";
 
 const { xml2js } = xmlJs;
 const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
@@ -57,6 +58,65 @@ async function withoutNetwork(action) {
     globalThis.fetch = previousFetch;
   }
 }
+
+test("OOXML text replacement preserves valid XML 1.0 Unicode and identifies forbidden UTF-16 units", () => {
+  const valid = "\t\r\n \uD7FF\uE000\uFFFD\u{10000}\u{10FFFF} emoji \u{1F642}";
+  assert.equal(replaceInvalidXml10Characters(valid), valid);
+  assert.equal(findFirstInvalidXml10Character(valid), null);
+
+  const invalid = `nul\u0000 vt\u000b ff\u000c esc\u001b nonchar\uFFFE high\uD800 low\uDC00`;
+  assert.equal(replaceInvalidXml10Characters(invalid),
+    "nul[invalid XML character U+0000] vt[invalid XML character U+000B] ff[invalid XML character U+000C] esc[invalid XML character U+001B] nonchar[invalid XML character U+FFFE] high[invalid XML character U+D800] low[invalid XML character U+DC00]");
+  assert.deepEqual(findFirstInvalidXml10Character(invalid), { codePoint: 0, index: 3, width: 1 });
+  assert.equal(replaceInvalidXml10Characters("a\u0000\u000b\u001bb"),
+    "a[invalid XML character U+0000][invalid XML character U+000B][invalid XML character U+001B]b");
+});
+
+test("OOXML normalization removes only complete ANSI SGR formatting sequences", () => {
+  assert.equal(normalizeOoxmlText("before\u001b[31mred\u001b[0mafter"), "beforeredafter");
+  assert.equal(normalizeOoxmlText("before\u001b[1m\u001b[4mbetween\u001b[mafter"), "beforebetweenafter");
+  assert.equal(normalizeOoxmlText("before\u001b[38;2;255;0;0mbetween\u001b[39mafter"), "beforebetweenafter");
+  assert.equal(normalizeOoxmlText("incomplete\u001b[31"), "incomplete[invalid XML character U+001B][31");
+  assert.equal(normalizeOoxmlText("unknown\u001b[31Kafter"), "unknown[invalid XML character U+001B][31Kafter");
+  assert.equal(normalizeOoxmlText("isolated\u001bafter"), "isolated[invalid XML character U+001B]after");
+  assert.equal(normalizeOoxmlText("printable before \u001b[1mprintable between\u001b[0m printable after"),
+    "printable before printable between printable after");
+});
+
+test("DOCX replaces forbidden XML characters in titles, paragraphs, headings, lists, code, and hyperlink labels", async () => {
+  const sessionId = "xml-character-boundaries";
+  const header = createSessionDocumentHeader({
+    id: sessionId,
+    displayTitle: "Title\u0000",
+    cwd: "Project\u000b",
+  });
+  const messages = [createDocumentMessage({
+    sessionId,
+    recordOrdinal: 18,
+    role: DOCUMENT_ROLE.USER,
+    label: "User\u000c",
+    timestamp: "2026-07-14T19:26:51.629Z\u001b",
+    text: "# Heading\u000c\n\nParagraph\u0000 with valid \t tab and \u{1F642}.\n\n- List\u001b\n\n[Label\uD800](https://openai.com/).\n\n```text\nCode\uFFFF and low\uDC00\n```",
+  })];
+  const first = await withoutNetwork(() => buildDeterministicDocx({ header, messages, resolveAsset: async () => null }));
+  const second = await withoutNetwork(() => buildDeterministicDocx({ header, messages, resolveAsset: async () => null }));
+  assert.deepEqual(first, second);
+  await validateCanonicalDocx(first);
+  const zip = await JSZip.loadAsync(first, { checkCRC32: true });
+  for (const entry of Object.values(zip.files).filter((part) => !part.dir && (part.name.endsWith(".xml") || part.name.endsWith(".rels")))) {
+    const xml = await entry.async("string");
+    assert.doesNotThrow(() => xml2js(xml));
+  }
+  const documentXml = await zip.file("word/document.xml").async("string");
+  const rendered = elementText(xml2js(documentXml, { compact: false, alwaysChildren: true }));
+  for (const code of ["0000", "000B", "000C", "001B", "D800", "DC00", "FFFF"]) {
+    assert.ok(rendered.includes(`[invalid XML character U+${code}]`), code);
+  }
+  assert.ok(rendered.includes("valid \t tab and 🙂"));
+  const relationships = collectElements(xml2js(await zip.file("word/_rels/document.xml.rels").async("string")), "Relationship");
+  const hyperlink = relationships.find((relationship) => relationship.attributes?.Type.endsWith("/hyperlink"));
+  assert.equal(hyperlink.attributes.Target, "https://openai.com/");
+});
 
 test("DOCX XML reserialization preserves query separators and literal entity text", async () => {
   const target = "https://example.invalid/?a=1&b=2&literal=&amp;#part";
