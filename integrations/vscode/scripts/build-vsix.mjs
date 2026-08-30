@@ -190,6 +190,7 @@ async function packageExporterRuntime({ repoRoot, stage, stageOwned }) {
   }
   const fontLicense = await fs.readFile(path.join(repoRoot, "fonts", "OFL.txt"), "utf8");
   const symbolFontLicense = await fs.readFile(path.join(repoRoot, "fonts", "OFL-SYMBOLS.txt"), "utf8");
+  const emojiFontLicense = await fs.readFile(path.join(repoRoot, "fonts", "APACHE-NOTO-EMOJI.txt"), "utf8");
   licenseSections.push(
     "Bundled font assets",
     "Noto Sans 2.015 and Noto Sans Mono 2.014",
@@ -206,6 +207,15 @@ async function packageExporterRuntime({ repoRoot, stage, stageOwned }) {
     "Source: fonts/OFL-SYMBOLS.txt",
     "",
     symbolFontLicense,
+    "",
+    "----",
+    "",
+    "Bundled monochrome emoji font asset",
+    "Noto Emoji at upstream commit 9a5261d871451f9b5183c93483cbd68ed916b1e9",
+    "Declared license: Apache License 2.0",
+    "Source: fonts/APACHE-NOTO-EMOJI.txt",
+    "",
+    emojiFontLicense,
     "",
     "----",
     "",

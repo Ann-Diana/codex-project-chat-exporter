@@ -55,7 +55,7 @@ After the profile selection, **Standard formats only** preserves that profile ex
 
 Valid bounded HTTP/HTTPS links in DOCX are clickable without being fetched. External image/media/resource relationships, local or active schemes, macros, and other active content remain forbidden.
 
-Valid bounded HTTP/HTTPS links in PDF are clickable without being fetched. PDF uses bundled hash-verified Noto fonts and creates no external images, file/launch/JavaScript actions, forms, or embedded files.
+Valid bounded HTTP/HTTPS links in PDF are clickable without being fetched. PDF uses bundled hash-verified Noto text, symbol, and monochrome emoji fonts; a valid grapheme still outside that offline chain receives a visible PDF-only unsupported-glyph marker. PDF creates no external images, file/launch/JavaScript actions, forms, or embedded files.
 
 ## Settings
 

@@ -1,6 +1,6 @@
 # PDF and font dependency review
 
-Review date: 2026-08-25. The production choice is exactly `pdfkit@0.20.1` plus direct `fontkit@2.0.4`, with the Noto font files documented in `fonts/README.md`.
+Review date: 2026-08-30. The production choice is exactly `pdfkit@0.20.1` plus direct `fontkit@2.0.4`, with the Noto font files documented in `fonts/README.md`. Emoji coverage adds no npm dependency.
 
 ## Gate result
 
@@ -39,6 +39,8 @@ Review date: 2026-08-25. The production choice is exactly `pdfkit@0.20.1` plus d
 
 ## Font decision
 
-Noto Sans 2.015 provides proportional regular, bold, and italic text; Noto Sans Mono 2.014 provides code text and mathematical comparison fallbacks. Noto Sans Symbols 2.003 supplies arrows, while the separately released Noto Sans Symbols 2 2.008 supplies check marks and warning signs absent from the other bundled faces. The union covers the required umlauts, typographic quotation marks, `→`, `←`, `↑`, `↓`, `✓`, `⚠`, `±`, `≤`, `≥`, and common technical punctuation. Every emitted code point is checked against the selected primary face followed by the deterministic symbol/monospace fallback chain; an uncovered point aborts with only the session ID and `U+NNNN`, never the source text. Font-specific ascender, descender, and line-gap metrics are normalized to the primary face for every fallback run, preserving a shared baseline and the primary line-height/wrapping contract.
+Noto Sans 2.015 provides proportional regular, bold, and italic text; Noto Sans Mono 2.014 provides code text and mathematical comparison fallbacks. Noto Sans Symbols 2.003 supplies arrows, while the separately released Noto Sans Symbols 2 2.008 supplies check marks and warning signs absent from the other bundled faces. The pinned official monochrome Noto Emoji face at commit `9a5261d871451f9b5183c93483cbd68ed916b1e9` supplies outline glyphs for common legacy emoji including U+1F604; unlike a bitmap or color-table font, PDFKit embeds it as selectable subset text with ToUnicode mappings.
 
-The font files are official release assets under SIL OFL-1.1. Their exact versions, source archives, and SHA-256 values are recorded in `fonts/README.md`; `fonts/OFL.txt` and `fonts/OFL-SYMBOLS.txt` preserve the distinct upstream project copyright notices. All font and license files are included in the VSIX integrity manifest and copied by the regular builder.
+Every emitted grapheme is checked against the selected primary face followed by the deterministic symbol/emoji/monospace fallback chain; an explicit emoji-presentation selector prefers the emoji face before the symbol faces to keep distinct ToUnicode mappings. Variation selectors and joiners remain attached to their grapheme. A still-uncovered valid grapheme becomes a visible deterministic PDF-only marker; invalid unpaired UTF-16 remains an error without source text. Font-specific ascender, descender, and line-gap metrics are normalized to the primary face for every fallback run, preserving a shared baseline and the primary line-height/wrapping contract.
+
+The Noto Sans and Symbols files are official release assets under SIL OFL-1.1. The historical official monochrome Emoji face is Apache-2.0 licensed at its pinned upstream commit. Exact versions, source archives or commits, and SHA-256 values are recorded in `fonts/README.md`; `fonts/OFL.txt`, `fonts/OFL-SYMBOLS.txt`, and `fonts/APACHE-NOTO-EMOJI.txt` preserve the distinct upstream licenses. All font and license files are included in the VSIX integrity manifest and copied by the regular builder.

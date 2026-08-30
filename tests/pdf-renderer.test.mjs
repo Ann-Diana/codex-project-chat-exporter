@@ -354,6 +354,53 @@ test("one arrow-heavy block remains non-overlapping across page breaks", async (
   assert.deepEqual(bytes, (await captureSyntheticLayout(markers.map((marker) => `→ ${marker}`).join("\n"), 6)).bytes, "page-breaking layout must remain byte-identical");
 });
 
+test("emoji fallback preserves graphemes, extraction mappings, baselines, wrapping, and pagination", async () => {
+  const emoji = String.fromCodePoint(0x1f604);
+  const warning = `⚠${String.fromCodePoint(0xfe0f)}`;
+  const markers = Array.from({ length: 72 }, (_, index) => `EMOJI_PAGE_LINE_${String(index).padStart(3, "0")}`);
+  const text = [
+    `EMOJI_MIX A${emoji}B→C${emoji}D✓E⚠F`,
+    `EMOJI_BEFORE_BREAK ${emoji}`,
+    `${emoji} EMOJI_AFTER_BREAK`,
+    `EMOJI_VARIATION ${warning}`,
+    ...markers.map((marker, index) => `${index % 2 ? emoji : "→"} ${marker}`),
+  ].join("\n");
+  const first = await captureSyntheticLayout(text, 61);
+  const second = await captureSyntheticLayout(text, 61);
+  assert.deepEqual(first.bytes, second.bytes, "emoji fallback and page breaks must remain byte-identical");
+  const emojiRuns = first.fragments.filter((fragment) => fragment.font.startsWith("NotoEmoji"));
+  assert.ok(emojiRuns.some((fragment) => fragment.text.includes(emoji)), "emoji must be emitted as real font text");
+  assert.ok(emojiRuns.some((fragment) => fragment.text.includes(warning)), "emoji-presentation variation sequences must use the separate emoji subset");
+  assert.ok(first.fragments.some((fragment) => fragment.font.startsWith("NotoSansSymbols2") && fragment.text.includes("⚠")), "plain-text warning signs must retain their symbol-font subset");
+  const mixedStart = fragmentContaining(first.fragments, "EMOJI_MIX A");
+  const mixedLine = first.fragments.filter((fragment) => fragment.pageIndex === mixedStart.pageIndex && fragment.top === mixedStart.top && fragment.fontSize === 10.5);
+  assert.ok(new Set(mixedLine.map((fragment) => fragment.font)).size >= 3, "one line must exercise normal, emoji, and symbol fonts");
+  assert.equal(new Set(mixedLine.map((fragment) => fragment.baseline)).size, 1, "mixed emoji runs must share the primary baseline");
+  assert.equal(new Set(mixedLine.map((fragment) => fragment.lineHeight)).size, 1, "mixed emoji runs must retain the primary line height");
+  assertLineMarkersDoNotOverlap(first.fragments, ["EMOJI_BEFORE_BREAK ", "EMOJI_AFTER_BREAK", "EMOJI_VARIATION"]);
+  const pageLines = assertLineMarkersDoNotOverlap(first.fragments, markers);
+  assert.ok(new Set(pageLines.map((line) => line.pageIndex)).size >= 2, "the emoji block must cross a page boundary");
+  const unicodeMaps = inflatedPdfStreams(first.bytes).filter((stream) => stream.includes("beginbfchar") || stream.includes("beginbfrange")).join("\n").toUpperCase();
+  const compactUnicodeMaps = unicodeMaps.replaceAll(" ", "");
+  assert.ok(compactUnicodeMaps.includes("D83DDE04"), "ToUnicode must retain U+1F604 as its UTF-16 surrogate pair");
+  assert.ok(compactUnicodeMaps.includes("26A0FE0F"), "ToUnicode must retain the warning grapheme and variation selector");
+});
+
+test("unsupported valid graphemes receive a visible deterministic PDF-only marker", async () => {
+  const unsupported = String.fromCodePoint(0x10ffff);
+  const sessionId = "unsupported-glyph-session";
+  const header = createSessionDocumentHeader({ id: sessionId, title: "Unsupported glyph test" });
+  const message = createDocumentMessage({ sessionId, recordOrdinal: 1, role: DOCUMENT_ROLE.USER, label: "User", text: `Before ${unsupported} after` });
+  const originalText = message.blocks[0].inlines[0].text;
+  const first = await captureRenderedPdfFragments({ header, messages: [message], resolveAsset: async () => null });
+  const second = await captureRenderedPdfFragments({ header, messages: [message], resolveAsset: async () => null });
+  assert.deepEqual(first.bytes, second.bytes);
+  assert.equal(message.blocks[0].inlines[0].text, originalText, "PDF fallback must not mutate the shared document model");
+  const rendered = first.fragments.map((fragment) => fragment.text).join("");
+  assert.ok(rendered.includes("[unsupported glyph U+10FFFF]"));
+  assert.equal(rendered.includes(unsupported), false);
+});
+
 test("Readable PDF keeps standalone and announced lists distinct and renders path trees as stable monospace lines", async () => {
   const text = normalizeReadableMessageText([
     "- STANDALONE_ITEM",
@@ -382,7 +429,7 @@ test("Readable PDF keeps standalone and announced lists distinct and renders pat
   assertLineMarkersDoNotOverlap(first.fragments, [...treeLines, "FOLLOWING_NORMAL"]);
 });
 
-test("the additional bundled symbol face fails closed when missing or modified", async () => {
+test("the additional bundled symbol and emoji faces fail closed when missing or modified", async () => {
   const sessionId = "font-integrity-session";
   const header = createSessionDocumentHeader({ id: sessionId, title: "Font integrity test" });
   const messages = [createDocumentMessage({ sessionId, recordOrdinal: 1, role: DOCUMENT_ROLE.USER, label: "User", text: "✓ ⚠" })];
@@ -403,19 +450,34 @@ test("the additional bundled symbol face fails closed when missing or modified",
       () => buildDeterministicPdf({ header, messages, fontRoot, resolveAsset: async () => null }),
       (error) => error instanceof PdfExportError && error.code === "PDF_FONT_INTEGRITY" && error.message.includes("NotoSansSymbols2-Regular.ttf"),
     );
+
+    await fs.cp(path.resolve("fonts", "NotoSansSymbols2-Regular.ttf"), symbolPath);
+    const emojiPath = path.join(fontRoot, "NotoEmoji-Regular.ttf");
+    await fs.rm(emojiPath);
+    await assert.rejects(
+      () => buildDeterministicPdf({ header, messages, fontRoot, resolveAsset: async () => null }),
+      (error) => error instanceof PdfExportError && error.code === "PDF_FONT_MISSING" && error.message.includes("NotoEmoji-Regular.ttf"),
+    );
+    const modifiedEmoji = Buffer.from(await fs.readFile(path.resolve("fonts", "NotoEmoji-Regular.ttf")));
+    modifiedEmoji[modifiedEmoji.length - 1] ^= 1;
+    await fs.writeFile(emojiPath, modifiedEmoji, { flag: "wx" });
+    await assert.rejects(
+      () => buildDeterministicPdf({ header, messages, fontRoot, resolveAsset: async () => null }),
+      (error) => error instanceof PdfExportError && error.code === "PDF_FONT_INTEGRITY" && error.message.includes("NotoEmoji-Regular.ttf"),
+    );
   } finally {
     await fs.rm(fontRoot, { recursive: true, force: true });
   }
 });
 
-test("PDF renderer fails closed for missing glyphs and corrupt image data without leaking content", async () => {
+test("PDF renderer rejects invalid UTF-16 and corrupt image data without leaking content", async () => {
   const sessionId = "glyph-session";
   const header = createSessionDocumentHeader({ id: sessionId, title: "Glyph test" });
-  const secretMarker = `private-${String.fromCodePoint(0x10ffff)}-content`;
+  const secretMarker = "private-\ud800-content";
   const messages = [createDocumentMessage({ sessionId, recordOrdinal: 1, role: DOCUMENT_ROLE.USER, label: "User", text: secretMarker })];
   await assert.rejects(
     () => buildDeterministicPdf({ header, messages, resolveAsset: async () => null }),
-    (error) => error instanceof PdfExportError && error.code === "PDF_GLYPH_MISSING" && error.message.includes("glyph-session") && error.message.includes("U+10FFFF") && !error.message.includes("private-"),
+    (error) => error instanceof PdfExportError && error.code === "PDF_INVALID_UNICODE" && error.message.includes("glyph-session") && error.message.includes("U+D800") && !error.message.includes("private-"),
   );
 
   const broken = attachment(Buffer.from("not-a-png"), "image/png");

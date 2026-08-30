@@ -22,7 +22,7 @@ Use this checklist for the uniquely named final candidate prepared during the la
 9. With `codexProjectChatExporter.diagnosticOutput` disabled, confirm one concise runtime summary and no `[DIAG]` stream. If enabled for one troubleshooting run, confirm message-free, path-redacted events may include short IDs, sizes, phases, status, and timing values.
 10. Confirm that `outputDirectory` and `codexHome` are machine-scoped settings, Workspace values are rejected, and UNC/device output paths are rejected. Mapped network drives remain a documented detection limit.
 11. Open the generated per-session DOCX and confirm a synthetic `Link: [OpenAI](https://openai.com/).` source appears as ordinary `Link: ` text, a clickable `OpenAI (https://openai.com/)`, and a final non-clickable period. Do not follow the link during the offline opening check.
-12. Open the generated per-session PDF offline and confirm A4 layout, page numbers, bundled-font rendering of umlauts/quotes/arrows, wrapped long lines, embedded PNG/JPEG, labelled GIF/WebP/`.bin` references, and a clickable HTTP/HTTPS link. Do not follow it.
+12. Open the generated per-session PDF offline and confirm A4 layout, page numbers, bundled-font rendering of umlauts/quotes/arrows/emoji, wrapped long lines, embedded PNG/JPEG, labelled GIF/WebP/`.bin` references, and a clickable HTTP/HTTPS link. Confirm copied emoji text remains Unicode; do not follow the link.
 
 ## Check all profiles and cancellation
 

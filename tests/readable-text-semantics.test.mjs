@@ -43,6 +43,7 @@ async function writeFixture(codexHome) {
     "</rollout_ids>",
     "</oai-mem-citation>",
   ].join("\n");
+  const unsupported = String.fromCodePoint(0x10ffff);
   const user = [
     "\tNatural — prose begins here.",
     "",
@@ -63,7 +64,7 @@ async function writeFixture(codexHome) {
     "│   └── tree-two",
     "└── tree-three",
   ].join("\n");
-  const assistant = `Visible before — prose.\n${citation}\nVisible after — prose.`;
+  const assistant = `Visible before — prose. ${unsupported}\n${citation}\nVisible after — prose.`;
   const records = [
     { type: "session_meta", timestamp: "2026-08-30T10:00:00.000Z", payload: { id, cwd: "C:\\Projects\\readable", timestamp: "2026-08-30T10:00:00.000Z", source: "vscode", thread_source: "user" } },
     { type: "turn_context", timestamp: "2026-08-30T10:00:00.500Z", payload: { cwd: "C:\\Projects\\readable", model: "gpt-5.5" } },
@@ -74,7 +75,7 @@ async function writeFixture(codexHome) {
   const bytes = Buffer.from(`${records.map((record) => JSON.stringify(record)).join("\n")}\n`, "utf8");
   const file = path.join(directory, `rollout-2026-08-30T10-00-00-${id}.jsonl`);
   await fs.writeFile(file, bytes);
-  return { bytes, citation, id };
+  return { bytes, citation, id, unsupported };
 }
 
 test("Readable text semantics are shared by Markdown, DOCX, and PDF while Complete and Raw stay source-faithful", async (t) => {
@@ -105,6 +106,7 @@ test("Readable text semantics are shared by Markdown, DOCX, and PDF while Comple
     const completeMarkdown = await fs.readFile(path.join(completeRoot, completeSession.markdown_file), "utf8");
     assert.equal(readableMarkdown.includes("oai-mem-citation"), false);
     assert.ok(readableMarkdown.includes("Natural – prose") && readableMarkdown.includes("Visible before – prose") && readableMarkdown.includes("Visible after – prose"));
+    assert.ok(readableMarkdown.includes(fixture.unsupported), "non-PDF reading formats must retain an unsupported PDF glyph verbatim");
     assert.ok(readableMarkdown.includes("`literal — code`") && readableMarkdown.includes("fenced — technical"));
     assert.ok(readableMarkdown.includes("– first point\n– second point"));
     assert.ok(readableMarkdown.includes("```text\n├── tree-one\n│   └── tree-two\n└── tree-three\n```"));
@@ -117,7 +119,8 @@ test("Readable text semantics are shared by Markdown, DOCX, and PDF while Comple
     const readableDocumentText = elementText(readableDocument);
     assert.equal(readableDocumentText.includes("oai-mem-citation"), false);
     assert.ok(readableDocumentText.includes("Natural – prose") && readableDocumentText.includes("literal — code"));
-    assert.ok(completeDocumentText.includes("oai-mem-citation") && completeDocumentText.includes("Natural — prose"));
+    assert.ok(readableDocumentText.includes(fixture.unsupported), "DOCX must retain an unsupported PDF glyph verbatim");
+    assert.ok(completeDocumentText.includes("oai-mem-citation") && completeDocumentText.includes("Natural — prose") && completeDocumentText.includes(fixture.unsupported));
     const paragraphs = elements(readableDocument, "w:p");
     for (const point of ["first point", "second point", "announced point", "nested point"]) {
       assert.equal(paragraphs.filter((paragraph) => elementText(paragraph) === point).length, 1, `${point} must have one distinct DOCX paragraph`);
@@ -136,6 +139,7 @@ test("Readable text semantics are shared by Markdown, DOCX, and PDF while Comple
       const completeText = (await execFileAsync(pdftotext, [completePdfPath, "-"], { encoding: "utf8" })).stdout;
       assert.equal(readableText.includes("oai-mem-citation"), false);
       assert.ok(readableText.includes("Natural – prose") && readableText.includes("literal — code"));
+      assert.ok(readableText.includes("[unsupported glyph U+10FFFF]") && !readableText.includes(fixture.unsupported));
       assert.ok(completeText.includes("oai-mem-citation") && completeText.includes("Natural — prose"));
     } catch (error) {
       if (error?.code === "ENOENT") t.diagnostic("Poppler text extraction unavailable; renderer-level selectable-text tests remain authoritative");
