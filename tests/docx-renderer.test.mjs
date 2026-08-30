@@ -16,6 +16,7 @@ import xmlJs from "xml-js";
 import { DOCUMENT_ROLE, createDocumentMessage, createSessionDocumentHeader } from "../lib/document-model.mjs";
 import { DocxExportError, buildDeterministicDocx, normalizeAndValidateDocx, resolveVerifiedAsset, validateCanonicalDocx } from "../lib/docx-renderer.mjs";
 import { findFirstInvalidXml10Character, normalizeOoxmlText, replaceInvalidXml10Characters } from "../lib/ooxml-text.mjs";
+import { normalizeReadableMessageText } from "../lib/reading-content.mjs";
 
 const { xml2js } = xmlJs;
 const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
@@ -163,6 +164,82 @@ test("DOCX restarts logical lists, retains explicit starts and resumes nested pa
   const starts=collectElements(numbering,"w:start").map(e=>e.attributes["w:val"]);
   assert.ok(starts.includes("4")&&starts.includes("7"));
   assert.equal(collectElements(doc,"w:ilvl").slice(-12)[6].attributes["w:val"],"1");
+});
+
+test("DOCX keeps readable paragraphs, Unicode bullets, list margins, hard lines, and path trees structurally separate", async () => {
+  const tree = ["├── first", "│   └── second", `└── ${"long-segment-".repeat(30)}`].join("\n");
+  const text = normalizeReadableMessageText([
+    "# Heading",
+    "Normal after heading",
+    "",
+    "- standalone one",
+    "- standalone two",
+    "",
+    "Normal after standalone list",
+    "",
+    "Announced:",
+    "– announced one",
+    "  * nested item",
+    "",
+    "Normal after announced list",
+    "",
+    "> quoted line",
+    "",
+    "Normal after quote",
+    "",
+    "```text",
+    "code line",
+    "```",
+    "",
+    "Normal after code",
+    "",
+    "Manual line one",
+    "Manual line two",
+    "",
+    "Hard-break line one  ",
+    "Hard-break line two",
+    "",
+    tree,
+  ].join("\n"), { role: "USER" });
+  const options = {
+    header: createSessionDocumentHeader({ id: "readable-docx-layout" }),
+    messages: [createDocumentMessage({ sessionId: "readable-docx-layout", recordOrdinal: 1, role: DOCUMENT_ROLE.USER, label: "User", text })],
+    resolveAsset: async () => null,
+  };
+  const bytes = await buildDeterministicDocx(options);
+  assert.deepEqual(bytes, await buildDeterministicDocx(options));
+  const zip = await JSZip.loadAsync(bytes, { checkCRC32: true });
+  const document = xml2js(await zip.file("word/document.xml").async("string"), { compact: false, alwaysChildren: true });
+  const paragraphs = collectElements(document, "w:p");
+  const paragraph = (expected) => paragraphs.find((entry) => elementText(entry) === expected);
+  for (const expected of ["Normal after heading", "Normal after standalone list", "Normal after announced list", "Normal after quote", "Normal after code"]) {
+    const candidate = paragraph(expected);
+    assert.ok(candidate, expected);
+    assert.equal(collectElements(candidate, "w:numPr").length, 0, `${expected} must leave list numbering`);
+    assert.equal(collectElements(candidate, "w:ind").length, 0, `${expected} must not inherit indentation`);
+    assert.equal(collectElements(candidate, "w:shd").length, 0, `${expected} must not inherit code shading`);
+  }
+  const hardLines = paragraph("Manual line oneManual line two");
+  assert.ok(hardLines);
+  assert.equal(collectElements(hardLines, "w:br").length, 1, "a soft source line boundary must become one OOXML break");
+  const explicitHardLines = paragraphs.find((entry) => elementText(entry).startsWith("Hard-break line one") && elementText(entry).endsWith("Hard-break line two"));
+  assert.ok(explicitHardLines);
+  assert.equal(collectElements(explicitHardLines, "w:br").length, 1, "a Markdown hard-break line boundary must become one OOXML break");
+  for (const item of ["standalone one", "standalone two", "announced one", "nested item"]) {
+    const candidate = paragraph(item);
+    assert.ok(candidate && collectElements(candidate, "w:numPr").length === 1, `${item} must occupy its own numbered paragraph`);
+  }
+  const numbering = xml2js(await zip.file("word/numbering.xml").async("string"), { compact: false, alwaysChildren: true });
+  const indents = collectElements(numbering, "w:ind").map((entry) => [entry.attributes?.["w:left"], entry.attributes?.["w:hanging"]]);
+  assert.ok(indents.some(([left, hanging]) => left === "240" && hanging === "240"), "standalone top-level marker must start at the normal margin");
+  assert.ok(indents.some(([left, hanging]) => left === "480" && hanging === "240"), "announced top-level list must receive only the moderate block indent");
+  assert.ok(indents.some(([left, hanging]) => left === "840" && hanging === "240"), "true nesting must add one level");
+  const markers = collectElements(numbering, "w:lvlText").map((entry) => entry.attributes?.["w:val"]);
+  for (const marker of ["-", "–", "*"]) assert.ok(markers.includes(marker), `unordered marker ${marker} must be retained`);
+  const treeParagraph = paragraphs.find((entry) => elementText(entry).includes("├── first"));
+  assert.ok(treeParagraph);
+  assert.equal(collectElements(treeParagraph, "w:br").length, 2);
+  assert.ok(collectElements(treeParagraph, "w:rFonts").some((entry) => entry.attributes?.["w:ascii"] === "Consolas"));
 });
 
 test("DOCX renderer creates deterministic safe OOXML with deduplicated PNG/JPEG media", async () => {

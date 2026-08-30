@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { extractReadingText } from "../lib/reading-content.mjs";
+import { extractReadingText, normalizeReadableMessageText, omitInternalMemoryCitations } from "../lib/reading-content.mjs";
 
 import {
   DOCUMENT_BLOCK_KIND,
@@ -120,4 +120,122 @@ test("technical image markers require adjacent renderable image parts and preser
     assert.ok(extractReadingText([t(`${prefix}~~~text`),t("<image>"),image,t("</image>"),t(`${prefix}~~~`)],()=>true).includes("<image>"));
   }
   assert.equal(extractReadingText([t("</image>")],()=>true),"</image>");
+});
+
+test("Readable normalization removes only canonical assistant memory citations", () => {
+  const citation = [
+    "<oai-mem-citation>",
+    "<citation_entries>",
+    "MEMORY.md:1-2|note=[synthetic]",
+    "</citation_entries>",
+    "<rollout_ids>",
+    "11111111-1111-7111-8111-111111111111",
+    "</rollout_ids>",
+    "</oai-mem-citation>",
+  ].join("\n");
+  assert.equal(normalizeReadableMessageText(`before\n${citation}\nafter`, { role: "ASSISTANT" }), "before\nafter");
+  assert.equal(normalizeReadableMessageText(citation, { role: "USER" }), citation, "a user-supplied literal must remain visible");
+  for (const literal of [
+    `\`${citation}\``,
+    `> ${citation.split("\n").join("\n> ")}`,
+    `\`\`\`xml\n${citation}\n\`\`\``,
+  ]) assert.equal(omitInternalMemoryCitations(literal), literal);
+  for (const ambiguous of [
+    `${citation.slice(0, -"</oai-mem-citation>".length)}`,
+    `<oai-mem-citation>\n<unknown/>\n</oai-mem-citation>`,
+    citation.replace("<oai-mem-citation>", "<oai-mem-citation data-synthetic=\"1\">"),
+    citation.replace("<citation_entries>", "<!-- literal comment -->\n<citation_entries>"),
+    `prefix ${citation}`,
+  ]) assert.equal(omitInternalMemoryCitations(ambiguous), ambiguous);
+});
+
+test("Readable typography changes natural prose only and retains technical text", () => {
+  const source = [
+    "Natural — prose and another — phrase.",
+    "Inline `literal — code` remains — prose.",
+    "A [natural — label](https://example.invalid/a—b/) remains linked.",
+    "- List — prose",
+    "— Unicode list marker — natural item",
+    "https://example.invalid/a—b C:\\Temp\\a—b.txt id—0123456789abcdef",
+    "const option = '—value';",
+    "{\"value\":\"—\"}",
+    "```text",
+    "fenced — code",
+    "```",
+  ].join("\n");
+  const rendered = normalizeReadableMessageText(source, { role: "USER" });
+  assert.ok(rendered.includes("Natural – prose and another – phrase."));
+  assert.ok(rendered.includes("Inline `literal — code` remains – prose."));
+  assert.ok(rendered.includes("[natural – label](https://example.invalid/a—b/)"));
+  assert.ok(rendered.includes("- List – prose"));
+  assert.ok(rendered.includes("— Unicode list marker – natural item"));
+  for (const literal of ["https://example.invalid/a—b", "C:\\Temp\\a—b.txt", "id—0123456789abcdef", "const option = '—value';", "{\"value\":\"—\"}", "fenced — code"]) {
+    assert.ok(rendered.includes(literal), literal);
+  }
+  assert.equal(normalizeReadableMessageText(source, { role: "RUNTIME_CONTEXT" }), source);
+});
+
+test("Readable normalization removes incidental prose indentation and fences only structural trees", () => {
+  const tree = ["root", "├── folder", "│   └── file", "└── other"].join("\n");
+  const rendered = normalizeReadableMessageText(`\tNormal prose starts here.\n\n${tree}\n\nA single └ glyph remains prose.`, { role: "ASSISTANT" });
+  assert.ok(rendered.startsWith("Normal prose starts here."));
+  assert.ok(rendered.includes("```text\n├── folder\n│   └── file\n└── other\n```"));
+  assert.ok(rendered.includes("A single └ glyph remains prose."));
+  assert.equal(normalizeReadableMessageText("    const value = 1;", { role: "ASSISTANT" }), "    const value = 1;");
+});
+
+test("document model separates Unicode bullets, tracks announcements, nesting, and hard lines", () => {
+  const message = createDocumentMessage({
+    sessionId: "readable-structure",
+    recordOrdinal: 1,
+    role: DOCUMENT_ROLE.USER,
+    text: [
+      "# Heading",
+      "Following heading",
+      "",
+      "– first",
+      "– second",
+      "",
+      "Normal after list",
+      "",
+      "Introduction:",
+      "- announced",
+      "  * nested",
+      "",
+      "Colon inside a sentence: does not announce",
+      "- standalone",
+      "",
+      "Inline code `value:`",
+      "- not announced by code",
+      "",
+      "> quoted introduction:",
+      "- not announced by quote",
+      "",
+      "> quote",
+      "",
+      "```text",
+      "code",
+      "```",
+      "After code line one",
+      "After code line two",
+      "",
+      "1. ordered",
+      "2. next",
+      "",
+      "1. restarted",
+    ].join("\n"),
+  });
+  const lists = message.blocks.filter((block) => block.kind === DOCUMENT_BLOCK_KIND.LIST);
+  assert.deepEqual(lists[0].items.map((item) => [item.marker, item.level]), [["–", 0], ["–", 0]]);
+  assert.equal(lists[0].announced, false);
+  assert.equal(lists[1].announced, true);
+  assert.deepEqual(lists[1].items.map((item) => [item.marker, item.level]), [["-", 0], ["*", 1]]);
+  assert.equal(lists[2].announced, false, "a colon inside a sentence must not announce a list");
+  assert.equal(lists[3].announced, false, "a colon inside inline code must not announce a list");
+  assert.equal(lists[4].announced, false, "a quoted colon must not announce a list");
+  assert.equal(lists.at(-2).start, 1);
+  assert.equal(lists.at(-1).start, 1);
+  const afterCode = message.blocks.find((block) => block.kind === DOCUMENT_BLOCK_KIND.PARAGRAPH
+    && block.inlines.some((inline) => inline.kind === "text" && inline.text.startsWith("After code")));
+  assert.equal(afterCode.inlines[0].text, "After code line one\nAfter code line two");
 });

@@ -38,7 +38,7 @@ import {
   resolveVerifiedPdfAsset,
   validateCanonicalPdfFile,
 } from "../lib/pdf-renderer.mjs";
-import { extractReadingText } from "../lib/reading-content.mjs";
+import { extractReadingText, normalizeReadableMessageText } from "../lib/reading-content.mjs";
 import { ReadingAssetSelection } from "../lib/reading-asset-selection.mjs";
 import { streamJsonlTokens } from "../lib/jsonl-token-adapter.mjs";
 import {
@@ -1205,7 +1205,10 @@ async function processExportTask(task, titleIndex, profiler, context, sourceProt
     if (meta.idSource !== "metadata_fallback" && meta.id && parsedMeta.id && meta.id !== parsedMeta.id) throw new ExportError("SOURCE_SNAPSHOT_MISMATCH", `Parsed session ID differs from scanned source: ${sourceOriginalFilename}`);
     const indexed = parsedMeta.id ? (titleIndex.get(parsedMeta.id) || {}) : {};
     const titleResolution = resolveDisplayTitle(parsedMeta, indexed.threadName);
-    const displayTitle = redactMarkdown ? redactSecrets(titleResolution.displayTitle) : titleResolution.displayTitle;
+    const readableTitle = context.exportProfile === EXPORT_PROFILE.READABLE
+      ? normalizeReadableMessageText(titleResolution.displayTitle, { role: "USER" })
+      : titleResolution.displayTitle;
+    const displayTitle = redactMarkdown ? redactSecrets(readableTitle) : readableTitle;
     renderMeta = {
       ...parsedMeta,
       displayTitle,
@@ -1307,7 +1310,10 @@ async function readAndEnrichSession(entry, titleIndex, profiler, profilePhaseNam
   profiler?.recordSession(meta, profilePhaseName, parseMs, meta.fileSize, 0);
   const indexed = meta.id ? (titleIndex.get(meta.id) || {}) : {};
   const titleResolution = resolveDisplayTitle(meta, indexed.threadName);
-  const title = redactMarkdown ? redactSecrets(titleResolution.displayTitle) : titleResolution.displayTitle;
+  const readableTitle = context.exportProfile === EXPORT_PROFILE.READABLE
+    ? normalizeReadableMessageText(titleResolution.displayTitle, { role: "USER" })
+    : titleResolution.displayTitle;
+  const title = redactMarkdown ? redactSecrets(readableTitle) : readableTitle;
   return {
     ...meta,
     title,
@@ -2928,7 +2934,7 @@ function readableProjectDir(projectDirs, cwd) {
 }
 
 async function writeSessionDocuments(meta, paths, profiler = null, profileSession = meta, context, sourceProtection, generation, assetStore, assetSnapshot) {
-  const { redactMarkdown, includeTools } = context;
+  const { redactMarkdown, includeTools, exportProfile } = context;
   const { markdownPath, docxPath, pdfPath, rawRel } = paths;
   const renderStart = performance.now();
   const stats = {
@@ -3020,11 +3026,14 @@ async function writeSessionDocuments(meta, paths, profiler = null, profileSessio
       if (item.type !== "response_item" || !item.payload) continue;
       const payload = item.payload;
       if (payload.type === "message" && payload.role === "user") {
-        const text = await readingMessageText(payload.content, recordNumber);
-        const renderedText = redactMarkdown ? redactSecrets(text) : text;
+        const sourceText = await readingMessageText(payload.content, recordNumber);
         const attachments = selectedAttachments(item, recordNumber);
-        if (!text.trim() && !attachments.length) continue;
         const classification = meta.eventAnalysis?.classifications?.get(recordNumber) || { kind: USER_RECORD_KIND.UNCLASSIFIED_USER_ROLE_RECORD, runtimeContextTypes: [] };
+        const text = exportProfile === EXPORT_PROFILE.READABLE && classification.kind === USER_RECORD_KIND.DIRECT_USER_TURN
+          ? normalizeReadableMessageText(sourceText, { role: "USER" })
+          : sourceText;
+        const renderedText = redactMarkdown ? redactSecrets(text) : text;
+        if (!text.trim() && !attachments.length) continue;
         if (classification.kind === USER_RECORD_KIND.DIRECT_USER_TURN) {
           stats.userMessages += 1;
           if (out) {
@@ -3061,7 +3070,10 @@ async function writeSessionDocuments(meta, paths, profiler = null, profileSessio
         continue;
       }
       if (payload.type === "message" && payload.role === "assistant") {
-        const text = await readingMessageText(payload.content, recordNumber);
+        const sourceText = await readingMessageText(payload.content, recordNumber);
+        const text = exportProfile === EXPORT_PROFILE.READABLE
+          ? normalizeReadableMessageText(sourceText, { role: "ASSISTANT" })
+          : sourceText;
         const renderedText = redactMarkdown ? redactSecrets(text) : text;
         const attachments = selectedAttachments(item, recordNumber);
         if (!text.trim() && !attachments.length) continue;
@@ -3660,7 +3672,10 @@ async function writeSummary(dir, rows, context, sourceProtection, generation, as
   else if (!exportFormats.docx && !exportFormats.pdf) lines.push("- This profile intentionally does not create human-readable session transcripts; attachment provenance still follows the shared streamed reading selection.");
   if (exportFormats.docx) lines.push("- docx/ contains one deterministic, classified DOCX reading view per exported session.");
   if (exportFormats.pdf) lines.push("- pdf/ contains one deterministic, classified PDF reading view per exported session.");
-  if (exportProfile === EXPORT_PROFILE.READABLE) lines.push("- replacement_history records and history-only assets are omitted from derived reading views; source session bytes remain unchanged.");
+  if (exportProfile === EXPORT_PROFILE.READABLE) lines.push(
+    "- replacement_history records and history-only assets are omitted from derived reading views; source session bytes remain unchanged.",
+    "- Natural direct-user and assistant prose is typographically normalized; structurally complete standalone internal memory-citation metadata is hidden. Code, technical examples, Complete/Source-snapshots views, and source bytes remain unchanged.",
+  );
   else lines.push("- Unmatched replacement_history assets appear once under Additional stored context; source and Raw session bytes remain unchanged.");
   if (copyRaw) lines.push("- raw/ contains canonical byte-preserving session JSONL snapshots.");
   else lines.push("- This profile does not include canonical raw JSONL snapshots.");

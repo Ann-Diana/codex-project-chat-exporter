@@ -23,6 +23,10 @@ The shared JavaScript API uses `documentFormats: ["docx"]`. The VS Code adapter 
 
 The contract does not contain complete Raw events. The exporter processes sessions sequentially and builds at most one derived session document at a time. Markdown and DOCX are fed from the same session-record pass, so enabling DOCX does not add another complete JSONL scan.
 
+Lists retain their source marker family and logical restart. A standalone top-level marker begins at the normal paragraph margin with only a small hanging gap. A list receives a moderate block indent only when the immediately preceding ordinary paragraph ends with a colon; a colon inside a sentence or code does not announce a list. Further indentation represents actual nesting. Source line boundaries inside an ordinary paragraph become explicit line breaks instead of being flattened. Consecutive path-tree lines containing branch structure are conservatively promoted to a preformatted monospace block; a lone tree glyph or an arbitrary multiline path is not.
+
+Before the shared model is built, Readable alone applies a bounded message-text normalization. Natural direct-user and assistant prose changes EM DASH (`U+2014`) to EN DASH (`U+2013`); inline/fenced code, URLs, paths, filenames, structured examples, identifiers, and hashes remain unchanged. A standalone, structurally complete internal `<oai-mem-citation>` assistant block is omitted without removing adjacent prose. The stateful parser preserves user literals, block quotes, inline/fenced examples, nested/unknown markup, and incomplete blocks. Complete, Source snapshots, and Raw JSONL are not normalized.
+
 ## DOCX behavior
 
 DOCX files follow the session-relative naming used by the other reading views:
@@ -43,7 +47,7 @@ The package validator permits only explicit external HTTP/HTTPS hyperlink relati
 
 ## Reproducibility and publication
 
-Decoded XML attributes are escaped again during relationship-ID normalization; query separators and literal entity text are preserved. Every XML and relationship part is checked before and after normalization. Each logical list has a separate numbering instance, with explicit starts and nested parent continuation retained. Exporter-owned separators use en dashes; source punctuation is not rewritten.
+Decoded XML attributes are escaped again during relationship-ID normalization; query separators and literal entity text are preserved. Every XML and relationship part is checked before and after normalization. Each logical list has a separate numbering instance, with explicit starts and nested parent continuation retained. Exporter-owned separators use en dashes; source punctuation is rewritten only by the explicitly documented Readable prose normalization above.
 
 Standalone technical image-marker parts are omitted only when directly paired with a verified PNG/JPEG image part with valid dimensions. Markers in code, quoted/literal examples, unsupported attachments, and forensic source data remain. Local-file links are labelled `[local file not included]` in document reading views; the model retains the blocked reason. No workspace/preview files are collected. Images are not linked to external relative files from DOCX/PDF: resolving them reliably would require local-resource relationships/actions that these formats deliberately prohibit. Use the portable `assets/` references in the HTML index instead.
 

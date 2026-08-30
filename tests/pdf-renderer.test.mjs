@@ -17,6 +17,7 @@ import PDFDocument from "pdfkit";
 import { securityPdf } from "./helpers/pdf-security-fixture.mjs";
 import { DOCUMENT_ROLE, createDocumentMessage, createSessionDocumentHeader } from "../lib/document-model.mjs";
 import { PdfExportError, buildDeterministicPdf, resolveVerifiedPdfAsset, safePdfProjectDisplayName, validateCanonicalPdf, validateCanonicalPdfFile } from "../lib/pdf-renderer.mjs";
+import { normalizeReadableMessageText } from "../lib/reading-content.mjs";
 
 const execFileAsync = promisify(execFile);
 const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAGAAAAAwCAIAAABhdOiYAAABq0lEQVR4nO2b0W3DMAxEFaED3U7dIUN0h+ykZQr0ox8Fmq/INkmLR8GxeV8BAkvn5ztFjpPb989vSW2rCu+lSikfTwr4/EocndrjngnSlRWzVazL1ZWF19UmE6QoASlKQBcDhP8VhLhrqWelAxKj8wBCzF63npgOGMjqe60IqxLG909d32tFWKobuT3u3L1uFCAsiEQwWtLpXvjnDQGEDU9cRlt0uPPyAUH0zWKk0mEVjQwIa76XjJyYjNmhFI0JCNu+l2vnsGN7s+QDZwOCwbef0V46/qJxAMHs28NoLDvOohEAwXdVjaaHmyWPEw4I7qtqMe2k4ymaCxAcvu2MKNkZLto4ILh9WxixmiUPywcEkm95i8SlM3b4CCCwfa9GKSI7A0XbDQgxmZfrFvQwysJoHyBE+rbcMcTNQgCE+Ksad8+5NaYaIisgTMl8d3875zGvzKgeis5TE+jYB69HozNNxqLVa9LpJJxXvTKdZuiyBKi9fuNVzij1vJSKtYmfJseUvki3C9M5z6PnOCUgRQlIUQLa+SvX/EV5p0yQogSk6Jb/9pGVCSqy/gD5cfpUy6at1AAAAABJRU5ErkJggg==", "base64");
@@ -74,6 +75,7 @@ async function captureRenderedPdfFragments(options) {
           text: String(text),
           page: this.page.dictionary.id,
           pageIndex: this._pageBuffer.indexOf(this.page),
+          x,
           top: y,
           baseline: matrixY,
           font: this._font.name,
@@ -350,6 +352,34 @@ test("one arrow-heavy block remains non-overlapping across page breaks", async (
   const lines = assertLineMarkersDoNotOverlap(fragments, markers);
   assert.ok(new Set(lines.map((line) => line.pageIndex)).size >= 3, "the single document block must cross at least two page boundaries");
   assert.deepEqual(bytes, (await captureSyntheticLayout(markers.map((marker) => `→ ${marker}`).join("\n"), 6)).bytes, "page-breaking layout must remain byte-identical");
+});
+
+test("Readable PDF keeps standalone and announced lists distinct and renders path trees as stable monospace lines", async () => {
+  const text = normalizeReadableMessageText([
+    "- STANDALONE_ITEM",
+    "",
+    "Announcement:",
+    "– ANNOUNCED_ITEM",
+    "  * NESTED_ITEM",
+    "",
+    "├── TREE_LINE_1",
+    "│   └── TREE_LINE_2",
+    `└── TREE_LONG_${"segment_".repeat(70)}`,
+    "",
+    "FOLLOWING_NORMAL",
+  ].join("\n"), { role: "USER" });
+  const first = await captureSyntheticLayout(text, 41);
+  const second = await captureSyntheticLayout(text, 41);
+  assert.deepEqual(first.bytes, second.bytes);
+  const standalone = fragmentContaining(first.fragments, "STANDALONE_ITEM");
+  const announced = fragmentContaining(first.fragments, "ANNOUNCED_ITEM");
+  const nested = fragmentContaining(first.fragments, "NESTED_ITEM");
+  assert.ok(announced.x > standalone.x, "an announced list must be moderately block-indented");
+  assert.ok(nested.x > announced.x, "only a true nested item may receive the additional level indent");
+  const treeLines = ["TREE_LINE_1", "TREE_LINE_2", "TREE_LONG_"];
+  const treeFragments = treeLines.map((marker) => fragmentContaining(first.fragments, marker));
+  assert.ok(treeFragments.every((fragment) => fragment.font === "NotoSansMono-Regular"));
+  assertLineMarkersDoNotOverlap(first.fragments, [...treeLines, "FOLLOWING_NORMAL"]);
 });
 
 test("the additional bundled symbol face fails closed when missing or modified", async () => {

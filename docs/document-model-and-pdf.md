@@ -24,7 +24,11 @@ Canonical bounded HTTP/HTTPS links become URI annotations. Invalid, overlong, lo
 
 The validator follows the classic cross-reference table and parses all object dictionaries, escaped names, strings and references. It skips stream payloads by their exact lengths: `/3D` in a compressed page stream, ordinary text, metadata or an HTTP URL is harmless. Actual 3D, JavaScript, Launch, RichMedia and embedded-file structures remain forbidden. Unsupported encryption, incremental revisions and object/xref streams are rejected rather than interpreted permissively. The file path uses bounded 64-KiB reads; no additional JSONL pass is needed.
 
-List starts and nesting come from the shared model. Document labels use en dashes without rewriting source punctuation. Local targets appear as `[local file not included]`; no local preview files are gathered and no external relative-asset actions are added.
+List starts and nesting come from the shared model. Document labels use en dashes; source punctuation changes only under the Readable prose rule below. Local targets appear as `[local file not included]`; no local preview files are gathered and no external relative-asset actions are added.
+
+The shared model also retains unordered marker families, distinguishes standalone lists from lists immediately announced by an ordinary colon-ending paragraph, and preserves true nesting. Standalone top-level markers begin at the body margin; only announced and nested items move inward. Hard source lines remain separate layout lines. Consecutive structural path-tree lines are rendered as monospace preformatted text, while lone tree glyphs and arbitrary multiline paths remain ordinary prose.
+
+Readable alone applies its documented typographic and internal-metadata normalization before Markdown, DOCX, and PDF consume the same text. Natural direct-user and assistant prose changes EM DASH (`U+2014`) to EN DASH (`U+2013`), but inline/fenced code, URLs, paths, filenames, technical examples, IDs, and hashes remain source-faithful. Structurally complete standalone `<oai-mem-citation>` blocks from assistant metadata are hidden; incomplete, ambiguous, quoted, code-contained, and user-literal forms remain. Complete, Source snapshots, and Raw JSONL are unchanged.
 
 ## Fonts and missing glyphs
 

@@ -84,6 +84,8 @@ All reading formats use one record-selection policy. Tool-only images follow `--
 
 Use **Readable** for browsing and searching exported transcripts. **Complete** and **Source snapshots** can be substantially larger and slower because they copy Raw JSONL and verify it with SHA-256.
 
+Readable is also a typographically normalized reading view. In natural direct-user and assistant prose it changes EM DASH (`U+2014`) to EN DASH (`U+2013`), while preserving code, inline code, URLs, paths, filenames, identifiers, hashes, and conservatively recognized technical examples. It removes only structurally complete internal `<oai-mem-citation>` blocks emitted as standalone assistant metadata; incomplete, ambiguous, quoted, inline-code, fenced-code, and user-supplied literal forms remain visible. Unicode and Markdown list markers stay distinct, announced lists receive a modest block indent, and structural path trees retain their source lines in monospace. Complete, Source snapshots, and Raw JSONL retain source punctuation and internal metadata.
+
 Show all CLI options:
 
 ```powershell
