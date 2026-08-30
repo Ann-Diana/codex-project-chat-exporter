@@ -13,7 +13,7 @@ All notable changes to this project are documented here.
 - Added an opt-in, deterministic per-session DOCX export backed by an exporter-independent document model shared by the CLI and VS Code adapter.
 - Added structural OOXML, cross-runtime reproducibility, failure-cleanup, and 16/115 MiB memory diagnostics for DOCX.
 - Added an opt-in, directly rendered deterministic per-session PDF export with A4 pagination, safe URI links, bounded PNG/JPEG images, conservative attachment fallbacks, and byte-identical Node.js 22/24 output.
-- Bundled hash-verified OFL-1.1 Noto proportional, monospace, and symbol fonts; unsupported Unicode now fails closed with session/code-point-only diagnostics.
+- Bundled hash-verified OFL-1.1 Noto proportional, monospace, symbol, and Noto Emoji 3.002 variable outline fonts; unsupported complex PDF graphemes now receive one visible marker listing every code point in order.
 - Extended the regular deterministic VSIX builder and packaged offline end-to-end test to cover the complete PDF runtime and font integrity tree.
 - Added controlled HTTP/HTTPS OOXML hyperlinks with deterministic relationship IDs and repaired regular VSIX packaging so the complete production runtime, integrity inventory, and third-party license material are included automatically.
 

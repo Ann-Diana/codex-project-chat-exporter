@@ -168,7 +168,7 @@ function createRepresentativeDocument(repeatedPng = true) {
     role: DOCUMENT_ROLE.USER,
     label: "User",
     timestamp: "2026-08-24T10:00:01.000Z",
-    text: `# Überschrift\n\nUmlaute äöü & < >, “Zitat” ${REQUIRED_SYMBOLS.join(" ")}. Link: [OpenAI](https://openai.com/). Long URL: [technical reference](${LONG_URL}).\n\nUnsafe: [script](javascript:noop), [data](data:text/plain,secret), [file](file:///C:/secret.txt), [UNC](//server/share), [too long](https://example.invalid/${"z".repeat(2100)}).\n\n- eins → ✓\n- zwei ≤ ≥\n\n\`\`\`js\nconst value = '<&> ${REQUIRED_SYMBOLS.join(" ")}';\n${"A".repeat(5000)}\n\`\`\``,
+    text: `# Überschrift\n\nUmlaute äöü & < >, “Zitat” ${REQUIRED_SYMBOLS.join(" ")}. Emoji 😄 ⚠️ 👩‍💻. Link: [OpenAI](https://openai.com/). Long URL: [technical reference](${LONG_URL}).\n\nUnsafe: [script](javascript:noop), [data](data:text/plain,secret), [file](file:///C:/secret.txt), [UNC](//server/share), [too long](https://example.invalid/${"z".repeat(2100)}).\n\n- eins → ✓\n- zwei ≤ ≥\n\n\`\`\`js\nconst value = '<&> ${REQUIRED_SYMBOLS.join(" ")}';\n${"A".repeat(5000)}\n\`\`\``,
     attachments: repeatedPng ? [png, png, jpeg, gif, webp, binary] : [png, jpeg, gif, webp, binary],
   });
   const messages = [
@@ -357,12 +357,17 @@ test("one arrow-heavy block remains non-overlapping across page breaks", async (
 test("emoji fallback preserves graphemes, extraction mappings, baselines, wrapping, and pagination", async () => {
   const emoji = String.fromCodePoint(0x1f604);
   const warning = `⚠${String.fromCodePoint(0xfe0f)}`;
+  const supportedZwj = "👩‍💻";
+  const decomposed = "a\u0308";
   const markers = Array.from({ length: 72 }, (_, index) => `EMOJI_PAGE_LINE_${String(index).padStart(3, "0")}`);
   const text = [
     `EMOJI_MIX A${emoji}B→C${emoji}D✓E⚠F`,
+    `EMOJI_REPEAT ${emoji}${emoji}${emoji}`,
     `EMOJI_BEFORE_BREAK ${emoji}`,
     `${emoji} EMOJI_AFTER_BREAK`,
     `EMOJI_VARIATION ${warning}`,
+    `EMOJI_SUPPORTED_ZWJ ${supportedZwj}`,
+    `DECOMPOSED_VALID ${decomposed}`,
     ...markers.map((marker, index) => `${index % 2 ? emoji : "→"} ${marker}`),
   ].join("\n");
   const first = await captureSyntheticLayout(text, 61);
@@ -371,6 +376,9 @@ test("emoji fallback preserves graphemes, extraction mappings, baselines, wrappi
   const emojiRuns = first.fragments.filter((fragment) => fragment.font.startsWith("NotoEmoji"));
   assert.ok(emojiRuns.some((fragment) => fragment.text.includes(emoji)), "emoji must be emitted as real font text");
   assert.ok(emojiRuns.some((fragment) => fragment.text.includes(warning)), "emoji-presentation variation sequences must use the separate emoji subset");
+  assert.ok(emojiRuns.some((fragment) => fragment.text.includes(`${emoji}${emoji}${emoji}`)), "adjacent emoji must remain adjacent selectable graphemes");
+  assert.ok(emojiRuns.some((fragment) => fragment.text.includes(supportedZwj)), "a supported ZWJ grapheme must remain one selectable emoji-font run");
+  assert.ok(first.fragments.some((fragment) => fragment.font.startsWith("NotoSans") && fragment.text.includes(decomposed)), "a valid decomposed grapheme must remain primary-font text");
   assert.ok(first.fragments.some((fragment) => fragment.font.startsWith("NotoSansSymbols2") && fragment.text.includes("⚠")), "plain-text warning signs must retain their symbol-font subset");
   const mixedStart = fragmentContaining(first.fragments, "EMOJI_MIX A");
   const mixedLine = first.fragments.filter((fragment) => fragment.pageIndex === mixedStart.pageIndex && fragment.top === mixedStart.top && fragment.fontSize === 10.5);
@@ -384,6 +392,7 @@ test("emoji fallback preserves graphemes, extraction mappings, baselines, wrappi
   const compactUnicodeMaps = unicodeMaps.replaceAll(" ", "");
   assert.ok(compactUnicodeMaps.includes("D83DDE04"), "ToUnicode must retain U+1F604 as its UTF-16 surrogate pair");
   assert.ok(compactUnicodeMaps.includes("26A0FE0F"), "ToUnicode must retain the warning grapheme and variation selector");
+  assert.ok(compactUnicodeMaps.includes("D83DDC69200DD83DDCBB"), "ToUnicode must retain every code point of the supported ZWJ grapheme");
 });
 
 test("unsupported valid graphemes receive a visible deterministic PDF-only marker", async () => {
@@ -399,6 +408,21 @@ test("unsupported valid graphemes receive a visible deterministic PDF-only marke
   const rendered = first.fragments.map((fragment) => fragment.text).join("");
   assert.ok(rendered.includes("[unsupported glyph U+10FFFF]"));
   assert.equal(rendered.includes(unsupported), false);
+});
+
+test("an unsupported ZWJ grapheme receives one complete ordered code-point marker", async () => {
+  const unsupportedZwj = "😄‍😄";
+  const sessionId = "unsupported-zwj-session";
+  const header = createSessionDocumentHeader({ id: sessionId, title: "Unsupported ZWJ test" });
+  const message = createDocumentMessage({ sessionId, recordOrdinal: 1, role: DOCUMENT_ROLE.USER, label: "User", text: `Before ${unsupportedZwj} after` });
+  const originalText = message.blocks[0].inlines[0].text;
+  const first = await captureRenderedPdfFragments({ header, messages: [message], resolveAsset: async () => null });
+  const second = await captureRenderedPdfFragments({ header, messages: [message], resolveAsset: async () => null });
+  assert.deepEqual(first.bytes, second.bytes);
+  assert.equal(message.blocks[0].inlines[0].text, originalText, "PDF fallback must not mutate the shared document model");
+  const rendered = first.fragments.map((fragment) => fragment.text).join("");
+  assert.ok(rendered.includes("[unsupported glyph U+1F604 U+200D U+1F604]"));
+  assert.equal(rendered.includes(unsupportedZwj), false);
 });
 
 test("Readable PDF keeps standalone and announced lists distinct and renders path trees as stable monospace lines", async () => {
@@ -452,18 +476,18 @@ test("the additional bundled symbol and emoji faces fail closed when missing or 
     );
 
     await fs.cp(path.resolve("fonts", "NotoSansSymbols2-Regular.ttf"), symbolPath);
-    const emojiPath = path.join(fontRoot, "NotoEmoji-Regular.ttf");
+    const emojiPath = path.join(fontRoot, "NotoEmoji-Variable.ttf");
     await fs.rm(emojiPath);
     await assert.rejects(
       () => buildDeterministicPdf({ header, messages, fontRoot, resolveAsset: async () => null }),
-      (error) => error instanceof PdfExportError && error.code === "PDF_FONT_MISSING" && error.message.includes("NotoEmoji-Regular.ttf"),
+      (error) => error instanceof PdfExportError && error.code === "PDF_FONT_MISSING" && error.message.includes("NotoEmoji-Variable.ttf"),
     );
-    const modifiedEmoji = Buffer.from(await fs.readFile(path.resolve("fonts", "NotoEmoji-Regular.ttf")));
+    const modifiedEmoji = Buffer.from(await fs.readFile(path.resolve("fonts", "NotoEmoji-Variable.ttf")));
     modifiedEmoji[modifiedEmoji.length - 1] ^= 1;
     await fs.writeFile(emojiPath, modifiedEmoji, { flag: "wx" });
     await assert.rejects(
       () => buildDeterministicPdf({ header, messages, fontRoot, resolveAsset: async () => null }),
-      (error) => error instanceof PdfExportError && error.code === "PDF_FONT_INTEGRITY" && error.message.includes("NotoEmoji-Regular.ttf"),
+      (error) => error instanceof PdfExportError && error.code === "PDF_FONT_INTEGRITY" && error.message.includes("NotoEmoji-Variable.ttf"),
     );
   } finally {
     await fs.rm(fontRoot, { recursive: true, force: true });
@@ -576,6 +600,18 @@ test("Poppler parses, extracts, and renders the representative multi-page PDF", 
       await execFileAsync(executable("pdftoppm"), ["-f", "1", "-singlefile", "-png", "-r", "96", pdfPath, outputPrefix]);
       const rendered = await fs.stat(`${outputPrefix}.png`);
       assert.ok(rendered.isFile() && rendered.size > 0);
+      const textPath = path.join(temp, "representative.txt");
+      const pdftotext = process.env.PDFTOTEXT_PATH || executable("pdftotext");
+      try {
+        await execFileAsync(pdftotext, ["-enc", "UTF-8", pdfPath, textPath]);
+        const extracted = await fs.readFile(textPath, "utf8");
+        assert.ok(extracted.includes("😄"), "UTF-8 extraction must retain U+1F604");
+        assert.ok(extracted.includes("⚠️"), "UTF-8 extraction must retain the warning variation sequence");
+        assert.ok(extracted.includes("👩‍💻"), "UTF-8 extraction must retain the supported ZWJ grapheme");
+      } catch (error) {
+        if (error?.code === "ENOENT") t.diagnostic("pdftotext is unavailable; ToUnicode assertions remain authoritative");
+        else throw error;
+      }
     } catch (error) {
       if (error?.code === "ENOENT") t.skip("Poppler is not available on PATH; set POPPLER_BIN to enable rendering verification");
       else throw error;

@@ -90,7 +90,7 @@ async function writeSyntheticSession(codexHome) {
   const sessionId = "aaaaaaaa-aaaa-7aaa-8aaa-aaaaaaaaaaaa";
   const directory = path.join(codexHome, "sessions", "2026", "08", "24");
   await fs.mkdir(directory, { recursive: true });
-  const message = "# Linktest\n\nUmlaute äöü & <XML>. Symbole → ← ↑ ↓ ✓ ⚠ ± ≤ ≥. Emoji 😄 und ⚠️. ANSI \u001b[31m.\n\nLink: [OpenAI](https://openai.com/).\n\n- eins\n- zwei\n\n```js\nconst value = '<&> → ✓ ⚠ ≤ ≥';\n```";
+  const message = "# Linktest\n\nUmlaute äöü & <XML>. Symbole → ← ↑ ↓ ✓ ⚠ ± ≤ ≥. Emoji 😄 und ⚠️. ZWJ 👩‍💻 und 😄‍😄. ANSI \u001b[31m.\n\nLink: [OpenAI](https://openai.com/).\n\n- eins\n- zwei\n\n```js\nconst value = '<&> → ✓ ⚠ ≤ ≥';\n```";
   const records = [
     { type: "session_meta", timestamp: "2026-08-24T10:00:00.000Z", payload: { id: sessionId, cwd: "C:\\Synthetic\\link-check", timestamp: "2026-08-24T10:00:00.000Z", source: "vscode", thread_source: "user" } },
     { type: "response_item", timestamp: "2026-08-24T10:00:01.000Z", payload: { type: "message", role: "user", content: [{ type: "input_text", text: message }], internal_chat_message_metadata_passthrough: { turn_id: "turn-1" } } },
@@ -128,9 +128,15 @@ test("regular VSIX builds are byte-identical and their packaged runtime exports 
     for (const name of (await fs.readdir("lib")).filter((name) => name.endsWith(".mjs"))) {
       assert.ok(zip.file(`extension/vendor/codex-project-chat-exporter/lib/${name}`), name);
     }
-    for (const name of (await fs.readdir("fonts")).filter((name) => name.endsWith(".ttf") || name === "OFL.txt" || name === "OFL-SYMBOLS.txt" || name === "APACHE-NOTO-EMOJI.txt")) {
+    for (const name of (await fs.readdir("fonts")).filter((name) => name.endsWith(".ttf") || name === "OFL.txt" || name === "OFL-SYMBOLS.txt" || name === "OFL-EMOJI.txt")) {
       assert.ok(zip.file(`extension/vendor/codex-project-chat-exporter/fonts/${name}`), name);
     }
+    assert.equal(zip.file("extension/vendor/codex-project-chat-exporter/fonts/NotoEmoji-Regular.ttf"), null, "the retired emoji font must not remain packaged");
+    assert.equal(zip.file("extension/vendor/codex-project-chat-exporter/fonts/APACHE-NOTO-EMOJI.txt"), null, "the retired Apache license must not remain packaged");
+    assert.equal(
+      sha256(await zip.file("extension/vendor/codex-project-chat-exporter/fonts/NotoEmoji-Variable.ttf").async("nodebuffer")),
+      "de6c18832938afc99caf132b39d6a30a19bac7f2e812e28db2535b4608d27551",
+    );
     for (const [lockPath, entry] of Object.entries(lock.packages)) {
       if (!lockPath.startsWith("node_modules/") || entry.dev === true) continue;
       assert.ok(files.some((file) => file.name.startsWith(`extension/vendor/codex-project-chat-exporter/${lockPath}/`)), lockPath);
@@ -145,7 +151,7 @@ test("regular VSIX builds are byte-identical and their packaged runtime exports 
     for (const name of Object.keys(rootPackage.dependencies)) assert.ok(licenses.includes(`Package: ${name}@`), name);
     assert.ok(licenses.includes("Noto Sans 2.015") && licenses.includes("Noto Sans Symbols 2 2.008") && licenses.includes("SIL OPEN FONT LICENSE Version 1.1"));
     assert.ok(licenses.includes("Source: fonts/OFL-SYMBOLS.txt") && licenses.includes("Copyright 2022 The Noto Project Authors (https://github.com/notofonts/symbols)"));
-    assert.ok(licenses.includes("Source: fonts/APACHE-NOTO-EMOJI.txt") && licenses.includes("Apache License"));
+    assert.ok(licenses.includes("Noto Emoji 3.002") && licenses.includes("Source: fonts/OFL-EMOJI.txt") && licenses.includes("SIL OPEN FONT LICENSE Version 1.1"));
 
     const installedRoot = path.join(temp, "installed-extension");
     await extractExtension(zip, installedRoot);
@@ -205,6 +211,7 @@ test("regular VSIX builds are byte-identical and their packaged runtime exports 
     const unicodeMaps = inflatedPdfStreams(pdf).filter((stream) => stream.includes("beginbfchar") || stream.includes("beginbfrange")).join("\n").toUpperCase().replaceAll(" ", "");
     assert.ok(unicodeMaps.includes("D83DDE04"), "the packaged offline PDF must retain U+1F604 in ToUnicode");
     assert.ok(unicodeMaps.includes("26A0FE0F"), "the packaged offline PDF must retain the warning variation sequence");
+    assert.ok(unicodeMaps.includes("D83DDC69200DD83DDCBB"), "the packaged offline PDF must retain the supported ZWJ grapheme");
   } finally {
     await fs.rm(temp, { recursive: true, force: true });
   }
@@ -219,7 +226,7 @@ test("regular builder fails before archive creation when a packaged runtime impo
     await fs.mkdir(path.join(repoRoot, "fonts"));
     await fs.writeFile(path.join(repoRoot, "fonts", "OFL.txt"), "fixture font license\n");
     await fs.writeFile(path.join(repoRoot, "fonts", "OFL-SYMBOLS.txt"), "fixture symbol font license\n");
-    await fs.writeFile(path.join(repoRoot, "fonts", "APACHE-NOTO-EMOJI.txt"), "fixture emoji font license\n");
+    await fs.writeFile(path.join(repoRoot, "fonts", "OFL-EMOJI.txt"), "fixture emoji font license\n");
     await fs.writeFile(path.join(repoRoot, "package.json"), `${JSON.stringify({ name: "fixture", version: "1.0.0", type: "module", dependencies: {} }, null, 2)}\n`);
     await fs.writeFile(path.join(repoRoot, "package-lock.json"), `${JSON.stringify({ name: "fixture", version: "1.0.0", lockfileVersion: 3, packages: { "": { name: "fixture", version: "1.0.0", dependencies: {} } } }, null, 2)}\n`);
     await fs.writeFile(path.join(repoRoot, "LICENSE"), "MIT\n");
@@ -242,7 +249,7 @@ test("regular builder fails before archive creation when the locked production t
     await fs.mkdir(path.join(repoRoot, "fonts"));
     await fs.writeFile(path.join(repoRoot, "fonts", "OFL.txt"), "fixture font license\n");
     await fs.writeFile(path.join(repoRoot, "fonts", "OFL-SYMBOLS.txt"), "fixture symbol font license\n");
-    await fs.writeFile(path.join(repoRoot, "fonts", "APACHE-NOTO-EMOJI.txt"), "fixture emoji font license\n");
+    await fs.writeFile(path.join(repoRoot, "fonts", "OFL-EMOJI.txt"), "fixture emoji font license\n");
     const dependencies = { "missing-dependency": "1.0.0" };
     await fs.writeFile(path.join(repoRoot, "package.json"), `${JSON.stringify({ name: "fixture", version: "1.0.0", type: "module", dependencies }, null, 2)}\n`);
     await fs.writeFile(path.join(repoRoot, "package-lock.json"), `${JSON.stringify({ name: "fixture", version: "1.0.0", lockfileVersion: 3, packages: { "": { name: "fixture", version: "1.0.0", dependencies }, "node_modules/missing-dependency": { version: "1.0.0", resolved: "https://registry.npmjs.org/missing-dependency/-/missing-dependency-1.0.0.tgz", integrity: "sha512-fixture" } } }, null, 2)}\n`);
@@ -297,7 +304,7 @@ test("regular builder rejects a missing upstream emoji-font license before archi
     let archiveCalls = 0;
     await assert.rejects(
       () => buildVsix({ repoRoot, distDir: path.join(temp, "dist"), archiveWriter: async () => { archiveCalls += 1; } }),
-      (error) => error?.code === "ENOENT" && String(error.path || "").endsWith("APACHE-NOTO-EMOJI.txt"),
+      (error) => error?.code === "ENOENT" && String(error.path || "").endsWith("OFL-EMOJI.txt"),
     );
     assert.equal(archiveCalls, 0);
     assert.deepEqual(await fs.readdir(path.join(temp, "dist")), []);
