@@ -8,7 +8,9 @@ import { promisify } from "node:util";
 import { exportArchive, readSessionDiscoveryMeta, recordedPathIdentity, sameRecordedPathIdentity } from "../bin/export-codex-project-chats.mjs";
 
 const execute = promisify(execFile);
-const oldPath = "/synthetic/old-project";
+const oldPath = process.platform === "win32" ? "C:\\synthetic\\old-project" : "/synthetic/old-project";
+const childPath = process.platform === "win32" ? `${oldPath}\\child` : `${oldPath}/child`;
+const renamedPath = process.platform === "win32" ? "C:\\synthetic\\renamed" : "/synthetic/renamed";
 
 test("Windows workspace identities normalize only semantically equivalent absolute paths", () => {
   const canonical = "C:\\Users\\Example\\Project";
@@ -25,6 +27,7 @@ test("Windows workspace identities normalize only semantically equivalent absolu
   }
   assert.equal(sameRecordedPathIdentity(canonical, `${canonical}-other`, "win32"), false);
   assert.equal(sameRecordedPathIdentity(canonical, "Project", "win32"), false, "relative or basename-only values must not become exact matches");
+  assert.equal(recordedPathIdentity("\\Users\\Example\\Project", "win32"), "", "drive-relative rooted paths are not fully qualified recorded paths");
   assert.equal(sameRecordedPathIdentity(canonical, "\\\\.\\C:\\Users\\Example\\Project", "win32"), false, "device paths must not alias ordinary drive paths");
   assert.equal(sameRecordedPathIdentity("\\\\Server\\Share\\Project", "\\\\?\\UNC\\server\\share\\project\\", "win32"), true, "equivalent local UNC namespace spelling is normalized");
 });
@@ -35,7 +38,7 @@ async function fixture() {
   await fs.mkdir(path.join(codexHome, "sessions"), { recursive: true });
   await fs.mkdir(path.join(codexHome, "archived_sessions"));
   let oldBytes = 0;
-  for (const [i, cwd] of [oldPath, oldPath, `${oldPath}/child`, `${oldPath}-other`].entries()) {
+  for (const [i, cwd] of [oldPath, oldPath, childPath, `${oldPath}-other`].entries()) {
     const rows = [
       { type: "session_meta", timestamp: "2026-08-01T10:00:00Z", payload: { id: `synthetic-${i}`, cwd, timestamp: "2026-08-01T10:00:00Z" } },
       { type: "response_item", timestamp: "2026-08-02T10:00:00Z", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "Synthetic." }] } },
@@ -55,15 +58,24 @@ test("recorded-project recovery uses one inventory, exact cwd and bounded metada
       let calls = 0;
       const diagnostics = [];
       const outputDirectory = path.join(temp, exportProfile);
-      const result = await exportArchive({ codexHome, outputDirectory, scope: "project", workspacePath: "/synthetic/renamed", exportProfile,
+      const result = await exportArchive({ codexHome, outputDirectory, scope: "project", workspacePath: renamedPath, exportProfile,
         onDiagnostic: e => diagnostics.push(e),
         onSelectRecordedProject: async ({ projects, reason }) => {
           calls++;
           assert.equal(reason, "no-match");
           assert.equal(projects.length, 3);
           assert.ok(Object.isFrozen(projects) && projects.every(Object.isFrozen));
-          assert.deepEqual(projects.find(p => p.cwd === oldPath), { cwd: oldPath, sessionCount: 2, sourceBytes: oldBytes, lastSessionAt: "2026-08-01T10:00:00.000Z" });
-          assert.ok(projects.every(p => Object.keys(p).length === 4));
+          assert.deepEqual(projects.find(p => p.cwd === oldPath), {
+            cwd: oldPath,
+            recordedPaths: [oldPath],
+            sessionCount: 2,
+            activeSessionCount: 2,
+            archivedSessionCount: 0,
+            sourceBytes: oldBytes,
+            firstSessionAt: "2026-08-01T10:00:00.000Z",
+            lastSessionAt: "2026-08-01T10:00:00.000Z",
+          });
+          assert.ok(projects.every(p => Object.keys(p).length === 8));
           return oldPath;
         },
       });
@@ -109,6 +121,36 @@ test("Current Workspace uses Windows path identity without entering historical f
   } finally { await fs.rm(temp, { recursive: true, force: true }); }
 });
 
+test("recorded-project inventory groups Windows spelling variants while preserving every stored path", { skip: process.platform !== "win32" }, async () => {
+  const temp = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "recorded-windows-variants-")));
+  const codexHome = path.join(temp, "source");
+  const sessions = path.join(codexHome, "sessions");
+  const variants = ["C:\\Users\\Example\\Historical", "c:/users/example/historical/"];
+  await fs.mkdir(sessions, { recursive: true });
+  try {
+    for (let index = 0; index < variants.length; index += 1) {
+      const timestamp = `2026-08-0${index + 1}T10:00:00Z`;
+      await fs.writeFile(path.join(sessions, `rollout-variant-${index}.jsonl`), `${JSON.stringify({ type: "session_meta", timestamp, payload: { id: `variant-${index}`, cwd: variants[index], timestamp } })}\n`);
+    }
+    let inventory;
+    const result = await exportArchive({ codexHome, outputDirectory: path.join(temp, "output"), scope: "recorded-project", onSelectRecordedProject: ({ projects }) => {
+      inventory = projects;
+      return projects[0].cwd;
+    } });
+    assert.equal(result.exportedSessionCount, 2);
+    assert.equal(inventory.length, 1);
+    assert.deepEqual([...inventory[0].recordedPaths].sort(), [...variants].sort());
+    assert.equal(inventory[0].firstSessionAt, "2026-08-01T10:00:00.000Z");
+    assert.equal(inventory[0].lastSessionAt, "2026-08-02T10:00:00.000Z");
+    assert.equal(inventory[0].sessionCount, 2);
+  } finally { await fs.rm(temp, { recursive: true, force: true }); }
+});
+
+test("POSIX recorded paths remain case-sensitive", () => {
+  assert.equal(sameRecordedPathIdentity("/Synthetic/Project", "/synthetic/project", "linux"), false);
+  assert.equal(sameRecordedPathIdentity("/Synthetic/Project/", "/Synthetic/Project", "linux"), true);
+});
+
 test("recorded selection fails closed on cancellation, fabricated paths and absent choices", async () => {
   const { temp, codexHome } = await fixture();
   try {
@@ -138,7 +180,8 @@ test("source changes while the historical-path dialog is open cannot change the 
       const outputDirectory = path.join(temp, "changed");
       await assert.rejects(() => exportArchive({ codexHome, outputDirectory, scope: "recorded-project", exportProfile,
         onSelectRecordedProject: async () => {
-          await fs.appendFile(path.join(codexHome, "sessions", "rollout-0.jsonl"), JSON.stringify({ type: "turn_context", payload: { cwd: "/synthetic/not-selected" } }) + "\n");
+          const changedPath = process.platform === "win32" ? "C:\\synthetic\\not-selected" : "/synthetic/not-selected";
+          await fs.appendFile(path.join(codexHome, "sessions", "rollout-0.jsonl"), JSON.stringify({ type: "turn_context", payload: { cwd: changedPath } }) + "\n");
           return oldPath;
         },
       }), e => e.code === "SOURCE_CHANGED_DURING_EXPORT");
@@ -158,7 +201,9 @@ test("recorded inventory compares actual instants and ignores malformed event da
     for (const exportProfile of ["complete", "readable", "source-snapshots"]) {
       await assert.rejects(() => exportArchive({ codexHome, outputDirectory: path.join(temp, `dates-${exportProfile}`), scope: "recorded-project", exportProfile,
         onSelectRecordedProject: ({ projects }) => {
-          assert.equal(projects.find(project => project.cwd === oldPath).lastSessionAt, "2026-08-02T11:30:00.000Z");
+          const project = projects.find(entry => entry.cwd === oldPath);
+          assert.equal(project.firstSessionAt, "2026-08-01T10:00:00.000Z");
+          assert.equal(project.lastSessionAt, "2026-08-02T11:30:00.000Z");
           return null;
         },
       }), error => error.code === "EXPORT_CANCELLED");

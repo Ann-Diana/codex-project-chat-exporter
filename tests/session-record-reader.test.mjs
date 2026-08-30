@@ -182,3 +182,33 @@ test("source and hashing failures propagate with stable classes", async () => {
     await fs.rm(temp, { recursive: true, force: true });
   }
 });
+
+test("full session streaming observes cancellation before and between source chunks", async () => {
+  const temp = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "codex-reader-abort-")));
+  try {
+    const file = path.join(temp, "source.jsonl");
+    await fs.writeFile(file, `${JSON.stringify({ type: "session_meta", payload: { id: "abort", cwd: "/synthetic" } })}\n`);
+    for (const implementation of implementations) {
+      const preAborted = new AbortController();
+      preAborted.abort();
+      await assert.rejects(async () => {
+        for await (const _record of streamSessionRecords(file, { implementation, abortSignal: preAborted.signal })) {}
+      }, (error) => error.code === "EXPORT_CANCELLED");
+    }
+
+    const controller = new AbortController();
+    await assert.rejects(async () => {
+      for await (const _record of streamSessionRecords(file, {
+        implementation: SESSION_READER_IMPLEMENTATION.STREAMING,
+        abortSignal: controller.signal,
+        io: {
+          createReadStream: () => Readable.from((async function* () {
+            yield Buffer.from('{"type":"session_meta",');
+            controller.abort();
+            yield Buffer.from('"payload":{"id":"abort"}}\n');
+          })()),
+        },
+      })) {}
+    }, (error) => error.code === "EXPORT_CANCELLED");
+  } finally { await fs.rm(temp, { recursive: true, force: true }); }
+});

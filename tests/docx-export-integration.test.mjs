@@ -10,7 +10,7 @@ import JSZip from "jszip";
 import { Packer } from "docx";
 import xmlJs from "xml-js";
 
-import { exportArchive, INCOMPLETE_MARKER_NAME } from "../bin/export-codex-project-chats.mjs";
+import { exportArchive, INCOMPLETE_MARKER_NAME, resolveDocumentFormats } from "../bin/export-codex-project-chats.mjs";
 import { ACTIVE_SESSION_ID, writeReadingOutputFixture } from "./fixtures/reading-output/sessions.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -90,6 +90,29 @@ test("opt-in DOCX export creates exactly one deterministic document per session"
   } finally {
     await fs.rm(temp, { recursive: true, force: true });
   }
+});
+
+test("DOCX and PDF can be rendered and validated together without changing archive format v1", async () => {
+  const temp = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "document-pair-export-")));
+  try {
+    const codexHome = path.join(temp, "source");
+    await writeSingleSession(codexHome);
+    const first = await exportArchive({ codexHome, scope: "all", outputDirectory: path.join(temp, "first"), exportProfile: "readable", documentFormats: ["pdf", "docx"] });
+    const second = await exportArchive({ codexHome, scope: "all", outputDirectory: path.join(temp, "second"), exportProfile: "readable", documentFormats: ["docx", "pdf"] });
+    assert.deepEqual(first.formats, second.formats);
+    assert.equal(first.formats.docx, true);
+    assert.equal(first.formats.pdf, true);
+    const firstDocx = first.rows[0].docx_file;
+    const firstPdf = first.rows[0].pdf_file;
+    const secondDocx = second.rows[0].docx_file;
+    const secondPdf = second.rows[0].pdf_file;
+    assert.deepEqual(await fs.readFile(path.join(first.outputDirectory, firstDocx)), await fs.readFile(path.join(second.outputDirectory, secondDocx)));
+    assert.deepEqual(await fs.readFile(path.join(first.outputDirectory, firstPdf)), await fs.readFile(path.join(second.outputDirectory, secondPdf)));
+    const manifest = JSON.parse(await fs.readFile(first.manifestPath, "utf8"));
+    assert.equal(manifest.archive_format_version, 1);
+    assert.equal(manifest.formats.docx, true);
+    assert.equal(manifest.formats.pdf, true);
+  } finally { await fs.rm(temp, { recursive: true, force: true }); }
 });
 
 test("single-session DOCX preserves ordering, constructs, and controlled hyperlink relationships", async () => {
@@ -209,8 +232,13 @@ test("invalid packed OOXML publishes no failed DOCX or temporary file and leaves
 test("document formats are explicit and reject unknown or duplicate selections", async () => {
   await assert.rejects(() => exportArchive({ scope: "all", documentFormats: ["epub"] }), (error) => error.code === "INVALID_EXPORT_FORMAT");
   await assert.rejects(() => exportArchive({ scope: "all", documentFormats: ["docx", "docx"] }), (error) => error.code === "INVALID_EXPORT_FORMAT");
-  await assert.rejects(() => exportArchive({ scope: "all", documentFormats: ["docx", "pdf"] }), (error) => error.code === "INVALID_EXPORT_FORMAT");
-  await assert.rejects(() => exportArchive({ scope: "all", documentFormats: "docx" }), (error) => error.code === "INVALID_EXPORT_FORMAT");
+  await assert.rejects(() => exportArchive({ scope: "all", documentFormats: ["docx", "pdf", "epub"] }), (error) => error.code === "INVALID_EXPORT_FORMAT");
+  assert.deepEqual(resolveDocumentFormats("docx"), ["docx"]);
+  assert.deepEqual(resolveDocumentFormats("pdf"), ["pdf"]);
+  assert.deepEqual(resolveDocumentFormats("docx,pdf"), ["docx", "pdf"]);
+  assert.deepEqual(resolveDocumentFormats("pdf,docx"), ["docx", "pdf"]);
+  assert.deepEqual(resolveDocumentFormats(["pdf", "docx"]), ["docx", "pdf"]);
+  assert.deepEqual(resolveDocumentFormats([]), []);
 });
 
 test("paired image markers disappear only from reading views while raw bytes and literal examples survive", async () => {
