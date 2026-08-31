@@ -185,9 +185,31 @@ test("README profile matrix agrees with committed profile goldens", async () => 
 
 test("public documentation keeps scope, format, privacy and version contracts consistent", async () => {
   const documents = Object.fromEntries(await Promise.all(publicDocuments.map(async (relative) => [relative, await fs.readFile(path.join(repositoryRoot, relative), "utf8")])));
+  const positioning = [
+    "Turn local Codex project history into independent, portable archives – including editable Word documents and searchable PDFs.",
+    "",
+    "> **To our knowledge, the only Codex session exporter with built-in DOCX and PDF output.**",
+    ">",
+    "> Based on publicly documented exporter features reviewed on 31 August 2026.",
+    "",
+    "- Export the current workspace, another recorded project or all local sessions.",
+    "- Get Markdown, responsive HTML, manifests and optional verified source snapshots.",
+    "- Add DOCX, PDF or both from the same readable document model.",
+    "- Local and read-only toward original Codex data. No telemetry, import or repair.",
+  ].join("\n");
+  const whyDocuments = [
+    "## Why DOCX and PDF?",
+    "",
+    "- **Word:** editable documents for review, comments, handoff and further documentation.",
+    "- **PDF:** searchable, fixed-layout files for sharing, printing and archiving.",
+    "- **One source:** Markdown, HTML, DOCX and PDF follow the same session order and readable content selection.",
+  ].join("\n");
+  assert.ok(documents["README.md"].startsWith(`# Codex Project Chat Exporter\n\n${positioning}\n\n${whyDocuments}\n`));
+  assert.ok(documents["integrations/vscode/README.md"].includes(positioning));
   for (const relative of ["README.md", "integrations/vscode/README.md"]) {
     for (const scope of scopes) assert.ok(documents[relative].includes(scope), `${relative}: ${scope}`);
     for (const format of formatChoices) assert.ok(documents[relative].includes(format), `${relative}: ${format}`);
+    assert.equal(documents[relative].includes("—"), false, `${relative}: em dash`);
   }
 
   const allPublicText = Object.values(documents).join("\n");

@@ -197,7 +197,7 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
   assert.equal(extensionPackage.contributes.configuration.properties["codexProjectChatExporter.outputDirectory"].scope, "machine");
   assert.equal(extensionPackage.contributes.configuration.properties["codexProjectChatExporter.codexHome"].scope, "machine");
   assert.equal(extensionPackage.contributes.configuration.properties["codexProjectChatExporter.includeTools"].scope, "application");
-  assert.equal(extensionPackage.contributes.configuration.properties["codexProjectChatExporter.includeTools"].description, "Include potentially sensitive Tool, Browser, and view_image content and their assets in Markdown, HTML, DOCX, and PDF reading views. When disabled, those records and assets are excluded from reading views.");
+  assert.equal(extensionPackage.contributes.configuration.properties["codexProjectChatExporter.includeTools"].description, "Include potentially sensitive Tool, Browser and view_image content and their assets in Markdown, HTML, DOCX and PDF reading views. When disabled, those records and assets are excluded from reading views.");
   assert.deepEqual(Object.fromEntries(Object.entries(extensionPackage.contributes.configuration.properties).map(([key, value]) => [key, value.default])), {
     "codexProjectChatExporter.outputDirectory": "",
     "codexProjectChatExporter.codexHome": "",
@@ -1060,7 +1060,7 @@ for (const mode of ["recover", "menu", "dismiss-recovery", "dismiss-picker", "di
   }
   if (mode !== "menu") {
     const recovery = fake.messages.find(message => message.message.startsWith("No sessions were recorded"));
-    assert.equal(recovery.message, "No sessions were recorded for the current workspace folder. The project may have moved, renamed or opened from another folder.");
+    assert.equal(recovery.message, "No sessions were recorded for the current workspace folder. The project may have been moved, renamed or opened from another folder.");
     assert.deepEqual(recovery.actions, ["Choose project from Codex history"]);
   }
 }

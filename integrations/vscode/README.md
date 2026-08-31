@@ -1,12 +1,21 @@
 # Codex Project Chat Exporter for Visual Studio Code
 
-This experimental extension is a local Visual Studio Code interface for the same export core used by the direct CLI. It does not implement a second export engine.
+Turn local Codex project history into independent, portable archives – including editable Word documents and searchable PDFs.
 
-The extension requires Visual Studio Code 1.101 or newer. The exporter supports Node.js 22 and 24 in the current CI line; a regular VSIX contains its verified production runtime.
+> **To our knowledge, the only Codex session exporter with built-in DOCX and PDF output.**
+>
+> Based on publicly documented exporter features reviewed on 31 August 2026.
+
+- Export the current workspace, another recorded project or all local sessions.
+- Get Markdown, responsive HTML, manifests and optional verified source snapshots.
+- Add DOCX, PDF or both from the same readable document model.
+- Local and read-only toward original Codex data. No telemetry, import or repair.
+
+The extension is a local VS Code interface for the direct CLI's core. It requires VS Code 1.101 or newer and packages the production runtime.
 
 ## Installation
 
-The extension is distributed as a VSIX and is not currently in the Visual Studio Code Marketplace.
+The extension is distributed as a VSIX, not through the Visual Studio Code Marketplace.
 
 1. Obtain the VSIX from a published release or an explicitly supplied acceptance build.
 2. Open local VS Code Desktop.
@@ -32,13 +41,9 @@ Run `Codex Export: Export…`. The extension performs these stages in order:
 6. **Output folder** – use the configured local folder or choose one.
 7. **Export** – the shared core creates and verifies the generation.
 
-The three scope options are:
-
 - **Current Workspace** – export sessions whose stored absolute path identity equals the open local workspace.
 - **Project from Codex history…** – choose one exact path identity from stored Codex metadata.
 - **All Sessions** – export all detected active and archived local sessions.
-
-The four format options are:
 
 - **Standard formats only**
 - **Add DOCX**
@@ -47,21 +52,15 @@ The four format options are:
 
 Each optional document is per session. PDF is rendered directly from the shared document model and never through DOCX.
 
-## Scope and discovery details
+**Scope and discovery:** **Current Workspace** uses the VS Code folder path and compares it with the first-record `cwd` by exact lexical identity. Windows drive-letter case, slash direction, trailing separators and equivalent local `\\?\` drive or UNC forms are normalized. There is no basename, substring, descendant, `realpath`, filesystem-existence or fuzzy fallback.
 
-**Current Workspace** uses the VS Code folder path and compares it with the first-record `cwd` by exact lexical identity. Windows drive-letter case, slash direction, trailing separators and equivalent local `\\?\` drive or UNC forms are normalized. There is no basename, substring, descendant, `realpath`, filesystem-existence or fuzzy fallback.
-
-Discovery reads bounded `session_meta` or `turn_context` metadata from the first physical JSONL record. It does not scan later conversation records for path recovery and does not read arbitrary files from the open workspace.
-
-**Project from Codex history…** uses the same metadata inventory. It shows session count, source bytes, first and last session time plus every stored spelling variant in one canonical identity. The old path does not need to exist. A path different from the current workspace requires a modal confirmation because one stored `cwd` can contain several logical projects.
+Bounded discovery reads first-record metadata, not later conversation records or arbitrary workspace files. **Project from Codex history…** shows counts, source bytes, dates and stored spelling variants for each identity. The old path need not exist, while selecting a different recorded path requires confirmation.
 
 If Current Workspace has no exact match, the extension says:
 
-> No sessions were recorded for the current workspace folder. The project may have moved, renamed or opened from another folder.
+> No sessions were recorded for the current workspace folder. The project may have been moved, renamed or opened from another folder.
 
-The user can then open the same historical picker. No fuzzy match or all-session fallback is selected automatically.
-
-Cancelling any picker is silent. It does not call the export core, update the last completed export or create the selected output folder. The folder is created only when an export actually starts.
+The user can then open the historical picker. There is no automatic fuzzy or all-session fallback. Cancelling a picker does not call the core or update the last completed export. The folder is created only when an export actually starts.
 
 See [Moved and renamed projects](../../docs/recorded-project-selection.md) for the bounded identity contract.
 

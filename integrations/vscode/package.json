@@ -88,7 +88,7 @@
           "type": "boolean",
           "default": false,
           "scope": "application",
-          "description": "Include potentially sensitive Tool, Browser, and view_image content and their assets in Markdown, HTML, DOCX, and PDF reading views. When disabled, those records and assets are excluded from reading views."
+          "description": "Include potentially sensitive Tool, Browser and view_image content and their assets in Markdown, HTML, DOCX and PDF reading views. When disabled, those records and assets are excluded from reading views."
         },
         "codexProjectChatExporter.diagnosticOutput": {
           "type": "boolean",

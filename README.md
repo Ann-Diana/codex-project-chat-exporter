@@ -1,25 +1,25 @@
 # Codex Project Chat Exporter
 
+Turn local Codex project history into independent, portable archives – including editable Word documents and searchable PDFs.
+
+> **To our knowledge, the only Codex session exporter with built-in DOCX and PDF output.**
+>
+> Based on publicly documented exporter features reviewed on 31 August 2026.
+
+- Export the current workspace, another recorded project or all local sessions.
+- Get Markdown, responsive HTML, manifests and optional verified source snapshots.
+- Add DOCX, PDF or both from the same readable document model.
+- Local and read-only toward original Codex data. No telemetry, import or repair.
+
+## Why DOCX and PDF?
+
+- **Word:** editable documents for review, comments, handoff and further documentation.
+- **PDF:** searchable, fixed-layout files for sharing, printing and archiving.
+- **One source:** Markdown, HTML, DOCX and PDF follow the same session order and readable content selection.
+
 ![Illustration of Codex chat windows being exported](docs/assets/codex-project-chat-exporter-hero.png)
 
-Export local Codex sessions to Markdown, responsive HTML, editable Word documents, standalone PDFs, JSON manifests and optional lossless raw JSONL – fully locally, with image support.
-
-The exporter groups active and archived session files by their stored working directory. It supports project-aware bulk export through a direct CLI, an interactive Windows wrapper and an optional Visual Studio Code extension. The result is a static local collection for review, preservation or privacy-reviewed handoff. It is not an importer or a tested Codex restore path.
-
 > Unofficial project. Not affiliated with, endorsed by or supported by OpenAI.
-
-## Key features
-
-- Reads local active and archived Codex JSONL sessions with a bounded streaming parser.
-- Creates Markdown transcripts and a responsive local HTML index.
-- Writes a root `manifest.json` and provenance-aware `assets/manifest.json`; there is no separate JSON document per session.
-- Can preserve byte-identical Raw JSONL when the selected profile includes it.
-- Can add one editable DOCX, one directly rendered PDF or both documents per exported session.
-- Embeds validated PNG and JPEG images in DOCX and PDF. The local asset store is content-addressed, while legitimate repeated uses remain visible.
-- Uses the same record selection for readable text and visible assets. Tool-only records and assets are controlled by the tool filter.
-- Preserves controlled HTTP and HTTPS links without fetching them. Local file links, launch actions and active schemes are blocked in DOCX and PDF.
-- Uses deterministic output, run-owned temporary files and `EXPORT_INCOMPLETE.txt` for a generation that did not finish cleanly.
-- Supports Node.js 22 and 24 in the current CI line. The packaged VS Code extension carries its production runtime.
 
 ## Visual Studio Code quick start
 
@@ -123,7 +123,7 @@ Every profile contains both JSON manifests and the deduplicated asset store. The
 | PDF | `--format pdf` | Standalone A4 reading view | Direct renderer with bundled fonts; no DOCX conversion |
 | DOCX and PDF | `--format docx,pdf` | Both document views from one shared document model | A failure in either format leaves the overall generation incomplete |
 
-DOCX and PDF may have different page counts because their layout engines differ. The shared document model keeps message order, roles, headings, lists, code blocks and selected images aligned before rendering.
+DOCX and PDF may have different page counts because their layout engines differ. The shared document model keeps message order, roles, headings, lists, code blocks and selected images aligned before rendering. The root and asset manifests are the structured JSON artifacts; there is no separate JSON document per session.
 
 ## Project selection and paths
 

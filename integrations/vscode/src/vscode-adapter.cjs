@@ -141,7 +141,7 @@ function createExtensionAdapter(vscode, injected = {}) {
       const matched = inventory.projects.find((project) => sameIdentity(project.cwd, workspacePath));
       if (matched) return { exporter, codexHome, scopeOptions: { scope: "project", workspacePath } };
       const action = await vscode.window.showWarningMessage(
-        "No sessions were recorded for the current workspace folder. The project may have moved, renamed or opened from another folder.",
+        "No sessions were recorded for the current workspace folder. The project may have been moved, renamed or opened from another folder.",
         "Choose project from Codex history",
       );
       if (action !== "Choose project from Codex history") return null;
