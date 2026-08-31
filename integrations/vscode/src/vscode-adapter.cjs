@@ -33,7 +33,7 @@ const DOCUMENT_FORMATS = Object.freeze([
 ]);
 const EXPORT_SCOPES = Object.freeze([
   { label: "Current Workspace", detail: "Export sessions recorded for the folder currently open in VS Code", scope: "project" },
-  { label: "Project from Codex history…", detail: "Choose sessions recorded for a different, moved, or renamed project folder", scope: "recorded-project" },
+  { label: "Project from Codex history…", detail: "Choose sessions recorded for a different, moved or renamed project folder", scope: "recorded-project" },
   { label: "All Sessions", detail: "Export all local Codex sessions", scope: "all" },
 ]);
 
@@ -141,7 +141,7 @@ function createExtensionAdapter(vscode, injected = {}) {
       const matched = inventory.projects.find((project) => sameIdentity(project.cwd, workspacePath));
       if (matched) return { exporter, codexHome, scopeOptions: { scope: "project", workspacePath } };
       const action = await vscode.window.showWarningMessage(
-        "No sessions were recorded for the current workspace folder. The project may have moved, been renamed, or previously opened from another folder.",
+        "No sessions were recorded for the current workspace folder. The project may have moved, renamed or opened from another folder.",
         "Choose project from Codex history",
       );
       if (action !== "Choose project from Codex history") return null;
@@ -419,7 +419,7 @@ function createExtensionAdapter(vscode, injected = {}) {
     }
     const localFolders = folders.filter((folder) => folder.uri?.scheme === "file");
     if (localFolders.length !== folders.length) {
-      vscode.window.showWarningMessage("Remote, virtual, and non-file workspaces are not supported by this MVP.");
+      vscode.window.showWarningMessage("Remote, virtual and non-file workspaces are not supported by this MVP.");
       return "";
     }
     if (localFolders.length === 1) return localFolders[0].uri.fsPath;

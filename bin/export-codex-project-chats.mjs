@@ -179,7 +179,7 @@ function formatErrorWithHints(error) {
     lines.push("Common reasons:");
     lines.push("- Codex has not created local session files on this machine.");
     lines.push("- You are using a different CODEX_HOME.");
-    lines.push("- Use --sessions-dir, --archived-dir, or --codex-home to point at the right folder.");
+    lines.push("- Use --sessions-dir, --archived-dir or --codex-home to point at the right folder.");
     lines.push("");
   } else if (error?.code === "NO_SELECTION") {
     lines.push("Choose one:");
@@ -575,7 +575,7 @@ async function runCommandInternal(context, { print, profiler, runState }) {
   }
   if (!selected.length) {
     if (print) printProjectList(projectListMetas || metas, context);
-    throw new ExportError("NO_PROJECT_MATCH", "No sessions were recorded for the current workspace path. The project may have been moved, renamed, or previously opened from another folder.");
+    throw new ExportError("NO_PROJECT_MATCH", "No sessions were recorded for the current workspace path. The project may have been moved, renamed or previously opened from another folder.");
   }
   profiler?.setCounts({ exportedSessions: selected.length });
 
@@ -2497,7 +2497,7 @@ async function inspectSeparatedPath(candidatePath, options = {}) {
     if (lstat.isSymbolicLink()) throw new ExportError("UNSAFE_EXPORT_PATH", `Symbolic-link or junction path is not accepted for snapshot publication: ${path.basename(candidatePath)}`);
     const canonicalPath = await io.realpath(absolutePath);
     if (options.rejectAliases && !sameCanonicalPath(canonicalPath, absolutePath)) {
-      throw new ExportError("UNSAFE_EXPORT_PATH", `Output path resolves through a symbolic-link, junction, or alias component: ${path.basename(candidatePath)}`);
+      throw new ExportError("UNSAFE_EXPORT_PATH", `Output path resolves through a symbolic-link, junction or alias component: ${path.basename(candidatePath)}`);
     }
     const [stat, identityStat] = await Promise.all([io.stat(canonicalPath), io.statIdentity(canonicalPath)]);
     if (options.requireRegularFile && !stat.isFile()) throw new ExportError("UNSAFE_EXPORT_PATH", `Expected a regular file while checking path separation: ${path.basename(candidatePath)}`);
@@ -2508,7 +2508,7 @@ async function inspectSeparatedPath(candidatePath, options = {}) {
   }
   const canonicalPath = await canonicalizeMissingPath(absolutePath, io);
   if (options.rejectAliases && !sameCanonicalPath(canonicalPath, absolutePath)) {
-    throw new ExportError("UNSAFE_EXPORT_PATH", `Output path resolves through a symbolic-link, junction, or alias component: ${path.basename(candidatePath)}`);
+    throw new ExportError("UNSAFE_EXPORT_PATH", `Output path resolves through a symbolic-link, junction or alias component: ${path.basename(candidatePath)}`);
   }
   return { absolutePath, canonicalPath, exists: false, identity: null, stat: null };
 }
@@ -2603,7 +2603,7 @@ async function beginExportGeneration(outputRoot, sourceProtection, options = {})
       "Status: INCOMPLETE",
       "",
       "This export generation did not complete successfully.",
-      "Do not use manifest.json, index.html, or index.md while this marker exists.",
+      "Do not use manifest.json, index.html or index.md while this marker exists.",
       "Use a new empty output folder, or manually inspect and remove this incomplete export.",
       "",
     ].join("\n"), "utf8");
@@ -3765,10 +3765,10 @@ function createPerformanceProfiler({ rawEnabled, scope, profile }) {
     }]));
     return {
       performance_profile_version: 1,
-      privacy: "No message text, full source paths, output paths, or attachment payloads are included.",
+      privacy: "No message text, full source paths, output paths or attachment payloads are included.",
       measurement_notes: [
         "Memory values are sampled RSS, not continuous process maxima.",
-        "Markdown rendering covers streaming parse, classification lookup, transformation, and write enqueue time; Markdown writing covers final stream completion wait.",
+        "Markdown rendering covers streaming parse, classification lookup, transformation and write enqueue time; Markdown writing covers final stream completion wait.",
         "Attachment counts are structured event occurrences; repeated payloads or references are not deduplicated without stable attachment identity.",
         "Unprefixed embedded images are recognized only when valid Base64 has a PNG or JPEG byte signature.",
         "Referenced attachment bytes include only explicit structured size metadata; unknown forms and unknown-size references are counted separately.",
@@ -3849,15 +3849,15 @@ async function writeSummary(dir, rows, context, sourceProtection, generation, as
   if (exportFormats.pdf) lines.push("- pdf/ contains one deterministic, classified PDF reading view per exported session.");
   if (exportProfile === EXPORT_PROFILE.READABLE) lines.push(
     "- replacement_history records and history-only assets are omitted from derived reading views; source session bytes remain unchanged.",
-    "- Natural direct-user and assistant prose is typographically normalized; structurally complete standalone internal memory-citation metadata is hidden. Code, technical examples, Complete/Source-snapshots views, and source bytes remain unchanged.",
+    "- Natural direct-user and assistant prose is typographically normalized; structurally complete standalone internal memory-citation metadata is hidden. Code, technical examples, Complete/Source-snapshots views and source bytes remain unchanged.",
   );
   else lines.push("- Unmatched replacement_history assets appear once under Additional stored context; source and Raw session bytes remain unchanged.");
   if (copyRaw) lines.push("- raw/ contains canonical byte-preserving session JSONL snapshots.");
   else lines.push("- This profile does not include canonical raw JSONL snapshots.");
-  lines.push("- assets/ contains content-addressed decoded attachments selected for reading views; assets/manifest.json records validated types, provenance, visibility, and verified mirrors.");
+  lines.push("- assets/ contains content-addressed decoded attachments selected for reading views; assets/manifest.json records validated types, provenance, visibility and verified mirrors.");
   lines.push("- Raw export file names may be collision-safe archive names; manifest.json preserves the original name and portable restore path.", "- raw_copy_status=VERIFIED_AT_EXPORT means the export-time hash check completed at raw_verified_at and the bytes read from the published Raw path matched raw_sha256 during that check; Raw files remain mutable afterward.", "- A future importer must hash the current Raw file again and reject any mismatch; no Codex import path is implemented or validated.", "- Event order is the physical line order inside each canonical raw JSONL file; the manifest does not duplicate that sequence.");
-  if (exportFormats.html && exportProfile === EXPORT_PROFILE.SOURCE_SNAPSHOTS) lines.push("- index.html uses only project, storage, start time, session ID, and Raw links because this profile intentionally skips complete readable metadata.");
-  else if (exportFormats.html) lines.push("- index.html can be filtered by project, title, date, model, or storage location.");
+  if (exportFormats.html && exportProfile === EXPORT_PROFILE.SOURCE_SNAPSHOTS) lines.push("- index.html uses only project, storage, start time, session ID and Raw links because this profile intentionally skips complete readable metadata.");
+  else if (exportFormats.html) lines.push("- index.html can be filtered by project, title, date, model or storage location.");
   lines.push("- Absolute source paths are local metadata and must be omitted from any share-safe derivative.");
   await writeSeparatedOutputFile(path.join(dir, "README.txt"), sourceProtection, (handle) => handle.writeFile(`${lines.join("\n")}\n`, "utf8"), generation);
 }
@@ -3918,36 +3918,63 @@ Usage:
   node ./bin/export-codex-project-chats.mjs --list
   node ./bin/export-codex-project-chats.mjs --list-sessions
   node ./bin/export-codex-project-chats.mjs --diagnose
-  node ./bin/export-codex-project-chats.mjs --project my-project
+  node ./bin/export-codex-project-chats.mjs --recorded-project <absolute-recorded-cwd> --out <dir>
+  node ./bin/export-codex-project-chats.mjs --project <legacy-name-or-path-search> --out <dir>
   node ./bin/export-codex-project-chats.mjs --all
 
 Options:
-  --project <name-or-path>    Export sessions matching a project/work folder name or path.
-  --recorded-project <cwd>    Export one absolute recorded cwd by lexical path identity (no fuzzy matching).
-  --all                       Export all detected local Codex sessions, including project/work chats found on disk.
-  --list                      List unique project/work folders and active/archived counts.
-  --list-sessions             List every detected session with storage, title, project, date, and ID.
-  --diagnose                  Show scan paths, file counts, incomplete metadata, and parser warnings.
+  --project <name-or-path>    Legacy fuzzy name/path search. It is not moved-project recovery.
+  --recorded-project <cwd>    Match one absolute recorded cwd by exact lexical path identity.
+  --all                       Export all detected local Codex sessions.
+  --list                      List recorded path identities, stored variants, counts, bytes and date range.
+  --list-sessions             List every detected session with storage, title, project, date and ID.
+  --diagnose                  Show scan paths, file counts, incomplete metadata and parser warnings.
   --out <dir>                 Write the export to a specific directory.
   --codex-home <dir>          Use a custom Codex home directory. Defaults to CODEX_HOME or ~/.codex.
   --sessions-dir <dir>        Use a custom active sessions directory instead of <codex-home>/sessions.
   --archived-dir <dir>        Use a custom archived sessions directory instead of <codex-home>/archived_sessions.
   --no-archived               Do not scan the archived sessions directory.
   --session-index <file>      Use a custom session_index.jsonl file.
-  --include-tools             Include tool call input/output in Markdown.
-  --profile <name>            Use complete, readable, or source-snapshots. Explicit profile wins over --no-raw.
-  --format <docx|pdf|docx,pdf> Add deterministic document reading views per exported session.
+  --include-tools             Include Tool, Browser and view_image records plus their selected assets in reading views.
+  --profile <name>            Use complete, readable or source-snapshots. Explicit profile wins over --no-raw.
+  --format <formats>          Add docx, pdf or docx,pdf per session. pdf,docx normalizes to docx,pdf.
   --report-format <text|json> Use human-readable text (default) or one machine-readable result object.
   --no-raw                    Legacy shorthand for the readable profile when --profile is omitted.
   --no-redact-markdown        Disable redaction in Markdown and derived display titles.
-  --readable-paths            Use longer human-readable export file names.
+  --readable-paths            Use longer readable path and file-name presentation instead of short paths.
   --performance-profile <file> Write a message-free, path-redacted local JSON performance profile.
   --allow-output-in-tool-dir  Allow exporting into this tool/repository folder.
   --help, -h                  Show this help.
   --version, -v               Show the version.
 
-By default, exports use short paths such as md/p001-project/s0001.md and
-raw/p001-project/s0001.jsonl to make copied or unzipped archives safer on Windows.\n\nIf node is not found, use export-codex-project-chats.cmd or install Node.js 22+.`);
+Profiles:
+  complete          Markdown, responsive HTML, manifests, assets and verified Raw JSONL.
+  readable          Markdown, responsive HTML, manifests and assets without new Raw JSONL.
+  source-snapshots  Reduced responsive HTML, manifests, assets and verified Raw JSONL without Markdown.
+
+Sources and interfaces:
+  Active and archived local stores are scanned unless --no-archived is used.
+  --recorded-project compares stored cwd metadata only and never checks whether that path still exists.
+  The .cmd launcher is interactive. This MJS entry point is the direct headless CLI.
+
+Reports and exit codes:
+  text is the default. json emits one final object on stdout or one error object on stderr.
+  0 = success or information, 1 = operational failure, 2 = usage error, 130 = cleaned-up SIGINT.
+  Parser codes include CLI_UNKNOWN_OPTION, CLI_MISSING_VALUE, CLI_UNEXPECTED_POSITIONAL,
+  CLI_SELECTION_CONFLICT and CLI_UNSUPPORTED_VALUE. Core errors retain their stable codes.
+
+Format parsing:
+  docx,pdf and pdf,docx normalize to docx,pdf. A repeated --format option is last-wins.
+  Empty values, unknown names, duplicates inside one list and more than two entries are invalid.
+
+Cancellation:
+  The first SIGINT requests controlled cleanup. A started multi-session or multi-format generation
+  can retain EXPORT_INCOMPLETE.txt and must not be treated as a completed archive. Synchronous
+  third-party packaging cannot be interrupted inside one call, so cancellation is checked around it.
+
+By default, short paths such as md/p001-project/s0001.md and raw/p001-project/s0001.jsonl
+make copied or unzipped archives safer on Windows. If node is not found, use
+export-codex-project-chats.cmd or install Node.js 22+.`);
 }
 
 function printProjectList(metas, context) {
@@ -4109,7 +4136,7 @@ function renderHtmlIndex(rows, generatedAt, options = {}) {
     if (reducedMetadata) return `      <tr data-search="${htmlEscape(searchable)}"><td>${htmlEscape(row.project_name || row.project)}</td><td>${htmlEscape(row.storage || "active")}</td><td>${htmlEscape(startedAt)}</td><td>${htmlEscape(row.session_id)}</td>${assetsCell}${docxCell}${pdfCell}${rawCell}</tr>`;
     return `      <tr data-search="${htmlEscape(searchable)}"><td>${htmlEscape(row.project_name || row.project)}</td><td>${htmlEscape(row.title || row.session_id)}</td><td>${htmlEscape(row.storage || "active")}</td><td>${htmlEscape(startedAt)}</td><td>${htmlEscape(modelSummary.value)}</td>${assetsCell}${markdownCell}${docxCell}${pdfCell}${rawCell}</tr>`;
   }).join("\n");
-  const filterPlaceholder = reducedMetadata ? "Project, storage, date, or session ID" : "Project, title, date, model, active or archived";
+  const filterPlaceholder = reducedMetadata ? "Project, storage, date or session ID" : "Project, title, date, model, active or archived";
   const profileNote = reducedMetadata ? "\n  <p class=\"meta\">Source snapshots intentionally use a reduced index and do not inspect complete readable metadata.</p>" : "";
   const header = reducedMetadata
     ? `<th>Project</th><th>Storage</th><th>Started</th><th>Session ID</th><th>Assets</th>${includeDocxColumn ? "<th>DOCX</th>" : ""}${includePdfColumn ? "<th>PDF</th>" : ""}${includeRawColumn ? "<th>Raw</th>" : ""}`

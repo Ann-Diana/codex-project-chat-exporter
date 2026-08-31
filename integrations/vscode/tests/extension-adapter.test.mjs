@@ -628,7 +628,7 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
   const fake = createFakeVscode({ workspaceFolders: [folder("vscode-remote://ssh/project", "vscode-remote")] });
   const adapter = createExtensionAdapter(fake.vscode, { loadExporter: async () => exporter });
   assert.equal(await adapter.getLocalWorkspacePath(), "", "remote workspace should be rejected");
-  assert.match(fake.messages.at(-1).message, /Remote, virtual, and non-file/);
+  assert.match(fake.messages.at(-1).message, /Remote, virtual and non-file/);
 }
 
 {
@@ -987,7 +987,7 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
 
 assert.deepEqual(EXPORT_SCOPES.map(({ label, detail }) => ({ label, detail })), [
   { label: "Current Workspace", detail: "Export sessions recorded for the folder currently open in VS Code" },
-  { label: "Project from Codex history…", detail: "Choose sessions recorded for a different, moved, or renamed project folder" },
+  { label: "Project from Codex history…", detail: "Choose sessions recorded for a different, moved or renamed project folder" },
   { label: "All Sessions", detail: "Export all local Codex sessions" },
 ]);
 assert.deepEqual(DOCUMENT_FORMATS.map(item => item.label), ["Standard formats only", "Add DOCX", "Add PDF", "Add DOCX and PDF"]);
@@ -1060,7 +1060,7 @@ for (const mode of ["recover", "menu", "dismiss-recovery", "dismiss-picker", "di
   }
   if (mode !== "menu") {
     const recovery = fake.messages.find(message => message.message.startsWith("No sessions were recorded"));
-    assert.equal(recovery.message, "No sessions were recorded for the current workspace folder. The project may have moved, been renamed, or previously opened from another folder.");
+    assert.equal(recovery.message, "No sessions were recorded for the current workspace folder. The project may have moved, renamed or opened from another folder.");
     assert.deepEqual(recovery.actions, ["Choose project from Codex history"]);
   }
 }

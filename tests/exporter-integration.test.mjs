@@ -561,7 +561,7 @@ assert.match(sourceSnapshotsHtml, /<th>Raw<\/th>/);
 assert.doesNotMatch(sourceSnapshotsHtml, /<th>Title<\/th>/, "source-snapshots must not display unavailable readable titles");
 assert.doesNotMatch(sourceSnapshotsHtml, /<th>Model<\/th>/, "source-snapshots must not display unavailable model metadata");
 assert.match(sourceSnapshotsHtml, /<th>Session ID<\/th>/, "source-snapshots should retain session identity in the reduced index");
-assert.match(sourceSnapshotsHtml, /Project, storage, date, or session ID/);
+assert.match(sourceSnapshotsHtml, /Project, storage, date or session ID/);
 assert.match(sourceSnapshotsHtml, /intentionally use a reduced index and do not inspect complete readable metadata/);
 const sourceSnapshotsManifest = JSON.parse(await fs.readFile(sourceSnapshotsResult.manifestPath, "utf8"));
 assert.equal(sourceSnapshotsManifest.export_profile, "source-snapshots");

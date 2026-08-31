@@ -2,26 +2,44 @@
 
 All notable changes to this project are documented here.
 
-## 0.3.0 – Unreleased
+The last published state proven by local repository tags is `v0.2.0`. Package metadata identifies the current development line as `0.3.0`, but no `v0.3.0` tag exists.
+
+## Unreleased
+
+### Added
+
+- Added bounded streaming JSONL processing for large records, incremental attachment hashing and sequential per-session work.
+- Added a deterministic SHA-256-addressed asset store with provenance, mirror relationships, validated raster types and one physical file per unique asset.
+- Added opt-in deterministic DOCX and directly rendered PDF reading views, with one document per session and a shared exporter-independent document model.
+- Added bundled hash-verified Noto text, monospace, symbol and Noto Emoji 3.002 outline fonts for offline PDF rendering.
+- Added confirmed chronological model history and session-origin metadata without merging subagent models into a parent session.
+- Added exact historical recorded-path inventory and selection for moved or renamed projects.
+- Added direct CLI text or JSON reports, exact recorded-project selection, DOCX and PDF in one run plus controlled SIGINT cleanup.
 
 ### Changed
 
-- Raised the exporter minimum runtime to Node.js 22 and the experimental extension minimum to Visual Studio Code 1.101. Exporter 0.2.x remains the final line for older Node.js versions; Node.js 18 and 20 are no longer tested.
-- Added the bounded streaming JSONL foundation for processing large string values without materializing complete records.
-- Integrated the bounded reader into the shared CLI and VS Code export core, with committed-record projections, incremental attachment hashing, differential legacy-reference tests, and fail-closed invalid-input handling.
-- Added an export-local, SHA-256-addressed asset store with deterministic schema-1 usage manifests, bounded type validation, Markdown and HTML links, and aggregate root-manifest fields.
-- Added an opt-in, deterministic per-session DOCX export backed by an exporter-independent document model shared by the CLI and VS Code adapter.
-- Added structural OOXML, cross-runtime reproducibility, failure-cleanup, and 16/115 MiB memory diagnostics for DOCX.
-- Added an opt-in, directly rendered deterministic per-session PDF export with A4 pagination, safe URI links, bounded PNG/JPEG images, conservative attachment fallbacks, and byte-identical Node.js 22/24 output.
-- Bundled hash-verified OFL-1.1 Noto proportional, monospace, symbol, and Noto Emoji 3.002 variable outline fonts; unsupported complex PDF graphemes now receive one visible marker listing every code point in order.
-- Extended the regular deterministic VSIX builder and packaged offline end-to-end test to cover the complete PDF runtime and font integrity tree.
-- Added controlled HTTP/HTTPS OOXML hyperlinks with deterministic relationship IDs and repaired regular VSIX packaging so the complete production runtime, integrity inventory, and third-party license material are included automatically.
+- Raised the minimum exporter runtime to Node.js 22 and the experimental extension minimum to Visual Studio Code 1.101. The current CI line covers Node.js 22 and 24.
+- Aligned Complete, Readable and Source snapshots with one record and asset selection policy. Readable suppresses `replacement_history`; Complete keeps unmatched stored context in a labelled area.
+- Made Tool, Browser and `view_image` filtering apply consistently to Markdown, responsive HTML, DOCX, PDF and selected assets.
+- Added controlled HTTP and HTTPS hyperlinks without remote retrieval. Local file links, launch actions and active schemes remain blocked in DOCX and PDF.
+- Extended the deterministic VSIX builder, integrity inventory and packaged offline end-to-end tests for the complete production runtime and bundled fonts.
+- Upgraded the monochrome emoji fallback and made unsupported PDF graphemes visible through deterministic ordered code-point markers.
+
+### Fixed
+
+- Fixed metadata-only workspace discovery for large first records and Windows path representation variants without fuzzy matching or workspace-file reads.
+- Fixed mirrored image duplication, tool-only image leakage, replacement-history visibility and asset-manifest provenance.
+- Fixed invalid XML 1.0 text and ANSI SGR handling in DOCX while preserving valid Unicode and Raw JSONL.
+- Fixed safe deterministic DOCX hyperlink relationships and complete VSIX dependency packaging.
+- Fixed PDF symbol baselines, multiline fallback layout, nested list and page-break overlap plus readable document structure.
+- Fixed preservation of model transitions, subagent origin and multi-model labels across manifests and reading formats.
+- Fixed cancellation and multi-format publication so interrupted generations are clearly marked incomplete and run-owned temporary files are cleaned.
 
 ### Security
 
-- Added a target-filesystem hard-link capability probe before session reads; asset publication has no overwrite or copy fallback.
-- Unknown, active, truncated, or MIME-spoofed attachments are preserved as non-renderable `.bin` files, and existing targets are rehashed and type-checked before reuse.
-- DOCX packaging allows only controlled HTTP/HTTPS hyperlink relationships; it blocks external resource relationships, macros, embedded active content, local/active/unsupported link schemes, rehashes local assets before embedding, and never downloads remote resources.
+- Added target-filesystem hard-link capability checks, source/output separation and fail-closed publication without overwrite or copy fallback.
+- Rehashes existing asset targets and local files immediately before document embedding; invalid or changed content aborts publication.
+- Keeps external images, active OOXML relationships, PDF launch or JavaScript actions, macros, forms and embedded files out of generated documents.
 
 ## 0.2.0 – 2026-08-20
 
