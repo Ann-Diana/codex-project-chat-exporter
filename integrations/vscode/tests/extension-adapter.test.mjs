@@ -1183,6 +1183,28 @@ for (const mode of ["recover", "menu", "dismiss-recovery", "dismiss-picker", "di
   assert.match(grouped.description, /^2 sessions · \d+ bytes · 2026-08-01 – 2026-08-02$/);
   for (const variant of historicalVariants) assert.ok(grouped.detail.includes(variant));
   assert.equal(fs.existsSync(discoveryOutput), false);
+
+  const historyExportOutput = path.join(temp, "adapter-canonical-history-output");
+  const historyExportFake = createFakeVscode({
+    workspaceFolders: [folder(oneWorkspace)],
+    config: { codexHome: discoveryHome, outputDirectory: historyExportOutput, pathStyle: "readable", includeTools: false },
+    warningSelector: (_message, actions) => actions.find((action) => action === "Export recorded sessions"),
+    quickPickSelector: (items, options) => {
+      if (options.placeHolder === "Choose what to export") return items.find(item => item.scope === "recorded-project");
+      if (options.title === "Choose a project folder from Codex history") return items.find(item => item.detail.startsWith("2 stored path variants:"));
+      if (options.placeHolder === "Choose an export profile") return items.find(item => item.profile === "readable");
+      if (options.placeHolder === "Choose optional document formats") return items.find(item => item.label === "Standard formats only");
+      return items[0];
+    },
+  });
+  const historyExportAdapter = createExtensionAdapterCore(historyExportFake.vscode, { loadExporter: async () => realExporter });
+  await historyExportAdapter.activate(createContext(temp));
+  const historyExportResult = await historyExportAdapter.exportFromQuickPick(createContext(temp));
+  assert.equal(historyExportResult.exportedProjectCount, 1, "VS Code historical selection must preserve one canonical project group");
+  const historyExportManifest = JSON.parse(await fsp.readFile(path.join(historyExportOutput, "manifest.json"), "utf8"));
+  assert.deepEqual(new Set(historyExportManifest.sessions.map((session) => session.project)), new Set(historicalVariants));
+  assert.equal(new Set(historyExportManifest.sessions.map((session) => session.markdown_file.replaceAll("\\", "/").split("/")[1])).size, 1);
+  assert.ok(historyExportFake.messages.some((message) => message.type === "info" && message.message.startsWith("Exported 2 sessions across 1 project to ")));
 }
 
 {

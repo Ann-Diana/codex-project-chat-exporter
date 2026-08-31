@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -302,5 +303,171 @@ test("first-record discovery is bounded, ignores conversation bytes and aborts b
     assert.equal(metadataDiagnostics.length, 2);
     assert.ok(metadataDiagnostics.every(event => event.metadata_bytes_read <= Buffer.byteLength(JSON.stringify(metadata)) + 4096));
     assert.equal(await fs.stat(source).then(stat => stat.size), Buffer.byteLength(`${JSON.stringify(metadata)}\n${tail}\n`));
+  } finally { await fs.rm(temp, { recursive: true, force: true }); }
+});
+
+async function writeCanonicalGroupingFixture(codexHome, recordedPaths) {
+  const sessions = path.join(codexHome, "sessions");
+  await fs.mkdir(sessions, { recursive: true });
+  const sources = [];
+  for (let index = 0; index < recordedPaths.length; index += 1) {
+    const recordedPath = recordedPaths[index];
+    const day = String(index + 1).padStart(2, "0");
+    const timestamp = `2026-08-${day}T10:00:00.000Z`;
+    const id = `canonical-group-${index + 1}`;
+    const records = [
+      { type: "session_meta", timestamp, payload: { id, ...(recordedPath === undefined ? {} : { cwd: recordedPath }), timestamp, source: "vscode", thread_source: "user" } },
+      { type: "turn_context", timestamp: `2026-08-${day}T10:00:01.000Z`, payload: { ...(recordedPath === undefined ? {} : { cwd: recordedPath }), model: "gpt-5.5", turn_id: `turn-${index + 1}` } },
+      { type: "response_item", timestamp: `2026-08-${day}T10:00:02.000Z`, payload: { type: "message", role: "user", content: [{ type: "input_text", text: `Synthetic grouping request ${index + 1}.` }], internal_chat_message_metadata_passthrough: { turn_id: `turn-${index + 1}` } } },
+      { type: "response_item", timestamp: `2026-08-${day}T10:00:03.000Z`, payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: `Synthetic grouping response ${index + 1}.` }] } },
+    ];
+    const source = path.join(sessions, `rollout-${day}-${id}.jsonl`);
+    await fs.writeFile(source, `${records.map((record) => JSON.stringify(record)).join("\n")}\n`, "utf8");
+    sources.push(source);
+  }
+  return sources;
+}
+
+function referencedProjectDirectory(relativePath) {
+  const parts = String(relativePath || "").replaceAll("\\", "/").split("/").filter(Boolean);
+  return parts.length >= 3 ? parts[1] : "";
+}
+
+async function assertCanonicalGroupingExport({ outputDirectory, result, expectedProjects, expectedRawProjects }) {
+  assert.equal(result.exportedProjectCount, expectedProjects);
+  const manifest = JSON.parse(await fs.readFile(path.join(outputDirectory, "manifest.json"), "utf8"));
+  assert.equal(manifest.archive_format_version, 1);
+  assert.deepEqual(new Set(manifest.sessions.map((session) => session.project)), new Set(expectedRawProjects));
+  if (expectedProjects === 1) assert.equal(new Set(manifest.sessions.map((session) => session.project_name)).size, 1);
+  const projectDirectories = new Set();
+  for (const session of manifest.sessions) {
+    for (const field of ["markdown_file", "raw_export_file", "docx_file", "pdf_file"]) {
+      if (session[field]) projectDirectories.add(referencedProjectDirectory(session[field]));
+    }
+    if (session.raw_export_file) {
+      assert.deepEqual(await fs.readFile(path.join(outputDirectory, session.raw_export_file)), await fs.readFile(session.source_jsonl), "Raw JSONL must remain byte-identical");
+    }
+  }
+  if (expectedProjects === 1) assert.equal(projectDirectories.size, 1, "every output format must use one logical project directory");
+  const summary = await fs.readFile(path.join(outputDirectory, "README.txt"), "utf8");
+  const projectLines = summary.slice(summary.indexOf("Projects:\n") + "Projects:\n".length, summary.indexOf("\n\nNotes:")).split("\n").filter(Boolean);
+  assert.equal(projectLines.length, expectedProjects, "README project summary must use logical identities");
+  return manifest;
+}
+
+test("canonical Windows project identity governs routing, every format, manifests and completion counts", { skip: process.platform !== "win32", timeout: 120_000 }, async () => {
+  const temp = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "canonical-project-grouping-")));
+  const codexHome = path.join(temp, "source");
+  const variants = ["C:\\Demo\\Moved-Project", "c:\\Demo\\Moved-Project\\", "C:/Demo/Moved-Project"];
+  const sources = await writeCanonicalGroupingFixture(codexHome, variants);
+  const sourceHashesBefore = await Promise.all(sources.map((file) => fs.readFile(file).then((bytes) => createHash("sha256").update(bytes).digest("hex"))));
+  try {
+    const primaryOutput = path.join(temp, "primary");
+    const primary = await exportArchive({
+      codexHome,
+      outputDirectory: primaryOutput,
+      scope: "recorded-project",
+      exportProfile: "complete",
+      pathStyle: "readable",
+      documentFormats: ["docx", "pdf"],
+      onSelectRecordedProject: ({ projects, reason }) => {
+        assert.equal(reason, "requested");
+        assert.equal(projects.length, 1);
+        assert.deepEqual(new Set(projects[0].recordedPaths), new Set(variants));
+        return projects[0].cwd;
+      },
+    });
+    const primaryManifest = await assertCanonicalGroupingExport({ outputDirectory: primaryOutput, result: primary, expectedProjects: 1, expectedRawProjects: variants });
+    assert.equal(primary.exportedSessionCount, 3);
+    assert.ok(primaryManifest.sessions.every((session) => session.markdown_file && session.docx_file && session.pdf_file && session.raw_export_file));
+    const indexMarkdown = await fs.readFile(path.join(primaryOutput, "index.md"), "utf8");
+    const indexHtml = await fs.readFile(path.join(primaryOutput, "index.html"), "utf8");
+    assert.ok(primaryManifest.sessions.every((session) => indexMarkdown.includes(session.markdown_file.replaceAll("\\", "/"))));
+    assert.ok(primaryManifest.sessions.every((session) => indexHtml.includes(session.docx_file.replaceAll("\\", "/")) && indexHtml.includes(session.pdf_file.replaceAll("\\", "/"))));
+
+    const workspaceOutput = path.join(temp, "workspace");
+    const workspace = await exportArchive({ codexHome, outputDirectory: workspaceOutput, scope: "project", workspacePath: "\\\\?\\C:\\Demo\\Moved-Project\\", exportProfile: "readable" });
+    await assertCanonicalGroupingExport({ outputDirectory: workspaceOutput, result: workspace, expectedProjects: 1, expectedRawProjects: variants });
+
+    const cliRecorded = path.join(temp, "cli-recorded");
+    const recordedResult = await execute(process.execPath, [path.resolve("bin/export-codex-project-chats.mjs"), "--codex-home", codexHome, "--out", cliRecorded, "--recorded-project", "c:/demo/moved-project/", "--profile", "readable", "--format", "docx,pdf", "--report-format", "json"], { windowsHide: true });
+    assert.equal(JSON.parse(recordedResult.stdout).exported_project_count, 1);
+    await assertCanonicalGroupingExport({ outputDirectory: cliRecorded, result: { exportedProjectCount: 1 }, expectedProjects: 1, expectedRawProjects: variants });
+
+    const cliAll = path.join(temp, "cli-all");
+    const allResult = await execute(process.execPath, [path.resolve("bin/export-codex-project-chats.mjs"), "--codex-home", codexHome, "--out", cliAll, "--all", "--profile", "source-snapshots", "--report-format", "json"], { windowsHide: true });
+    assert.equal(JSON.parse(allResult.stdout).exported_project_count, 1);
+    await assertCanonicalGroupingExport({ outputDirectory: cliAll, result: { exportedProjectCount: 1 }, expectedProjects: 1, expectedRawProjects: variants });
+
+    for (const exportProfile of ["complete", "readable", "source-snapshots"]) {
+      for (const pathStyle of ["short", "readable"]) {
+        for (const documentFormats of [[], ["docx"], ["pdf"], ["docx", "pdf"]]) {
+          const suffix = documentFormats.length ? documentFormats.join("-") : "standard";
+          const outputDirectory = path.join(temp, `matrix-${exportProfile}-${pathStyle}-${suffix}`);
+          const result = await exportArchive({ codexHome, outputDirectory, scope: "all", exportProfile, pathStyle, documentFormats });
+          const manifest = await assertCanonicalGroupingExport({ outputDirectory, result, expectedProjects: 1, expectedRawProjects: variants });
+          assert.ok(manifest.sessions.every((session) => Boolean(session.docx_file) === documentFormats.includes("docx")));
+          assert.ok(manifest.sessions.every((session) => Boolean(session.pdf_file) === documentFormats.includes("pdf")));
+        }
+      }
+    }
+
+    const deterministicA = path.join(temp, "deterministic-a");
+    const deterministicB = path.join(temp, "deterministic-b");
+    await exportArchive({ codexHome, outputDirectory: deterministicA, scope: "all", exportProfile: "readable", pathStyle: "readable", documentFormats: ["docx", "pdf"] });
+    await exportArchive({ codexHome, outputDirectory: deterministicB, scope: "all", exportProfile: "readable", pathStyle: "readable", documentFormats: ["docx", "pdf"] });
+    for (const relative of (await fs.readdir(path.join(deterministicA, "docx", "moved-project"))).map((name) => `docx/moved-project/${name}`)) {
+      assert.deepEqual(await fs.readFile(path.join(deterministicA, relative)), await fs.readFile(path.join(deterministicB, relative)), `DOCX must be deterministic: ${relative}`);
+    }
+    for (const relative of (await fs.readdir(path.join(deterministicA, "pdf", "moved-project"))).map((name) => `pdf/moved-project/${name}`)) {
+      assert.deepEqual(await fs.readFile(path.join(deterministicA, relative)), await fs.readFile(path.join(deterministicB, relative)), `PDF must be deterministic: ${relative}`);
+    }
+    assert.deepEqual(await Promise.all(sources.map((file) => fs.readFile(file).then((bytes) => createHash("sha256").update(bytes).digest("hex")))), sourceHashesBefore, "source fixtures must remain unchanged");
+  } finally { await fs.rm(temp, { recursive: true, force: true }); }
+});
+
+test("canonical grouping rejects fuzzy neighbours and preserves basename collision suffixes", { skip: process.platform !== "win32" }, async () => {
+  const temp = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "canonical-project-negatives-")));
+  const codexHome = path.join(temp, "source");
+  const distinctPaths = [
+    "C:\\Demo\\Moved-Project",
+    "C:\\Demo\\Moved-Project-2",
+    "D:\\Demo\\Moved-Project",
+    "\\\\Server\\Share-A\\Project",
+    "\\\\Server\\Share-B\\Project",
+    "C:\\One\\Shared",
+    "D:\\Two\\Shared",
+    "Demo\\Relative",
+    "C:drive-relative",
+    "\\\\.\\C:\\Demo\\Moved-Project",
+    undefined,
+  ];
+  await writeCanonicalGroupingFixture(codexHome, distinctPaths);
+  try {
+    const outputDirectory = path.join(temp, "output");
+    const result = await exportArchive({ codexHome, outputDirectory, scope: "all", exportProfile: "complete", pathStyle: "readable" });
+    const manifest = await assertCanonicalGroupingExport({ outputDirectory, result, expectedProjects: distinctPaths.length, expectedRawProjects: distinctPaths.map((value) => value || "") });
+    const directories = manifest.sessions.map((session) => referencedProjectDirectory(session.markdown_file));
+    assert.equal(new Set(directories).size, distinctPaths.length);
+    assert.ok(directories.includes("shared") && directories.includes("shared-2"), "different projects with one basename need collision-safe suffixes");
+    assert.equal(manifest.sessions.filter((session) => session.project === "").length, 1, "missing cwd must retain empty provenance without merging");
+  } finally { await fs.rm(temp, { recursive: true, force: true }); }
+});
+
+test("canonical grouping preserves equivalent local namespace and UNC spellings", { skip: process.platform !== "win32" }, async () => {
+  const temp = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "canonical-project-namespaces-")));
+  const codexHome = path.join(temp, "source");
+  const drivePair = ["C:\\Demo\\Namespace", "\\\\?\\C:\\Demo\\Namespace\\"];
+  const uncPair = ["\\\\Server\\Share\\Folder", "\\\\?\\UNC\\server\\share\\folder\\"];
+  const recordedPaths = [...drivePair, ...uncPair];
+  await writeCanonicalGroupingFixture(codexHome, recordedPaths);
+  try {
+    const outputDirectory = path.join(temp, "output");
+    const result = await exportArchive({ codexHome, outputDirectory, scope: "all", exportProfile: "complete", pathStyle: "short", documentFormats: ["docx", "pdf"] });
+    const manifest = await assertCanonicalGroupingExport({ outputDirectory, result, expectedProjects: 2, expectedRawProjects: recordedPaths });
+    const directoryByProject = new Map(manifest.sessions.map((session) => [session.project, referencedProjectDirectory(session.markdown_file)]));
+    assert.equal(directoryByProject.get(drivePair[0]), directoryByProject.get(drivePair[1]));
+    assert.equal(directoryByProject.get(uncPair[0]), directoryByProject.get(uncPair[1]));
+    assert.notEqual(directoryByProject.get(drivePair[0]), directoryByProject.get(uncPair[0]));
   } finally { await fs.rm(temp, { recursive: true, force: true }); }
 });

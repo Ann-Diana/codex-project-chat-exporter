@@ -588,14 +588,19 @@ async function runCommandInternal(context, { print, profiler, runState }) {
   const exportLock = await acquireExportLock(outputDir, sourceProtection);
   let assetStore = null;
   try {
+  const logicalProjects = logicalProjectGroups(selected);
   const projectDirs = new Map();
   const tasks = selected.map((meta, selectedIndex) => {
-    const projectDir = pathStyle === "readable" ? readableProjectDir(projectDirs, meta.cwd) : shortProjectDir(projectDirs, meta.cwd);
+    const projectIdentity = logicalProjectIdentity(meta);
+    const logicalProject = logicalProjects.get(projectIdentity);
+    const projectDir = pathStyle === "readable"
+      ? readableProjectDir(projectDirs, projectIdentity, logicalProject.displayPath)
+      : shortProjectDir(projectDirs, projectIdentity, logicalProject.displayPath);
     const sessionCode = `s${String(selectedIndex + 1).padStart(4, "0")}`;
     const sourceOriginalFilename = path.basename(meta.file);
     const rawExportName = pathStyle === "readable" ? `${sessionCode}-${sourceOriginalFilename}` : `${sessionCode}.jsonl`;
     const rawRel = path.join("raw", projectDir, rawExportName);
-    return { meta, projectDir, sessionCode, sourceOriginalFilename, rawExportName, rawRel, snapshot: null, assetSnapshot: null, parsedSnapshotMeta: null, metadataAlreadyParsed: needsCompleteInventory };
+    return { meta, projectDir, projectIdentity, projectName: logicalProject.projectName, sessionCode, sourceOriginalFilename, rawExportName, rawRel, snapshot: null, assetSnapshot: null, parsedSnapshotMeta: null, metadataAlreadyParsed: needsCompleteInventory };
   });
   const plannedPaths = ["manifest.json", "README.txt", ASSET_MANIFEST_PATH];
   if (exportFormats.html) plannedPaths.push("index.html");
@@ -721,7 +726,7 @@ async function runCommandInternal(context, { print, profiler, runState }) {
   const manifest = await writeIndexFiles(outputDir, rows, profiler, context, sourceProtection, generation, assetPublication.summary, assetStore);
   const summaryStart = performance.now();
   diagnosticReporter("summary_start");
-  await writeSummary(outputDir, rows, context, sourceProtection, generation, assetPublication.summary);
+  await writeSummary(outputDir, rows, context, sourceProtection, generation, assetPublication.summary, logicalProjects);
   throwIfExportAborted(context.abortSignal);
   profiler?.addPhase("other", performance.now() - summaryStart, 0, (await fsp.stat(path.join(outputDir, "README.txt"))).size);
   diagnosticReporter("summary_end", { duration_ms: roundMs(performance.now() - summaryStart) });
@@ -760,7 +765,7 @@ async function runCommandInternal(context, { print, profiler, runState }) {
     assetSummary: assetPublication.summary,
     exportProfile,
     formats: { ...exportFormats },
-    exportedProjectCount: new Set(rows.map((row) => row.project || "unknown")).size,
+    exportedProjectCount: logicalProjects.size,
     exportedSessionCount: rows.length,
     activeSessionCount: rows.filter((row) => row.storage === "active").length,
     archivedSessionCount: rows.filter((row) => row.storage === "archived").length,
@@ -1292,7 +1297,7 @@ async function collectSessionAssets(file, sessionId, assetStore, exportProfile, 
 
 async function processExportTask(task, titleIndex, profiler, context, sourceProtection, generation, assetStore) {
   const { exportFormats, copyRaw, outputDir, redactMarkdown, pathStyle, markdownDirName } = context;
-  const { meta, projectDir, sessionCode, sourceOriginalFilename, rawExportName, rawRel, snapshot, assetSnapshot, parsedSnapshotMeta, metadataAlreadyParsed } = task;
+  const { meta, projectDir, projectName, sessionCode, sourceOriginalFilename, rawExportName, rawRel, snapshot, assetSnapshot, parsedSnapshotMeta, metadataAlreadyParsed } = task;
   let renderMeta = meta;
   let stats = {
     userMessages: 0,
@@ -1380,7 +1385,7 @@ async function processExportTask(task, titleIndex, profiler, context, sourceProt
   const sourceRelativePath = validatedSourceRelativePath(meta.file, meta.sourceRootPath);
   return {
     project: renderMeta.cwd || "",
-    project_name: renderMeta.cwd ? portableBasename(renderMeta.cwd) : "",
+    project_name: projectName || (renderMeta.cwd ? portableBasename(renderMeta.cwd) : ""),
     title: renderMeta.displayTitle || renderMeta.title || "",
     display_title: renderMeta.displayTitle || renderMeta.title || "",
     title_source: renderMeta.titleSource || "",
@@ -3068,21 +3073,53 @@ function neutralSessionTitle(meta) {
   return `${meta.sessionKind === SESSION_KIND.SUBAGENT ? "Subagent session" : "Codex session"} ${shortId}`;
 }
 
-function shortProjectDir(projectDirs, cwd) {
-  const key = cwd || "unknown";
+function logicalProjectIdentity(meta, platform = process.platform) {
+  const recordedIdentity = recordedPathIdentity(meta?.cwd, platform);
+  if (recordedIdentity) return `recorded\0${recordedIdentity}`;
+  if (typeof meta?.cwd === "string" && meta.cwd) return `literal\0${meta.cwd}`;
+  const sessionIdentity = meta?.id || meta?.session_id || path.resolve(meta?.file || "unknown");
+  return `session\0${sessionIdentity}`;
+}
+
+function logicalProjectGroups(metas, platform = process.platform) {
+  const groups = new Map();
+  for (const meta of metas) {
+    const identity = logicalProjectIdentity(meta, platform);
+    let group = groups.get(identity);
+    if (!group) {
+      group = { identity, recordedPaths: new Set(), sessionCount: 0 };
+      groups.set(identity, group);
+    }
+    if (typeof meta?.cwd === "string" && meta.cwd) group.recordedPaths.add(meta.cwd);
+    group.sessionCount += 1;
+  }
+  for (const [identity, group] of groups) {
+    const recordedPaths = [...group.recordedPaths].sort((left, right) => left.localeCompare(right));
+    const displayPath = recordedPaths[0] || "unknown";
+    groups.set(identity, Object.freeze({
+      identity,
+      recordedPaths: Object.freeze(recordedPaths),
+      sessionCount: group.sessionCount,
+      displayPath,
+      projectName: displayPath === "unknown" ? "" : portableBasename(displayPath),
+    }));
+  }
+  return groups;
+}
+
+function shortProjectDir(projectDirs, key, displayPath) {
   if (!projectDirs.has(key)) {
     const number = String(projectDirs.size + 1).padStart(3, "0");
-    const leaf = slug(portableBasename(key)).slice(0, 24);
+    const leaf = slug(portableBasename(displayPath)).slice(0, 24);
     projectDirs.set(key, `p${number}${leaf ? `-${leaf}` : ""}`);
   }
   return projectDirs.get(key);
 }
 
-function readableProjectDir(projectDirs, cwd) {
-  const key = cwd || "unknown";
+function readableProjectDir(projectDirs, key, displayPath) {
   if (!projectDirs.has(key)) {
     const used = new Set(projectDirs.values());
-    const base = slug(portableBasename(key));
+    const base = slug(portableBasename(displayPath));
     let candidate = base;
     let suffix = 2;
     while (used.has(candidate)) {
@@ -3835,14 +3872,13 @@ function roundMs(value) {
   return Math.round(Number(value || 0) * 1000) / 1000;
 }
 
-async function writeSummary(dir, rows, context, sourceProtection, generation, assetSummary) {
+async function writeSummary(dir, rows, context, sourceProtection, generation, assetSummary, logicalProjects) {
   const { codexHome, sessionsDir, includeArchived, archivedSessionsDir, exportProfile, pathStyle, exportFormats, markdownDirName, copyRaw } = context;
-  const projects = new Map();
   throwIfExportAborted(context.abortSignal);
-  for (const row of rows) projects.set(row.project || "unknown", (projects.get(row.project || "unknown") || 0) + 1);
+  const projects = [...logicalProjects.values()].map((project) => [project.displayPath, project.sessionCount]);
   const activeCount = rows.filter((row) => row.storage === "active").length;
   const archivedCount = rows.filter((row) => row.storage === "archived").length;
-  const lines = ["Codex Project Chat Export", "=========================", "", `Generated: ${generation?.generatedAt || new Date().toISOString()}`, `Codex home: ${codexHome}`, `Sessions dir: ${sessionsDir}`, `Archived sessions dir: ${includeArchived ? archivedSessionsDir : "disabled"}`, `Export profile: ${exportProfile}`, `Path style: ${pathStyle}`, `Sessions exported: ${rows.length}`, `Active sessions: ${activeCount}`, `Archived sessions: ${archivedCount}`, `Attachment occurrences: ${assetSummary.assetOccurrences}`, `Unique assets: ${assetSummary.uniqueAssets}`, `Unique asset bytes: ${assetSummary.uniqueAssetBytes}`, `Deduplicated asset bytes saved: ${assetSummary.deduplicatedBytesSaved}`, "", "Projects:", ...Array.from(projects.entries()).map(([project, count]) => `- ${project}: ${count}`), "", "Notes:"];
+  const lines = ["Codex Project Chat Export", "=========================", "", `Generated: ${generation?.generatedAt || new Date().toISOString()}`, `Codex home: ${codexHome}`, `Sessions dir: ${sessionsDir}`, `Archived sessions dir: ${includeArchived ? archivedSessionsDir : "disabled"}`, `Export profile: ${exportProfile}`, `Path style: ${pathStyle}`, `Sessions exported: ${rows.length}`, `Active sessions: ${activeCount}`, `Archived sessions: ${archivedCount}`, `Attachment occurrences: ${assetSummary.assetOccurrences}`, `Unique assets: ${assetSummary.uniqueAssets}`, `Unique asset bytes: ${assetSummary.uniqueAssetBytes}`, `Deduplicated asset bytes saved: ${assetSummary.deduplicatedBytesSaved}`, "", "Projects:", ...projects.map(([project, count]) => `- ${project}: ${count}`), "", "Notes:"];
   if (exportFormats.markdown) lines.push(`- ${markdownDirName}/ contains classified, derived reading views.`);
   else if (!exportFormats.docx && !exportFormats.pdf) lines.push("- This profile intentionally does not create human-readable session transcripts; attachment provenance still follows the shared streamed reading selection.");
   if (exportFormats.docx) lines.push("- docx/ contains one deterministic, classified DOCX reading view per exported session.");
