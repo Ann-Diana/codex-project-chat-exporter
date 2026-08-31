@@ -17,6 +17,14 @@ When raw export is enabled, each raw JSONL file is a byte-identical snapshot of 
 
 When raw export is disabled, the export contains no new canonical session bytes. The manifest still identifies `raw_jsonl` as the canonical representation type but marks each omitted snapshot explicitly.
 
+## Persisted rollout boundaries
+
+The exporter treats each selected rollout JSONL file as an append-ordered source and streams it through the physical end of the file. A historical `task_started` record without a matching terminal event does not bound the session, invent a terminal event or hide later complete turns. This preserves the local records implicated by [Codex issue #41591](https://github.com/openai/codex/issues/41591) without attempting to repair Codex state.
+
+`session_index.jsonl` may supply a title only through the documented title-validation path. Its timestamp does not determine last activity, turn count or export extent. Those values come from the selected rollout itself, including records later than a stale index entry. This is the exporter boundary relevant to [Codex issue #41707](https://github.com/openai/codex/issues/41707).
+
+Persisted `function_call`, `function_call_output`, `custom_tool_call` and `custom_tool_call_output` records remain tool records. `include_tools` controls their derived Markdown, DOCX, PDF and asset representation without reclassifying them as direct conversation messages. A subagent rollout remains an independent session, while its explicit source `parent_thread_id` stays preserved in Raw JSONL. This covers the persisted collaboration and Unified Exec forms relevant to [Codex issue #41590](https://github.com/openai/codex/issues/41590); it does not promise import, resume or repair behavior.
+
 ## Generation completion marker
 
 `EXPORT_INCOMPLETE.txt` invalidates the entire export generation while it exists. In that state, `manifest.json`, `assets/manifest.json`, `index.html`, and `index.md` are not valid descriptions or reading views of the current files, even if they are present and individually well formed.
