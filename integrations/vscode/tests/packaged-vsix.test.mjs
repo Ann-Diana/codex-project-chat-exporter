@@ -88,18 +88,28 @@ async function extractExtension(zip, installedRoot) {
 
 async function writeSyntheticSession(codexHome) {
   const sessionId = "aaaaaaaa-aaaa-7aaa-8aaa-aaaaaaaaaaaa";
+  const parentId = "bbbbbbbb-bbbb-7bbb-8bbb-bbbbbbbbbbbb";
   const directory = path.join(codexHome, "sessions", "2026", "08", "24");
+  const archivedDirectory = path.join(codexHome, "archived_sessions");
   await fs.mkdir(directory, { recursive: true });
+  await fs.mkdir(archivedDirectory, { recursive: true });
   const message = "# Linktest\n\nUmlaute äöü & <XML>. Symbole → ← ↑ ↓ ✓ ⚠ ± ≤ ≥. Emoji 😄 und ⚠️. ZWJ 👩‍💻 und 😄‍😄. ANSI \u001b[31m.\n\nLink: [OpenAI](https://openai.com/).\n\n- eins\n- zwei\n\n```js\nconst value = '<&> → ✓ ⚠ ≤ ≥';\n```";
-  const records = [
-    { type: "session_meta", timestamp: "2026-08-24T10:00:00.000Z", payload: { id: sessionId, cwd: "C:\\Synthetic\\link-check", timestamp: "2026-08-24T10:00:00.000Z", source: "vscode", thread_source: "user" } },
-    { type: "response_item", timestamp: "2026-08-24T10:00:01.000Z", payload: { type: "message", role: "user", content: [{ type: "input_text", text: message }], internal_chat_message_metadata_passthrough: { turn_id: "turn-1" } } },
-    { type: "event_msg", timestamp: "2026-08-24T10:00:01.001Z", payload: { type: "user_message", message } },
-    { type: "response_item", timestamp: "2026-08-24T10:00:02.000Z", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "Antwort. [Query](https://example.invalid/3D?a=1&b=2)." }] } },
+  const parentPrefix = [
+    { ordinal: 0, type: "session_meta", timestamp: "2026-08-24T09:00:00.000Z", payload: { id: parentId, cwd: "C:\\Synthetic\\parent", timestamp: "2026-08-24T09:00:00.000Z", source: "vscode", thread_source: "user", history_mode: "paginated" } },
+    { ordinal: 1, type: "response_item", timestamp: "2026-08-24T09:00:01.000Z", payload: { type: "message", role: "user", content: [{ type: "input_text", text: message }], internal_chat_message_metadata_passthrough: { turn_id: "turn-1" } } },
+    { ordinal: 2, type: "event_msg", timestamp: "2026-08-24T09:00:01.001Z", payload: { type: "user_message", message } },
   ];
-  const file = path.join(directory, `rollout-2026-08-24T10-00-00-${sessionId}.jsonl`);
-  await fs.writeFile(file, `${records.map((record) => JSON.stringify(record)).join("\n")}\n`, "utf8");
-  return file;
+  const parentPrefixBytes = Buffer.from(`${parentPrefix.map((record) => JSON.stringify(record)).join("\n")}\n`, "utf8");
+  const parentFile = path.join(archivedDirectory, `rollout-2026-08-24T09-00-00-${parentId}.jsonl`);
+  await fs.writeFile(parentFile, Buffer.concat([parentPrefixBytes, Buffer.from(`${JSON.stringify({ ordinal: 3, type: "response_item", timestamp: "2026-08-24T09:00:02.000Z", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "AFTER_REFERENCE_BOUNDARY" }] } })}\n`, "utf8")]));
+  const historyBase = { thread_id: parentId, end_ordinal_exclusive: 3, end_byte_offset: parentPrefixBytes.length };
+  const records = [
+    { ordinal: 3, type: "session_meta", timestamp: "2026-08-24T10:00:00.000Z", payload: { id: sessionId, cwd: "C:\\Synthetic\\link-check", timestamp: "2026-08-24T10:00:00.000Z", source: "vscode", thread_source: "user", forked_from_id: parentId, history_mode: "paginated", history_base: historyBase } },
+    { ordinal: 4, type: "response_item", timestamp: "2026-08-24T10:00:02.000Z", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "Antwort. [Query](https://example.invalid/3D?a=1&b=2)." }] } },
+  ];
+  const childFile = path.join(directory, `rollout-2026-08-24T10-00-00-${sessionId}.jsonl`);
+  await fs.writeFile(childFile, `${records.map((record) => JSON.stringify(record)).join("\n")}\n`, "utf8");
+  return { childFile, parentPrefixBytes };
 }
 
 test("regular VSIX builds are byte-identical and their packaged runtime exports controlled DOCX/PDF links offline", async () => {
@@ -158,19 +168,28 @@ test("regular VSIX builds are byte-identical and their packaged runtime exports 
     const { defaultLoadExporter } = require(path.join(installedRoot, "src", "vscode-adapter.cjs"));
     const codexHome = path.join(temp, "synthetic-codex-home");
     const outputDirectory = path.join(temp, "output");
-    await writeSyntheticSession(codexHome);
+    const paginatedFixture = await writeSyntheticSession(codexHome);
     const exporter = await withoutNetwork(() => defaultLoadExporter({ extensionPath: installedRoot }));
     let choices = 0;
-    const result = await withoutNetwork(() => exporter.exportArchive({ codexHome, scope: "project", workspacePath: "C:\\Synthetic\\renamed", outputDirectory, exportProfile: "readable", documentFormats: ["docx", "pdf"], onSelectRecordedProject: ({ projects, reason }) => {
+    const result = await withoutNetwork(() => exporter.exportArchive({ codexHome, scope: "project", workspacePath: "C:\\Synthetic\\renamed", outputDirectory, exportProfile: "complete", documentFormats: ["docx", "pdf"], onSelectRecordedProject: ({ projects, reason }) => {
       choices++;
       assert.equal(reason, "no-match");
-      assert.equal(projects.length, 1);
-      assert.equal(projects[0].sessionCount, 1);
-      return projects[0].cwd;
+      assert.equal(projects.length, 2);
+      const childProject = projects.find((project) => project.cwd === "C:\\Synthetic\\link-check");
+      assert.equal(childProject.sessionCount, 1);
+      return childProject.cwd;
     } }));
     assert.equal(choices, 1);
     const manifest = JSON.parse(await fs.readFile(result.manifestPath, "utf8"));
     assert.equal(manifest.sessions.length, 1);
+    assert.equal(manifest.archive_format_version, 1);
+    assert.equal(manifest.history_reference_closure.length, 1);
+    const historySegment = manifest.history_reference_closure[0].segments[0];
+    assert.equal(historySegment.snapshot_kind, "DERIVED_EXACT_PREFIX");
+    assert.deepEqual(await fs.readFile(path.join(outputDirectory, historySegment.snapshot_file)), paginatedFixture.parentPrefixBytes);
+    assert.deepEqual(await fs.readFile(path.join(outputDirectory, manifest.sessions[0].raw_export_file)), await fs.readFile(paginatedFixture.childFile));
+    const markdown = await fs.readFile(path.join(outputDirectory, manifest.sessions[0].markdown_file), "utf8");
+    assert.equal(markdown.includes("AFTER_REFERENCE_BOUNDARY"), false);
     const docx = await fs.readFile(path.join(outputDirectory, manifest.sessions[0].docx_file));
     const { documentXml, relsXml } = await withoutNetwork(async () => {
       const documentZip = await JSZip.loadAsync(docx, { checkCRC32: true, createFolders: false });
@@ -195,6 +214,7 @@ test("regular VSIX builds are byte-identical and their packaged runtime exports 
     assert.equal(elementText(children[index + 1]), ".");
     assert.ok(elementText(parsedDocument).includes("ANSI ."));
     assert.equal(elementText(parsedDocument).includes("invalid XML character U+001B"), false);
+    assert.equal(elementText(parsedDocument).includes("AFTER_REFERENCE_BOUNDARY"), false);
 
     const pdf = await fs.readFile(path.join(outputDirectory, manifest.sessions[0].pdf_file));
     const pdfSource = pdf.toString("latin1");

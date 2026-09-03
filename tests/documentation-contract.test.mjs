@@ -197,6 +197,10 @@ test("public documentation keeps scope, format, privacy and version contracts co
     "- Add DOCX, PDF or both from the same readable document model.",
     "- Local and read-only toward original Codex data. No telemetry, import or repair.",
   ].join("\n");
+  const readmePositioning = positioning.replace(
+    "- Get Markdown, responsive HTML, manifests and optional verified source snapshots.",
+    "- Reconstruct paginated fork histories from validated local rollout references.\n- Get Markdown, responsive HTML, manifests and optional verified source snapshots.",
+  );
   const whyDocuments = [
     "## Why DOCX and PDF?",
     "",
@@ -204,7 +208,7 @@ test("public documentation keeps scope, format, privacy and version contracts co
     "- **PDF:** searchable, fixed-layout files for sharing, printing and archiving.",
     "- **One source:** Markdown, HTML, DOCX and PDF follow the same session order and readable content selection.",
   ].join("\n");
-  assert.ok(documents["README.md"].startsWith(`# Codex Project Chat Exporter\n\n${positioning}\n\n${whyDocuments}\n`));
+  assert.ok(documents["README.md"].startsWith(`# Codex Project Chat Exporter\n\n${readmePositioning}\n\n${whyDocuments}\n`));
   assert.ok(documents["integrations/vscode/README.md"].includes(positioning));
   for (const relative of ["README.md", "integrations/vscode/README.md"]) {
     for (const scope of scopes) assert.ok(documents[relative].includes(scope), `${relative}: ${scope}`);
@@ -226,6 +230,13 @@ test("public documentation keeps scope, format, privacy and version contracts co
   assert.ok(documents["README.md"].includes("there is no separate JSON document per session"));
   assert.ok(documents["README.md"].includes("Raw JSONL is source-faithful and is not automatically safe to share"));
   assert.ok(documents["integrations/vscode/README.md"].includes("The folder is created only when an export actually starts."));
+
+  const archiveContract = await fs.readFile(path.join(repositoryRoot, "docs", "archive-format-v1.md"), "utf8");
+  for (const required of [
+    "session_meta.payload.history_base", "end_ordinal_exclusive", "end_byte_offset",
+    "history_reference_closure", "DERIVED_EXACT_PREFIX", "COMPRESSED_ROLLOUT_UNSUPPORTED",
+    "COMPRESSED_ROLLOUT_INVALID", "raw/history-prefixes/",
+  ]) assert.ok(archiveContract.includes(required), required);
 
   const changelog = await fs.readFile(path.join(repositoryRoot, "CHANGELOG.md"), "utf8");
   const unreleased = changelog.slice(0, changelog.indexOf("## 0.2.0"));

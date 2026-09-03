@@ -7,6 +7,7 @@ Turn local Codex project history into independent, portable archives – includi
 > Based on publicly documented exporter features reviewed on 31 August 2026.
 
 - Export the current workspace, another recorded project or all local sessions.
+- Reconstruct paginated fork histories from validated local rollout references.
 - Get Markdown, responsive HTML, manifests and optional verified source snapshots.
 - Add DOCX, PDF or both from the same readable document model.
 - Local and read-only toward original Codex data. No telemetry, import or repair.

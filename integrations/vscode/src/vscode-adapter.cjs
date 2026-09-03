@@ -211,13 +211,18 @@ function createExtensionAdapter(vscode, injected = {}) {
       const stat = await deps.fsp.stat(location.root).catch((error) => error?.code === "ENOENT" ? null : Promise.reject(error));
       if (stat?.isDirectory()) await findJsonlFiles(location.root, location.storage, files, abortSignal);
     }
-    files.sort((left, right) => left.file.localeCompare(right.file));
-    if (!files.length) throw createAdapterError("NO_SESSIONS", `No Codex session files were found under ${codexHome}.`);
+    const plainFiles = new Set(files
+      .filter((entry) => !entry.file.toLowerCase().endsWith(".jsonl.zst"))
+      .map((entry) => normalizedLocalPath(entry.file)));
+    const discoveredFiles = files.filter((entry) => !entry.file.toLowerCase().endsWith(".jsonl.zst")
+      || !plainFiles.has(normalizedLocalPath(entry.file.slice(0, -4))));
+    discoveredFiles.sort((left, right) => left.file.localeCompare(right.file));
+    if (!discoveredFiles.length) throw createAdapterError("NO_SESSIONS", `No Codex session files were found under ${codexHome}.`);
     const retained = new Map();
-    for (let index = 0; index < files.length; index += 1) {
+    for (let index = 0; index < discoveredFiles.length; index += 1) {
       throwIfAdapterAborted(abortSignal);
-      onProgress?.({ message: `Reading session metadata ${index + 1} of ${files.length}` });
-      const entry = files[index];
+      onProgress?.({ message: `Reading session metadata ${index + 1} of ${discoveredFiles.length}` });
+      const entry = discoveredFiles[index];
       const meta = await exporter.readSessionDiscoveryMeta(entry.file, { abortSignal });
       const key = meta.id || normalizedLocalPath(entry.file);
       const existing = retained.get(key);
@@ -258,7 +263,7 @@ function createExtensionAdapter(vscode, injected = {}) {
       throwIfAdapterAborted(abortSignal);
       const candidate = deps.path.join(directory, entry.name);
       if (entry.isDirectory()) await findJsonlFiles(candidate, storage, files, abortSignal);
-      else if (entry.isFile() && entry.name.toLowerCase().endsWith(".jsonl")) files.push({ file: candidate, storage });
+      else if (entry.isFile() && (entry.name.toLowerCase().endsWith(".jsonl") || entry.name.toLowerCase().endsWith(".jsonl.zst"))) files.push({ file: candidate, storage });
     }
   }
 

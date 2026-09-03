@@ -21,6 +21,14 @@ When raw export is disabled, the export contains no new canonical session bytes.
 
 The exporter treats each selected rollout JSONL file as an append-ordered source and streams it through the physical end of the file. A historical `task_started` record without a matching terminal event does not bound the session, invent a terminal event or hide later complete turns. This preserves the local records implicated by [Codex issue #41591](https://github.com/openai/codex/issues/41591) without attempting to repair Codex state.
 
+Codex 0.153.0 can store a paginated rollout reference in `session_meta.payload.history_base` when `session_meta.payload.history_mode` is `paginated`. Its `thread_id` names the immutable source rollout ID. `end_ordinal_exclusive` is the first excluded source ordinal and `end_byte_offset` is the byte immediately after the last included JSONL record. The byte offset addresses the uncompressed JSONL representation. The exporter resolves that ID only through its already inventoried active and archived session roots, validates both boundaries against the same exact prefix and reconstructs the logical stream as oldest Parent prefix through Child delta. Duplicate earlier ordinals do not terminate streaming; the ordinal at the validated boundary must still equal `end_ordinal_exclusive - 1`.
+
+Canonical filenames use their sole UUID as both stable thread ID and rollout ID. A replaced or reverted filename has the form `rollout-<timestamp>-<stable-thread-id>_<rollout-id>.jsonl`; references resolve by the trailing rollout ID while export identity remains the stable thread ID. Multi-stage chains are followed recursively. Missing, ambiguous, cyclic, malformed, out-of-range, record-splitting or ordinal-mismatched references fail the generation before it can be reported as complete.
+
+Discovery reads only a bounded first metadata record. A selected record that exceeds that bound fails with `SESSION_METADATA_LIMIT_EXCEEDED` rather than proceeding without potentially late history fields.
+
+Codex can opt in to Zstandard-compressed `.jsonl.zst` rollouts. A plain `.jsonl` file shadows its compressed sibling. Discovery recognises the compressed name and uses Node's built-in streaming decoder when the runtime provides it, so the source cannot disappear silently. Full compressed export is currently refused with `COMPRESSED_ROLLOUT_UNSUPPORTED`: the package supports Node.js from 22.0.0, while the required built-in Zstandard stream is absent from earlier supported Node 22 releases. No external executable, native module, network retrieval or unreviewed dependency is used. Invalid compressed metadata fails as `COMPRESSED_ROLLOUT_INVALID`.
+
 `session_index.jsonl` may supply a title only through the documented title-validation path. Its timestamp does not determine last activity, turn count or export extent. Those values come from the selected rollout itself, including records later than a stale index entry. This is the exporter boundary relevant to [Codex issue #41707](https://github.com/openai/codex/issues/41707).
 
 Persisted `function_call`, `function_call_output`, `custom_tool_call` and `custom_tool_call_output` records remain tool records. `include_tools` controls their derived Markdown, DOCX, PDF and asset representation without reclassifying them as direct conversation messages. A subagent rollout remains an independent session, while its explicit source `parent_thread_id` stays preserved in Raw JSONL. This covers the persisted collaboration and Unified Exec forms relevant to [Codex issue #41590](https://github.com/openai/codex/issues/41590); it does not promise import, resume or repair behavior.
@@ -72,6 +80,7 @@ Relevant top-level fields include:
 - `replacement_history_source_unchanged`: always `true`; profile filtering changes only derived views and selected derived assets, never source or Raw JSONL bytes.
 - `asset_occurrences`, `unique_assets`, and `unique_asset_bytes`: aggregate decoded-asset counts and unique-byte volume. `deduplicated_asset_bytes_saved` additionally reports repeated occurrence bytes not stored again.
 - `sessions`: ordered exported-session metadata.
+- `history_reference_closure`: optional paginated-history source evidence for affected sessions only.
 
 Top-level absolute paths are local diagnostics. They are not needed to reconstruct the portable source mapping and are not share-safe.
 
@@ -80,6 +89,18 @@ The version-1 root manifest has an open, forward-compatible content model. A con
 This rule applies only to additive fields in the root `manifest.json`. It does not relax the separately versioned and deliberately strict `assets/manifest.json` schema, and an unknown root field never authorizes an additional archive path.
 
 `session_model_histories` is additive root metadata. It contains one entry per exported session with the session ID, the chronological sequence of models confirmed by `turn_context.payload.model` after consecutive duplicates are collapsed, and a status. `thread_settings.model` is corroborating configuration only and cannot add a model to this sequence. The legacy `sessions[].model` field remains the last confirmed value for version-1 consumers; reading views and the HTML index use the complete root history. A fork whose copied records cannot be separated reliably from fork-local turns has status `WITHHELD_FORK_INHERITANCE` and an empty sequence rather than an inferred history.
+
+`history_reference_closure` is also additive root metadata. It does not change the meaning, byte identity or path of any selected `sessions[]` Raw snapshot. An older version-1 consumer may ignore this field and any unreferenced derived prefix file, but it must not interpret an unknown field as permission to read, overwrite or delete that file. The current exporter validates the field before it treats a derived prefix path as part of a replaceable generation. Because the canonical selected-session mapping and every pre-existing required field retain their version-1 meaning, paginated exports remain archive format version 1. A future change that replaces selected-session Raw semantics or makes closure mandatory for all consumers would require a new archive-format version.
+
+Each closure entry identifies one selected Child session and contains its ordered inherited segments. A segment records:
+
+- immutable `rollout_id` and stable filename `thread_id`;
+- `storage`, `source_root` and a validated root-relative `source_relative_path`;
+- `source_representation`;
+- exact `end_ordinal_exclusive`, `end_byte_offset`, `prefix_size_bytes` and lowercase `prefix_sha256`;
+- `snapshot_kind` and `snapshot_file`.
+
+`NOT_INCLUDED` means the profile does not publish source bytes. `SELECTED_FULL_SOURCE` reuses the Parent's already selected byte-identical Raw snapshot. `DERIVED_EXACT_PREFIX` stores only the referenced bytes below `raw/history-prefixes/`; it is labelled as a derived range and never as a complete original rollout. Identical required prefixes share one physical file. Later Parent bytes are neither read for reconstruction nor copied into that derived snapshot. Cross-project sources remain visible through their storage class and source-relative mapping without widening the selected session set.
 
 ## Asset manifest schema 2
 

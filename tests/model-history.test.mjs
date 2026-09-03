@@ -49,3 +49,15 @@ test("fork histories are withheld when inherited and fork-local turns cannot be 
   assert.deepEqual(result.models, []);
   assert.deepEqual(result.changes, []);
 });
+
+test("validated paginated reconstruction permits confirmed inherited model history", () => {
+  const tracker = createRuntimeModelHistoryTracker({ allowForkInheritance: true });
+  [
+    { type: "session_meta", payload: { id: "fork", forked_from_id: "parent", history_mode: "paginated" } },
+    turn("gpt-5.5", "parent-turn"),
+    turn("gpt-5.6-sol", "child-turn"),
+  ].forEach((item, index) => tracker.observe(item, index + 1));
+  const result = tracker.finish();
+  assert.equal(result.status, MODEL_HISTORY_STATUS.CONFIRMED);
+  assert.deepEqual(result.models, ["gpt-5.5", "gpt-5.6-sol"]);
+});

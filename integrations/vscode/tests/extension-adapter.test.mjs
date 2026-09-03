@@ -1115,6 +1115,38 @@ for (const mode of ["recover", "menu", "dismiss-recovery", "dismiss-picker", "di
 }
 
 {
+  const compressedDiscoveryHome = path.join(temp, "adapter-compressed-discovery");
+  const compressedDiscoveryRoot = path.join(compressedDiscoveryHome, "sessions", "2026", "09", "03");
+  await fsp.mkdir(compressedDiscoveryRoot, { recursive: true });
+  const compressedOnly = path.join(compressedDiscoveryRoot, "rollout-compressed-only.jsonl.zst");
+  const shadowedPlain = path.join(compressedDiscoveryRoot, "rollout-shadowed.jsonl");
+  const shadowedCompressed = `${shadowedPlain}.zst`;
+  await Promise.all([
+    fsp.writeFile(compressedOnly, "compressed-only-sentinel", "utf8"),
+    fsp.writeFile(shadowedPlain, "plain-sentinel", "utf8"),
+    fsp.writeFile(shadowedCompressed, "compressed-shadow-sentinel", "utf8"),
+  ]);
+  const metadataReads = [];
+  const fake = createFakeVscode({ config: { codexHome: compressedDiscoveryHome }, quickPickSelector: (items, options) => {
+    if (options.placeHolder === "Choose what to export") return items.find((item) => item.scope === "all");
+    if (options.placeHolder === "Choose an export profile") return undefined;
+    return items[0];
+  } });
+  const adapter = createExtensionAdapterCore(fake.vscode, { loadExporter: async () => ({
+    recordedPathIdentity: (value) => value,
+    async readSessionDiscoveryMeta(file) {
+      metadataReads.push(file);
+      const name = path.basename(file);
+      return { id: name, cwd: "C:\\Synthetic\\Compressed", timestamp: "2026-09-03T00:00:00.000Z", fileSize: 1 };
+    },
+  }) });
+  await adapter.activate(createContext(temp));
+  assert.equal(await adapter.exportFromQuickPick(createContext(temp)), undefined);
+  assert.deepEqual(metadataReads.sort(), [compressedOnly, shadowedPlain].sort(), "compressed rollouts must be discovered while a plain sibling shadows its compressed copy");
+  assert.equal(metadataReads.includes(shadowedCompressed), false);
+}
+
+{
   const discoveryHome = path.join(temp, "adapter-metadata-discovery");
   const activeRoot = path.join(discoveryHome, "sessions", "2026", "08", "30");
   const archivedRoot = path.join(discoveryHome, "archived_sessions", "2026", "08", "29");
