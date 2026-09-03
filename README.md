@@ -18,6 +18,8 @@ Turn local Codex project history into independent, portable archives – includi
 - **PDF:** searchable, fixed-layout files for sharing, printing and archiving.
 - **One source:** Markdown, HTML, DOCX and PDF follow the same session order and readable content selection.
 
+Exported images stay with the archive – displayed inline in HTML, DOCX and PDF and preserved in the dedicated asset folder.
+
 ![Illustration of Codex chat windows being exported](docs/assets/codex-project-chat-exporter-hero.png)
 
 > Unofficial project. Not affiliated with, endorsed by or supported by OpenAI.
@@ -170,14 +172,14 @@ See [SECURITY.md](SECURITY.md) for the full boundary.
 
 ## Screenshots
 
-The existing launcher, folder and HTML images below use synthetic demo data. They are not presented as a VS Code product capture.
+The following outputs use synthetic demo data and the same embedded image.
+
+![Synthetic local HTML export index with an embedded image](docs/screenshots/export-html-images.png)
 
 <p>
-  <img src="docs/screenshots/launcher-demo.png" alt="Interactive Windows launcher with synthetic demo data" width="49%">
-  <img src="docs/screenshots/folder-structure-demo.png" alt="Generated export folder structure with synthetic demo data" width="49%">
+  <img src="docs/screenshots/export-docx-images.png" alt="Synthetic DOCX export with the same embedded image" width="49%">
+  <img src="docs/screenshots/export-pdf-images.png" alt="Synthetic PDF export with the same embedded image" width="49%">
 </p>
-
-![Synthetic local HTML export index](docs/screenshots/index-html-demo.png)
 
 ## Limits
 

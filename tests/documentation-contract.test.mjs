@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -18,6 +19,21 @@ const publicDocuments = [
 ];
 const scopes = ["Current Workspace", "Project from Codex history…", "All Sessions"];
 const formatChoices = ["Standard formats only", "Add DOCX", "Add PDF", "Add DOCX and PDF"];
+const publicImages = new Map([
+  ["docs/assets/codex-project-chat-exporter-hero.png", "36a0a0923c97c040d85d16e9584a80b997c8b265d93a5d8cb7a01b08c07dd311"],
+  ["docs/screenshots/export-html-images.png", "0f1aaeab8e30fb642dea7bd147b4a1dddbbeb92623343cbef8af13a63cd21edd"],
+  ["docs/screenshots/export-docx-images.png", "d93212878b708acff4e0c3f56add910ad15e8ffd9e6f3fe9b582a0dce56dd96d"],
+  ["docs/screenshots/export-pdf-images.png", "333e676763748332faf291683c9a35f6ca17fb48d5518a392eb4c9b33983b7dd"],
+  ["integrations/vscode/images/codex-project-chat-exporter-hero.png", "36a0a0923c97c040d85d16e9584a80b997c8b265d93a5d8cb7a01b08c07dd311"],
+  ["integrations/vscode/images/01-scope-picker.png", "78ba8cf95d07d48be0eb06a773ac702aac02d3155a760aaf0da664f7646ab5b0"],
+  ["integrations/vscode/images/02-project-history-picker.png", "437b751ede0c909e6b188b0dfaddaffc066d87ba4b7f1ee3f7e9f64463c31fd5"],
+  ["integrations/vscode/images/03-document-format-picker.png", "5167954996b948e269b8db5c3236f5297fb81ecfd6128f9c25542862254c91bf"],
+  ["integrations/vscode/images/04-export-success.png", "f5eb92017ad651cfdbcb50171a0c8e520e901dbb450594b64e5d52c0a13c112b"],
+]);
+
+function sha256(bytes) {
+  return createHash("sha256").update(bytes).digest("hex");
+}
 
 function runCli(args) {
   return new Promise((resolve, reject) => {
@@ -239,12 +255,11 @@ test("public documentation keeps scope, format, privacy and version contracts co
   ]) assert.ok(archiveContract.includes(required), required);
 
   const changelog = await fs.readFile(path.join(repositoryRoot, "CHANGELOG.md"), "utf8");
-  const unreleased = changelog.slice(0, changelog.indexOf("## 0.2.0"));
-  assert.ok(unreleased.includes("## Unreleased"));
-  assert.ok(unreleased.includes("last published state proven by local repository tags is `v0.2.0`"));
-  assert.equal(unreleased.includes("## 0.3.0"), false);
+  const releasePreparation = changelog.slice(0, changelog.indexOf("## 0.2.0"));
+  assert.ok(releasePreparation.includes("## Unreleased\n\n## 0.3.0 – 2026-09-04"));
+  assert.ok(releasePreparation.includes("last published state proven by local repository tags is `v0.2.0`"));
   for (const forbiddenOxfordPhrase of ["text, monospace, symbol, and", "DOCX, PDF, and", "active, truncated, or"]) {
-    assert.equal(unreleased.includes(forbiddenOxfordPhrase), false, forbiddenOxfordPhrase);
+    assert.equal(releasePreparation.includes(forbiddenOxfordPhrase), false, forbiddenOxfordPhrase);
   }
 
   const rootPackage = JSON.parse(await fs.readFile(path.join(repositoryRoot, "package.json"), "utf8"));
@@ -252,6 +267,15 @@ test("public documentation keeps scope, format, privacy and version contracts co
   assert.equal(rootPackage.version, "0.3.0");
   assert.equal(lockfile.version, rootPackage.version);
   assert.equal(lockfile.packages[""].version, rootPackage.version);
+  const extensionPackage = JSON.parse(await fs.readFile(path.join(repositoryRoot, "integrations", "vscode", "package.json"), "utf8"));
+  assert.equal(extensionPackage.version, "0.1.4");
+  for (const [relative, expected] of publicImages) {
+    assert.equal(sha256(await fs.readFile(path.join(repositoryRoot, relative))), expected, relative);
+  }
+  assert.deepEqual(
+    await fs.readFile(path.join(repositoryRoot, "docs", "assets", "codex-project-chat-exporter-hero.png")),
+    await fs.readFile(path.join(repositoryRoot, "integrations", "vscode", "images", "codex-project-chat-exporter-hero.png")),
+  );
 });
 
 test("internal relative documentation links resolve to repository files", async () => {

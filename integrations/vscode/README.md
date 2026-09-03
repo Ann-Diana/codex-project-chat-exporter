@@ -11,6 +11,8 @@ Turn local Codex project history into independent, portable archives – includi
 - Add DOCX, PDF or both from the same readable document model.
 - Local and read-only toward original Codex data. No telemetry, import or repair.
 
+![Illustration of Codex chat windows being exported](images/codex-project-chat-exporter-hero.png)
+
 The extension is a local VS Code interface for the direct CLI's core. It requires VS Code 1.101 or newer and packages the production runtime.
 
 ## Installation
@@ -26,7 +28,7 @@ The extension is distributed as a VSIX, not through the Visual Studio Code Marke
 Terminal installation uses:
 
 ```powershell
-code --install-extension "C:\path\to\codex-project-chat-exporter-vscode-0.1.3.vsix" --force
+code --install-extension "C:\path\to\codex-project-chat-exporter-vscode-0.1.4.vsix" --force
 ```
 
 ## Exact export flow
@@ -51,6 +53,26 @@ Run `Codex Export: Export…`. The extension performs these stages in order:
 - **Add DOCX and PDF**
 
 Each optional document is per session. PDF is rendered directly from the shared document model and never through DOCX.
+
+Exported images appear inline in HTML, DOCX and PDF and are also preserved in the archive’s dedicated asset folder.
+
+## Visual flow
+
+1. Choose the export scope.
+
+   ![VS Code scope picker with Current Workspace, project history and all sessions](images/01-scope-picker.png)
+
+2. If needed, choose an exact project identity from Codex history.
+
+   ![VS Code historical project picker with grouped path variants, counts, sizes and dates](images/02-project-history-picker.png)
+
+3. Choose standard output, DOCX, PDF or both document formats.
+
+   ![VS Code document format picker](images/03-document-format-picker.png)
+
+4. Confirm the completed export and canonical project grouping.
+
+   ![VS Code success notification for three sessions grouped into one project](images/04-export-success.png)
 
 **Scope and discovery:** **Current Workspace** uses the VS Code folder path and compares it with the first-record `cwd` by exact lexical identity. Windows drive-letter case, slash direction, trailing separators and equivalent local `\\?\` drive or UNC forms are normalized. There is no basename, substring, descendant, `realpath`, filesystem-existence or fuzzy fallback.
 

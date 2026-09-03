@@ -10,6 +10,13 @@ const defaultRepoRoot = path.resolve(defaultExtensionRoot, "..", "..");
 const FIXED_ARCHIVE_DATE = new Date("2000-01-01T00:00:00.000Z");
 const RUNTIME_ROOT = "extension/vendor/codex-project-chat-exporter";
 const FORBIDDEN_NATIVE_EXTENSIONS = new Set([".dll", ".dylib", ".exe", ".node", ".so"]);
+const PUBLIC_IMAGE_HASHES = new Map([
+  ["codex-project-chat-exporter-hero.png", "36a0a0923c97c040d85d16e9584a80b997c8b265d93a5d8cb7a01b08c07dd311"],
+  ["01-scope-picker.png", "78ba8cf95d07d48be0eb06a773ac702aac02d3155a760aaf0da664f7646ab5b0"],
+  ["02-project-history-picker.png", "437b751ede0c909e6b188b0dfaddaffc066d87ba4b7f1ee3f7e9f64463c31fd5"],
+  ["03-document-format-picker.png", "5167954996b948e269b8db5c3236f5297fb81ecfd6128f9c25542862254c91bf"],
+  ["04-export-success.png", "f5eb92017ad651cfdbcb50171a0c8e520e901dbb450594b64e5d52c0a13c112b"],
+]);
 
 export async function buildVsix(options = {}) {
   const extensionRoot = path.resolve(options.extensionRoot || defaultExtensionRoot);
@@ -59,7 +66,18 @@ export async function buildVsix(options = {}) {
     await copyVerifiedFile(path.join(extensionRoot, "README.md"), path.join(stage, "extension", "README.md"), stageOwned, stage);
     await copyVerifiedFile(path.join(extensionRoot, "PACKAGED_TEST_PLAN.md"), path.join(stage, "extension", "PACKAGED_TEST_PLAN.md"), stageOwned, stage);
     await copyVerifiedFile(path.join(extensionRoot, "LICENSE"), path.join(stage, "extension", "LICENSE"), stageOwned, stage);
-    await copyVerifiedFile(path.join(extensionRoot, "images", "icon.png"), path.join(stage, "extension", "images", "icon.png"), stageOwned, stage);
+    for (const name of [
+      "icon.png",
+      "codex-project-chat-exporter-hero.png",
+      "01-scope-picker.png",
+      "02-project-history-picker.png",
+      "03-document-format-picker.png",
+      "04-export-success.png",
+    ]) {
+      const hash = await copyVerifiedFile(path.join(extensionRoot, "images", name), path.join(stage, "extension", "images", name), stageOwned, stage);
+      const expectedHash = PUBLIC_IMAGE_HASHES.get(name);
+      if (expectedHash && hash !== expectedHash) throw new Error(`Public image differs from its approved SHA-256: ${name}`);
+    }
     await copyVerifiedFile(path.join(extensionRoot, "src", "extension.cjs"), path.join(stage, "extension", "src", "extension.cjs"), stageOwned, stage);
     await copyVerifiedFile(path.join(extensionRoot, "src", "vscode-adapter.cjs"), path.join(stage, "extension", "src", "vscode-adapter.cjs"), stageOwned, stage);
     const packagedCore = await packageExporterRuntime({ repoRoot, stage, stageOwned });

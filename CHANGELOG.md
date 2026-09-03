@@ -6,40 +6,21 @@ The last published state proven by local repository tags is `v0.2.0`. Package me
 
 ## Unreleased
 
+## 0.3.0 – 2026-09-04
+
 ### Added
 
-- Added bounded streaming JSONL processing for large records, incremental attachment hashing and sequential per-session work.
-- Added a deterministic SHA-256-addressed asset store with provenance, mirror relationships, validated raster types and one physical file per unique asset.
-- Added opt-in deterministic DOCX and directly rendered PDF reading views, with one document per session and a shared exporter-independent document model.
-- Added bundled hash-verified Noto text, monospace, symbol and Noto Emoji 3.002 outline fonts for offline PDF rendering.
-- Added confirmed chronological model history and session-origin metadata without merging subagent models into a parent session.
-- Added exact historical recorded-path inventory and selection for moved or renamed projects.
-- Added direct CLI text or JSON reports, exact recorded-project selection, DOCX and PDF in one run plus controlled SIGINT cleanup.
+- Added deterministic per-session DOCX and PDF exports, individually or together, from one shared document model.
+- Added inline image rendering with a deduplicated asset folder and provenance manifest.
+- Added confirmed chronological model histories without merging subagent models into parent sessions.
+- Added exact historical project selection, canonical path grouping and recorded spelling variants.
+- Added direct CLI text or JSON reports, stable error codes and controlled cancellation cleanup.
 
 ### Changed
 
-- Raised the minimum exporter runtime to Node.js 22 and the experimental extension minimum to Visual Studio Code 1.101. The current CI line covers Node.js 22 and 24.
-- Aligned Complete, Readable and Source snapshots with one record and asset selection policy. Readable suppresses `replacement_history`; Complete keeps unmatched stored context in a labelled area.
-- Made Tool, Browser and `view_image` filtering apply consistently to Markdown, responsive HTML, DOCX, PDF and selected assets.
-- Added controlled HTTP and HTTPS hyperlinks without remote retrieval. Local file links, launch actions and active schemes remain blocked in DOCX and PDF.
-- Extended the deterministic VSIX builder, integrity inventory and packaged offline end-to-end tests for the complete production runtime and bundled fonts.
-- Upgraded the monochrome emoji fallback and made unsupported PDF graphemes visible through deterministic ordered code-point markers.
-
-### Fixed
-
-- Fixed metadata-only workspace discovery for large first records and Windows path representation variants without fuzzy matching or workspace-file reads.
-- Fixed mirrored image duplication, tool-only image leakage, replacement-history visibility and asset-manifest provenance.
-- Fixed invalid XML 1.0 text and ANSI SGR handling in DOCX while preserving valid Unicode and Raw JSONL.
-- Fixed safe deterministic DOCX hyperlink relationships and complete VSIX dependency packaging.
-- Fixed PDF symbol baselines, multiline fallback layout, nested list and page-break overlap plus readable document structure.
-- Fixed preservation of model transitions, subagent origin and multi-model labels across manifests and reading formats.
-- Fixed cancellation and multi-format publication so interrupted generations are clearly marked incomplete and run-owned temporary files are cleaned.
-
-### Security
-
-- Added target-filesystem hard-link capability checks, source/output separation and fail-closed publication without overwrite or copy fallback.
-- Rehashes existing asset targets and local files immediately before document embedding; invalid or changed content aborts publication.
-- Keeps external images, active OOXML relationships, PDF launch or JavaScript actions, macros, forms and embedded files out of generated documents.
+- Improved readable document structure for headings, lists, code blocks, links and selected images.
+- Added deterministic bundled emoji and glyph fallback with visible ordered code-point markers for unsupported graphemes.
+- Reconstructed paginated fork histories from validated local `history_base` rollout references.
 
 ## 0.2.0 – 2026-08-20
 

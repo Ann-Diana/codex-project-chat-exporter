@@ -10,6 +10,7 @@ import path from "node:path";
 import { createRequire } from "node:module";
 import test from "node:test";
 import tls from "node:tls";
+import { fileURLToPath } from "node:url";
 import { inflateSync } from "node:zlib";
 
 import JSZip from "jszip";
@@ -20,6 +21,9 @@ import { buildVsix } from "../scripts/build-vsix.mjs";
 const require = createRequire(import.meta.url);
 const { xml2js } = xmlJs;
 const FIXED_DATE = "2000-01-01T00:00:00.000Z";
+const extensionRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const ONE_PIXEL_PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
+const ONE_PIXEL_PNG_SHA256 = "431ced6916a2a21a156e38701afe55bbd7f88969fbbfc56d7fe099d47f265460";
 
 function sha256(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
@@ -86,6 +90,15 @@ async function extractExtension(zip, installedRoot) {
   }
 }
 
+async function copyExtensionFixture(destination) {
+  await fs.mkdir(destination, { recursive: true });
+  for (const name of ["package.json", "README.md", "PACKAGED_TEST_PLAN.md", "LICENSE"]) {
+    await fs.copyFile(path.join(extensionRoot, name), path.join(destination, name));
+  }
+  await fs.cp(path.join(extensionRoot, "images"), path.join(destination, "images"), { recursive: true });
+  await fs.cp(path.join(extensionRoot, "src"), path.join(destination, "src"), { recursive: true });
+}
+
 async function writeSyntheticSession(codexHome) {
   const sessionId = "aaaaaaaa-aaaa-7aaa-8aaa-aaaaaaaaaaaa";
   const parentId = "bbbbbbbb-bbbb-7bbb-8bbb-bbbbbbbbbbbb";
@@ -94,10 +107,11 @@ async function writeSyntheticSession(codexHome) {
   await fs.mkdir(directory, { recursive: true });
   await fs.mkdir(archivedDirectory, { recursive: true });
   const message = "# Linktest\n\nUmlaute äöü & <XML>. Symbole → ← ↑ ↓ ✓ ⚠ ± ≤ ≥. Emoji 😄 und ⚠️. ZWJ 👩‍💻 und 😄‍😄. ANSI \u001b[31m.\n\nLink: [OpenAI](https://openai.com/).\n\n- eins\n- zwei\n\n```js\nconst value = '<&> → ✓ ⚠ ≤ ≥';\n```";
+  const imageUrl = `data:image/png;base64,${ONE_PIXEL_PNG.toString("base64")}`;
   const parentPrefix = [
     { ordinal: 0, type: "session_meta", timestamp: "2026-08-24T09:00:00.000Z", payload: { id: parentId, cwd: "C:\\Synthetic\\parent", timestamp: "2026-08-24T09:00:00.000Z", source: "vscode", thread_source: "user", history_mode: "paginated" } },
-    { ordinal: 1, type: "response_item", timestamp: "2026-08-24T09:00:01.000Z", payload: { type: "message", role: "user", content: [{ type: "input_text", text: message }], internal_chat_message_metadata_passthrough: { turn_id: "turn-1" } } },
-    { ordinal: 2, type: "event_msg", timestamp: "2026-08-24T09:00:01.001Z", payload: { type: "user_message", message } },
+    { ordinal: 1, type: "response_item", timestamp: "2026-08-24T09:00:01.000Z", payload: { type: "message", role: "user", content: [{ type: "input_text", text: message }, { type: "input_image", image_url: imageUrl }], internal_chat_message_metadata_passthrough: { turn_id: "turn-1" } } },
+    { ordinal: 2, type: "event_msg", timestamp: "2026-08-24T09:00:01.001Z", payload: { type: "user_message", message, images: [imageUrl] } },
   ];
   const parentPrefixBytes = Buffer.from(`${parentPrefix.map((record) => JSON.stringify(record)).join("\n")}\n`, "utf8");
   const parentFile = path.join(archivedDirectory, `rollout-2026-08-24T09-00-00-${parentId}.jsonl`);
@@ -135,6 +149,21 @@ test("regular VSIX builds are byte-identical and their packaged runtime exports 
     }
     const rootPackage = JSON.parse(await fs.readFile("package.json", "utf8"));
     const lock = JSON.parse(await fs.readFile("package-lock.json", "utf8"));
+    const extensionPackage = JSON.parse(await fs.readFile(path.join("integrations", "vscode", "package.json"), "utf8"));
+    assert.equal(extensionPackage.version, "0.1.4");
+    const publicImages = new Map([
+      ["codex-project-chat-exporter-hero.png", "36a0a0923c97c040d85d16e9584a80b997c8b265d93a5d8cb7a01b08c07dd311"],
+      ["01-scope-picker.png", "78ba8cf95d07d48be0eb06a773ac702aac02d3155a760aaf0da664f7646ab5b0"],
+      ["02-project-history-picker.png", "437b751ede0c909e6b188b0dfaddaffc066d87ba4b7f1ee3f7e9f64463c31fd5"],
+      ["03-document-format-picker.png", "5167954996b948e269b8db5c3236f5297fb81ecfd6128f9c25542862254c91bf"],
+      ["04-export-success.png", "f5eb92017ad651cfdbcb50171a0c8e520e901dbb450594b64e5d52c0a13c112b"],
+    ]);
+    for (const [name, expected] of publicImages) {
+      const packaged = await zip.file(`extension/images/${name}`)?.async("nodebuffer");
+      assert.ok(packaged, `missing public image: ${name}`);
+      assert.equal(sha256(packaged), expected, name);
+      assert.deepEqual(packaged, await fs.readFile(path.join("integrations", "vscode", "images", name)), name);
+    }
     for (const name of (await fs.readdir("lib")).filter((name) => name.endsWith(".mjs"))) {
       assert.ok(zip.file(`extension/vendor/codex-project-chat-exporter/lib/${name}`), name);
     }
@@ -183,6 +212,13 @@ test("regular VSIX builds are byte-identical and their packaged runtime exports 
     const manifest = JSON.parse(await fs.readFile(result.manifestPath, "utf8"));
     assert.equal(manifest.sessions.length, 1);
     assert.equal(manifest.archive_format_version, 1);
+    assert.equal(manifest.unique_assets, 1);
+    assert.equal(manifest.asset_occurrences, 2);
+    const assetsManifest = JSON.parse(await fs.readFile(path.join(outputDirectory, manifest.assets_manifest), "utf8"));
+    assert.equal(assetsManifest.schema_version, 2);
+    assert.equal(assetsManifest.assets.length, 1);
+    assert.equal(assetsManifest.assets[0].sha256, ONE_PIXEL_PNG_SHA256);
+    assert.deepEqual(await fs.readFile(path.join(outputDirectory, assetsManifest.assets[0].path)), ONE_PIXEL_PNG);
     assert.equal(manifest.history_reference_closure.length, 1);
     const historySegment = manifest.history_reference_closure[0].segments[0];
     assert.equal(historySegment.snapshot_kind, "DERIVED_EXACT_PREFIX");
@@ -190,15 +226,22 @@ test("regular VSIX builds are byte-identical and their packaged runtime exports 
     assert.deepEqual(await fs.readFile(path.join(outputDirectory, manifest.sessions[0].raw_export_file)), await fs.readFile(paginatedFixture.childFile));
     const markdown = await fs.readFile(path.join(outputDirectory, manifest.sessions[0].markdown_file), "utf8");
     assert.equal(markdown.includes("AFTER_REFERENCE_BOUNDARY"), false);
+    assert.ok(markdown.includes(`assets/${ONE_PIXEL_PNG_SHA256}.png`));
+    const indexHtml = await fs.readFile(path.join(outputDirectory, "index.html"), "utf8");
+    assert.equal(indexHtml.split("<img ").length - 1, 1);
+    assert.ok(indexHtml.includes(`assets/${ONE_PIXEL_PNG_SHA256}.png`));
     const docx = await fs.readFile(path.join(outputDirectory, manifest.sessions[0].docx_file));
-    const { documentXml, relsXml } = await withoutNetwork(async () => {
+    const { documentXml, mediaFiles, relsXml } = await withoutNetwork(async () => {
       const documentZip = await JSZip.loadAsync(docx, { checkCRC32: true, createFolders: false });
       for (const entry of Object.values(documentZip.files)) if (!entry.dir && (entry.name.endsWith(".xml") || entry.name.endsWith(".rels"))) xml2js(await entry.async("string"));
       return {
         documentXml: await documentZip.file("word/document.xml").async("string"),
+        mediaFiles: await Promise.all(Object.values(documentZip.files).filter((entry) => !entry.dir && entry.name.startsWith("word/media/")).map((entry) => entry.async("nodebuffer"))),
         relsXml: await documentZip.file("word/_rels/document.xml.rels").async("string"),
       };
     });
+    assert.equal(mediaFiles.length, 1);
+    assert.deepEqual(mediaFiles[0], ONE_PIXEL_PNG);
     const relationship = collectElements(xml2js(relsXml, { compact: false, alwaysChildren: true }), "Relationship").find((element) => element.attributes?.Type.endsWith("/hyperlink"));
     assert.equal(relationship.attributes.TargetMode, "External");
     assert.equal(relationship.attributes.Target, "https://openai.com/");
@@ -219,12 +262,38 @@ test("regular VSIX builds are byte-identical and their packaged runtime exports 
     const pdf = await fs.readFile(path.join(outputDirectory, manifest.sessions[0].pdf_file));
     const pdfSource = pdf.toString("latin1");
     assert.ok(pdfSource.startsWith("%PDF-") && pdfSource.includes("/S /URI") && pdfSource.includes("/URI (https://openai.com/)"));
+    assert.ok(pdfSource.split("/Subtype /Image").length - 1 >= 1, "the packaged offline PDF must embed the synthetic image");
     assert.ok(pdfSource.includes("/URI (https://example.invalid/3D?a=1&b=2)"));
     assert.equal(pdfSource.includes("/Launch") || pdfSource.includes("/JavaScript") || pdfSource.includes("/EmbeddedFile"), false);
     const unicodeMaps = inflatedPdfStreams(pdf).filter((stream) => stream.includes("beginbfchar") || stream.includes("beginbfrange")).join("\n").toUpperCase().replaceAll(" ", "");
     assert.ok(unicodeMaps.includes("D83DDE04"), "the packaged offline PDF must retain U+1F604 in ToUnicode");
     assert.ok(unicodeMaps.includes("26A0FE0F"), "the packaged offline PDF must retain the warning variation sequence");
     assert.ok(unicodeMaps.includes("D83DDC69200DD83DDCBB"), "the packaged offline PDF must retain the supported ZWJ grapheme");
+  } finally {
+    await fs.rm(temp, { recursive: true, force: true });
+  }
+});
+
+test("regular builder fails closed for missing or altered approved public images", async () => {
+  const temp = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "packaged-vsix-public-images-")));
+  try {
+    const fixtureRoot = path.join(temp, "extension");
+    await copyExtensionFixture(fixtureRoot);
+    const scopeImage = path.join(fixtureRoot, "images", "01-scope-picker.png");
+    await fs.rm(scopeImage);
+    await assert.rejects(
+      () => buildVsix({ extensionRoot: fixtureRoot, distDir: path.join(temp, "dist-missing") }),
+      (error) => error?.code === "ENOENT" && String(error.path || "").endsWith("01-scope-picker.png"),
+    );
+    assert.deepEqual(await fs.readdir(path.join(temp, "dist-missing")), []);
+
+    await fs.copyFile(path.join(extensionRoot, "images", "01-scope-picker.png"), scopeImage);
+    await fs.appendFile(path.join(fixtureRoot, "images", "codex-project-chat-exporter-hero.png"), Buffer.from([0]));
+    await assert.rejects(
+      () => buildVsix({ extensionRoot: fixtureRoot, distDir: path.join(temp, "dist-altered") }),
+      /Public image differs from its approved SHA-256: codex-project-chat-exporter-hero\.png/,
+    );
+    assert.deepEqual(await fs.readdir(path.join(temp, "dist-altered")), []);
   } finally {
     await fs.rm(temp, { recursive: true, force: true });
   }
