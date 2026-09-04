@@ -11,6 +11,11 @@ import { validateCanonicalPdf } from "../lib/pdf-renderer.mjs";
 import { ACTIVE_SESSION_ID, writeReadingOutputFixture } from "./fixtures/reading-output/sessions.mjs";
 
 const execFileAsync = promisify(execFile);
+const EXPECTED_MODEL_HISTORY = ["gpt-5.5", "gpt-5.6-sol"];
+
+function includesExtractedModelHistory(text, models) {
+  return text.replace(/\s+/gu, " ").includes(`Models: ${models.join(" → ")}`);
+}
 
 async function listFiles(root) {
   const output = [];
@@ -41,6 +46,12 @@ async function writeSingleSession(codexHome) {
   return { file, sessionId };
 }
 
+test("extracted model history tolerates layout whitespace but rejects a missing stage", () => {
+  assert.equal(includesExtractedModelHistory("Models:\r\n gpt-5.5\t→  gpt-5.6-sol", EXPECTED_MODEL_HISTORY), true);
+  assert.equal(includesExtractedModelHistory("Models: gpt-5.5", EXPECTED_MODEL_HISTORY), false);
+  assert.equal(includesExtractedModelHistory("Models: gpt-5.6-sol", EXPECTED_MODEL_HISTORY), false);
+});
+
 test("opt-in PDF export creates exactly one byte-identical document per session", async (t) => {
   const temp = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "pdf-export-integration-")));
   try {
@@ -68,8 +79,8 @@ test("opt-in PDF export creates exactly one byte-identical document per session"
         const popplerBin = process.env.POPPLER_BIN || "";
         const executable = popplerBin ? path.join(popplerBin, process.platform === "win32" ? "pdftotext.exe" : "pdftotext") : "pdftotext";
         try {
-          const { stdout } = await execFileAsync(executable, [pdfPath, "-"], { encoding: "utf8" });
-          assert.ok(stdout.replace(/\s+/g, " ").includes("Models: gpt-5.5 → gpt-5.6-sol"), "the exported PDF must expose the full model history as selectable text");
+          const { stdout } = await execFileAsync(executable, ["-enc", "UTF-8", pdfPath, "-"], { encoding: "utf8" });
+          assert.ok(includesExtractedModelHistory(stdout, EXPECTED_MODEL_HISTORY), "the exported PDF must expose the full model history as selectable text");
         } catch (error) {
           if (error?.code === "ENOENT") t.diagnostic("Poppler text extraction unavailable; renderer-level selectable-text regression remains authoritative");
           else throw error;
