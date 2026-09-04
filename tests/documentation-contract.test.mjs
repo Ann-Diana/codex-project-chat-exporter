@@ -35,8 +35,16 @@ function sha256(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
+function normalizeTextLineEndings(value) {
+  return value.replaceAll("\r\n", "\n");
+}
+
 function hasSemanticTextPrefix(actual, expected) {
-  return actual.replaceAll("\r\n", "\n").startsWith(expected.replaceAll("\r\n", "\n"));
+  return normalizeTextLineEndings(actual).startsWith(normalizeTextLineEndings(expected));
+}
+
+function includesSemanticText(actual, expected) {
+  return normalizeTextLineEndings(actual).includes(normalizeTextLineEndings(expected));
 }
 
 function runCli(args) {
@@ -209,6 +217,10 @@ test("semantic documentation prefixes accept CRLF without accepting changed cont
   assert.equal(hasSemanticTextPrefix(expected.replaceAll("\n", "\r\n"), expected), true);
   assert.equal(hasSemanticTextPrefix("# Heading\r\n\r\nChanged content.\r\n", expected), false);
   assert.equal(hasSemanticTextPrefix("# Heading\r\nStable content.\r\n", expected), false);
+  assert.equal(includesSemanticText(`Before\n${expected}After\n`, expected), true);
+  assert.equal(includesSemanticText(`Before\r\n${expected.replaceAll("\n", "\r\n")}After\r\n`, expected), true);
+  assert.equal(includesSemanticText("Before\r\n# Heading\r\n\r\nChanged content.\r\nAfter\r\n", expected), false);
+  assert.equal(includesSemanticText("Before\r\n# Heading\r\nStable content.\r\nAfter\r\n", expected), false);
 });
 
 test("public documentation keeps scope, format, privacy and version contracts consistent", async () => {
@@ -237,7 +249,7 @@ test("public documentation keeps scope, format, privacy and version contracts co
     "- **One source:** Markdown, HTML, DOCX and PDF follow the same session order and readable content selection.",
   ].join("\n");
   assert.ok(hasSemanticTextPrefix(documents["README.md"], `# Codex Project Chat Exporter\n\n${readmePositioning}\n\n${whyDocuments}\n`));
-  assert.ok(documents["integrations/vscode/README.md"].includes(positioning));
+  assert.ok(includesSemanticText(documents["integrations/vscode/README.md"], positioning));
   for (const relative of ["README.md", "integrations/vscode/README.md"]) {
     for (const scope of scopes) assert.ok(documents[relative].includes(scope), `${relative}: ${scope}`);
     for (const format of formatChoices) assert.ok(documents[relative].includes(format), `${relative}: ${format}`);

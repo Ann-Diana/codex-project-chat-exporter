@@ -19,8 +19,9 @@ const PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQU
 const PARENT_ID = "11111111-1111-7111-8111-111111111111";
 const CHILD_ID = "22222222-2222-7222-8222-222222222222";
 const GRANDCHILD_ID = "33333333-3333-7333-8333-333333333333";
-const PROJECT_PARENT = "C:\\Synthetic\\Parent";
-const PROJECT_CHILD = "C:\\Synthetic\\Child";
+const PROJECT_PARENT = process.platform === "win32" ? "C:\\Synthetic\\Parent" : "/synthetic/Parent";
+const PROJECT_CHILD = process.platform === "win32" ? "C:\\Synthetic\\Child" : "/synthetic/Child";
+const PROJECT_UNKNOWN = process.platform === "win32" ? "C:\\Synthetic\\Unknown" : "/synthetic/Unknown";
 
 function sessionMeta(id, cwd, timestamp, extra = {}, ordinal = 0) {
   return { ordinal, type: "session_meta", timestamp, payload: { id, cwd, timestamp, source: "vscode", thread_source: "user", history_mode: "paginated", ...extra } };
@@ -670,7 +671,7 @@ test("project selection cannot silently omit an unclassifiable oversized metadat
     const root = path.join(temp, "codex-home");
     const timestamp = "2026-09-01T12:00:00.000Z";
     await writeRollout(root, "active", timestamp, CHILD_ID, [sessionMeta(CHILD_ID, PROJECT_CHILD, timestamp), assistant(1, "VISIBLE", timestamp)]);
-    const oversizedMeta = sessionMeta(GRANDCHILD_ID, "C:\\Synthetic\\Unknown", timestamp, {
+    const oversizedMeta = sessionMeta(GRANDCHILD_ID, PROJECT_UNKNOWN, timestamp, {
       unrelated: "x".repeat((16 * 1024 * 1024) + 1),
     });
     await writeRollout(root, "active", "2026-09-01T12:01:00.000Z", GRANDCHILD_ID, [oversizedMeta]);
