@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import fsSync from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -8,6 +9,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
 import { beginExportGeneration, completeExportGeneration, copyStableRawSnapshot, exportArchive, INCOMPLETE_MARKER_NAME, readSessionRoutingMeta, sha256File } from "../bin/export-codex-project-chats.mjs";
+import { SESSION_READER_IMPLEMENTATION } from "../lib/session-record-reader.mjs";
 
 const execFileAsync = promisify(execFile);
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -19,6 +21,8 @@ const codexHome = path.join(temp, ".codex");
 const activeDir = path.join(codexHome, "sessions", "2026", "07", "20");
 const archivedDir = path.join(codexHome, "archived_sessions");
 const outputDir = path.join(temp, "output");
+const primaryProjectPath = process.platform === "win32" ? "C:\\Projects\\alpha" : "/synthetic/projects/alpha";
+const foreignStyleProjectPath = process.platform === "win32" ? "/synthetic/projects/alpha" : "C:\\Projects\\alpha";
 const dangerousTitle = "Escaping plain | one|two \\ slash\\\\ before\\|pipe \\\\|combo C:\\Temp\\file already\\|escaped Unicode π";
 const dangerousProject = "/home/demo/projects/beta\rbare\nline\r\nend";
 
@@ -39,9 +43,9 @@ function jsonl(items) {
 }
 
 await fs.writeFile(path.join(activeDir, "rollout-active.jsonl"), jsonl([
-  { type: "session_meta", timestamp: "2026-07-20T10:00:00.000Z", payload: { id: "session-active", cwd: "C:\\Projects\\alpha", timestamp: "2026-07-20T10:00:00.000Z", source: "vscode", thread_source: "user" } },
+  { type: "session_meta", timestamp: "2026-07-20T10:00:00.000Z", payload: { id: "session-active", cwd: primaryProjectPath, timestamp: "2026-07-20T10:00:00.000Z", source: "vscode", thread_source: "user" } },
   { type: "response_item", timestamp: "2026-07-20T10:00:00.500Z", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "# AGENTS.md instructions\n<environment_context>automatic startup context</environment_context>" }, { type: "input_image", image_url: "data:image/png;base64,aGVsbG8=" }, { type: "input_image", image_url: "iVBORw0KGgoBAgME" }, { type: "local_image", path: "C:\\Private\\screenshot.png" }, { type: "input_image", image_url: "https://example.invalid/capture.png" }, { type: "input_image", image_url: "opaque-attachment-token" }], internal_chat_message_metadata_passthrough: { turn_id: "turn-active-1" } } },
-  { type: "turn_context", timestamp: "2026-07-20T10:00:01.000Z", payload: { cwd: "C:\\Projects\\alpha", model: "gpt-test" } },
+  { type: "turn_context", timestamp: "2026-07-20T10:00:01.000Z", payload: { cwd: primaryProjectPath, model: "gpt-test" } },
   { type: "response_item", timestamp: "2026-07-20T10:00:02.000Z", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "Create the release archive and preserve the literal terms AGENTS.md and <environment_context>." }], internal_chat_message_metadata_passthrough: { turn_id: "turn-active-1" } } },
   { type: "event_msg", timestamp: "2026-07-20T10:00:02.001Z", payload: { type: "user_message", message: "Create the release archive and preserve the literal terms AGENTS.md and <environment_context>." } },
   { type: "event_msg", timestamp: "2026-07-20T10:00:03.000Z", payload: { type: "agent_message", message: "Done." } },
@@ -71,7 +75,7 @@ await fs.writeFile(path.join(archivedDir, "rollout-archived.jsonl"), jsonl([
 ]));
 
 await fs.writeFile(path.join(archivedDir, "rollout-archived-same-project.jsonl"), jsonl([
-  { type: "session_meta", timestamp: "2026-05-15T08:00:00.000Z", payload: { id: "session-archived-same-project", cwd: "C:\\Projects\\alpha", timestamp: "2026-05-15T08:00:00.000Z", source: "vscode", thread_source: "user" } },
+  { type: "session_meta", timestamp: "2026-05-15T08:00:00.000Z", payload: { id: "session-archived-same-project", cwd: primaryProjectPath, timestamp: "2026-05-15T08:00:00.000Z", source: "vscode", thread_source: "user" } },
   { type: "response_item", timestamp: "2026-05-15T08:00:02.000Z", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "Release archive" }], internal_chat_message_metadata_passthrough: { turn_id: "turn-archived-alpha" } } },
   { type: "event_msg", timestamp: "2026-05-15T08:00:02.000Z", payload: { type: "user_message", message: "Release archive" } },
   { type: "event_msg", timestamp: "2026-05-15T08:00:03.000Z", payload: { type: "agent_message", message: "Archived copy." } },
@@ -79,7 +83,7 @@ await fs.writeFile(path.join(archivedDir, "rollout-archived-same-project.jsonl")
 ]));
 
 await fs.writeFile(path.join(activeDir, "rollout-subagent.jsonl"), jsonl([
-  { type: "session_meta", timestamp: "2026-07-21T10:00:00.000Z", payload: { id: "session-subagent", cwd: "C:\\Projects\\alpha", timestamp: "2026-07-21T10:00:00.000Z", source: { subagent: { other: "guardian" } }, thread_source: "subagent", parent_thread_id: "session-active" } },
+  { type: "session_meta", timestamp: "2026-07-21T10:00:00.000Z", payload: { id: "session-subagent", cwd: primaryProjectPath, timestamp: "2026-07-21T10:00:00.000Z", source: { subagent: { other: "guardian" } }, thread_source: "subagent", parent_thread_id: "session-active" } },
   { type: "response_item", timestamp: "2026-07-21T10:00:00.500Z", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "# AGENTS.md instructions\n<environment_context>automatic subagent context</environment_context>" }], internal_chat_message_metadata_passthrough: { turn_id: "turn-subagent" } } },
   { type: "response_item", timestamp: "2026-07-21T10:00:01.000Z", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "[1] user: retained parent material\n[7] assistant: retained parent material" }], internal_chat_message_metadata_passthrough: { turn_id: "turn-subagent" } } },
   { type: "event_msg", timestamp: "2026-07-21T10:00:01.000Z", payload: { type: "user_message", message: "[1] user: retained parent material\n[7] assistant: retained parent material" } },
@@ -88,14 +92,14 @@ await fs.writeFile(path.join(activeDir, "rollout-subagent.jsonl"), jsonl([
 ]));
 
 await fs.writeFile(path.join(activeDir, "rollout-no-user.jsonl"), jsonl([
-  { type: "session_meta", timestamp: "2026-07-22T10:00:00.000Z", payload: { id: "session-no-user", cwd: "C:\\Projects\\alpha", timestamp: "2026-07-22T10:00:00.000Z", source: "unknown" } },
+  { type: "session_meta", timestamp: "2026-07-22T10:00:00.000Z", payload: { id: "session-no-user", cwd: primaryProjectPath, timestamp: "2026-07-22T10:00:00.000Z", source: "unknown" } },
   { type: "response_item", timestamp: "2026-07-22T10:00:01.000Z", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "# AGENTS.md instructions" }], internal_chat_message_metadata_passthrough: { turn_id: "turn-unconfirmed" } } },
 ]));
 
 const malformedArchivedId = "019f0000-1111-7222-8333-444444444444";
 await fs.writeFile(path.join(archivedDir, `rollout-2026-05-10T08-00-00-${malformedArchivedId}.jsonl`), jsonl([
   { type: "response_item", timestamp: "2026-05-10T08:00:01.000Z", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "Release archive" }] } },
-  { type: "turn_context", timestamp: "2026-05-10T08:00:02.000Z", payload: { cwd: "C:\\Projects\\alpha", model: "gpt-test" } },
+  { type: "turn_context", timestamp: "2026-05-10T08:00:02.000Z", payload: { cwd: primaryProjectPath, model: "gpt-test" } },
   { type: "response_item", timestamp: "2026-05-10T08:00:03.000Z", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "Recovered from filename metadata." }] } },
 ]));
 
@@ -108,14 +112,15 @@ await fs.writeFile(path.join(codexHome, "session_index.jsonl"), [
 ].join("\n") + "\n");
 
 const version = await execFileAsync(process.execPath, [script, "--version"], { cwd: temp });
-assert.equal(version.stdout.trim(), "0.2.0");
+assert.equal(version.stdout.trim(), "0.3.0");
 
 const projectList = await execFileAsync(process.execPath, [script, "--codex-home", codexHome, "--list"], { cwd: temp });
-assert.match(projectList.stdout, /C:\\Projects\\alpha \(5: 3 active, 2 archived\)/);
+assert.ok(projectList.stdout.includes(`${primaryProjectPath} (4: 3 active, 1 archived)`));
+assert.match(projectList.stdout, /\(unknown\) \(2: 1 active, 1 archived\)/, "metadata-only listing must not inspect later conversation/context records for a missing first-record cwd");
 
 const sessionList = await execFileAsync(process.execPath, [script, "--codex-home", codexHome, "--list-sessions"], { cwd: temp });
-assert.match(sessionList.stdout, /\[active\] Create the release archive and preserve the literal terms AGENTS\.md and <environment_context>\. \| C:\\Projects\\alpha/);
-assert.match(sessionList.stdout, /\[archived\] Release archive \| C:\\Projects\\alpha/);
+assert.ok(sessionList.stdout.includes(`[active] Create the release archive and preserve the literal terms AGENTS.md and <environment_context>. | ${primaryProjectPath}`));
+assert.ok(sessionList.stdout.includes(`[archived] Release archive | ${primaryProjectPath}`));
 assert.match(sessionList.stdout, new RegExp(`\\[archived\\].*${malformedArchivedId}`));
 
 const diagnostics = await execFileAsync(process.execPath, [script, "--codex-home", codexHome, "--diagnose"], { cwd: temp });
@@ -128,6 +133,23 @@ await execFileAsync(process.execPath, [script, "--codex-home", codexHome, "--all
 const manifest = JSON.parse(await fs.readFile(path.join(outputDir, "manifest.json"), "utf8"));
 assert.equal(manifest.archive_format_version, 1);
 assert.equal(manifest.canonical_representation, "raw_jsonl");
+assert.equal(manifest.assets_manifest, "assets/manifest.json");
+assert.equal(manifest.asset_occurrences, 2);
+assert.equal(manifest.unique_assets, 2);
+assert.equal(manifest.unique_asset_bytes, 17);
+assert.equal(manifest.deduplicated_asset_bytes_saved, 0);
+assert.equal(manifest.formats.attachments, true);
+assert.equal(manifest.include_tools, false);
+assert.equal(manifest.replacement_history_in_reading_views, true);
+assert.equal(manifest.replacement_history_source_unchanged, true);
+const assetsManifest = JSON.parse(await fs.readFile(path.join(outputDir, manifest.assets_manifest), "utf8"));
+assert.equal(assetsManifest.schema_version, 2);
+assert.equal(assetsManifest.hash_algorithm, "sha256");
+assert.equal(assetsManifest.assets.length, 2);
+assert.deepEqual(assetsManifest.assets.map((asset) => asset.sha256), assetsManifest.assets.map((asset) => asset.sha256).toSorted());
+assert.ok(assetsManifest.assets.every((asset) => asset.extension === "bin" && asset.mime_type === "application/octet-stream" && asset.renderable === false));
+assert.ok(assetsManifest.assets.every((asset) => asset.path === `assets/${asset.sha256}.bin` && !asset.path.includes("\\") && asset.uses.length === 1));
+assert.equal(assetsManifest.assets.flatMap((asset) => asset.uses).some((use) => use.declared_mime === "image/png" && use.mime_mismatch === true), true);
 assert.equal("event_order" in manifest, false, "raw JSONL line order is canonical and must not be duplicated in the manifest");
 assert.equal(manifest.sessions.length, 7);
 assert.deepEqual(manifest.sessions.map((session) => session.storage).sort(), ["active", "active", "active", "active", "archived", "archived", "archived"]);
@@ -177,13 +199,15 @@ for (const session of manifest.sessions) {
 }
 
 const activeMarkdown = await fs.readFile(path.join(outputDir, activeSession.markdown_file), "utf8");
-assert.equal((activeMarkdown.match(/^## User - /gm) || []).length, 2);
-assert.equal((activeMarkdown.match(/^## Assistant - /gm) || []).length, 2);
+assert.equal((activeMarkdown.match(/^## User – /gm) || []).length, 2);
+assert.equal((activeMarkdown.match(/^## Assistant – /gm) || []).length, 2);
 assert.equal((activeMarkdown.match(/<summary>Automatic runtime context/g) || []).length, 3);
 assert.match(activeMarkdown, /Create the release archive/);
 assert.match(activeMarkdown, /literal terms AGENTS\.md and <environment_context>/);
+assert.equal((activeMarkdown.match(/\[Attachment [12] \(file\)\]\(\.\.\/\.\.\/assets\/[0-9a-f]{64}\.bin\)/g) || []).length, 2);
+assert.doesNotMatch(activeMarkdown, /data:image|file:\/\/|https?:\/\//, "derived Markdown must use only local relative asset references");
 const subagentMarkdown = await fs.readFile(path.join(outputDir, subagentSession.markdown_file), "utf8");
-assert.doesNotMatch(subagentMarkdown, /^## User - /m);
+assert.doesNotMatch(subagentMarkdown, /^## User – /m);
 assert.match(subagentMarkdown, /<summary>Subagent input \/ parent-agent handoff/);
 assert.match(subagentMarkdown, /\[1\] user: retained parent material/);
 assert.match(subagentMarkdown, /\[7\] assistant: retained parent material/);
@@ -194,16 +218,25 @@ assert.match(html, /archived/);
 assert.match(html, /gpt-test/);
 assert.match(html, /<th>Raw<\/th>/, "raw-enabled HTML indexes should include the Raw column");
 assert.match(html, /href="raw\//, "raw-enabled HTML indexes should link to current raw snapshots");
+assert.equal((html.match(/href="assets\/[0-9a-f]{64}\.bin">Attachment [12] \(file\)<\/a>/g) || []).length, 2);
+assert.doesNotMatch(html, /<img src="assets\/[0-9a-f]{64}\.bin"/, "non-renderable assets must never be emitted as images");
 
 const apiOutputDir = path.join(temp, "api-output");
 const apiProfilePath = path.join(temp, "api-performance-profile.json");
-const apiResult = await exportArchive({ codexHome, scope: "project", workspacePath: "C:\\Projects\\alpha", outputDirectory: apiOutputDir, includeOriginalJsonl: false, performanceProfilePath: apiProfilePath });
-assert.equal(apiResult.exportedSessionCount, 5);
+const apiResult = await exportArchive({ codexHome, scope: "project", workspacePath: primaryProjectPath, outputDirectory: apiOutputDir, includeOriginalJsonl: false, performanceProfilePath: apiProfilePath });
+await assert.rejects(
+  () => exportArchive({ codexHome, scope: "project", workspacePath: foreignStyleProjectPath, outputDirectory: path.join(temp, "foreign-path-style-output"), includeOriginalJsonl: false }),
+  (error) => error?.code === "NO_PROJECT_MATCH",
+  "a foreign platform's absolute-path syntax must not become a host-dependent exact match",
+);
+assert.equal(apiResult.exportedSessionCount, 4);
 assert.equal(apiResult.exportedProjectCount, 1);
 assert.equal(apiResult.activeSessionCount, 3);
-assert.equal(apiResult.archivedSessionCount, 2);
+assert.equal(apiResult.archivedSessionCount, 1);
 assert.ok(apiResult.htmlIndexPath.endsWith("index.html"));
 assert.ok(apiResult.manifestPath.endsWith("manifest.json"));
+assert.ok(apiResult.assetManifestPath.endsWith(path.join("assets", "manifest.json")));
+assert.deepEqual(apiResult.assetSummary, { assetOccurrences: 2, deduplicatedBytesSaved: 0, maxWriteBlockBytes: 12, uniqueAssetBytes: 17, uniqueAssets: 2 });
 assert.equal(await pathExists(path.join(apiOutputDir, "raw")), false);
 const apiHtml = await fs.readFile(path.join(apiOutputDir, "index.html"), "utf8");
 assert.doesNotMatch(apiHtml, /<th>Raw<\/th>/, "raw-disabled HTML indexes should omit the Raw column");
@@ -222,6 +255,81 @@ const apiProfileText = await fs.readFile(apiProfilePath, "utf8");
 const apiProfile = JSON.parse(apiProfileText);
 assert.equal(apiProfile.performance_profile_version, 1);
 assert.equal(apiProfile.status, "COMPLETED");
+
+const earlyPreflightHome = path.join(temp, "preflight-home");
+const earlyPreflightSession = path.join(earlyPreflightHome, "sessions", "rollout-preflight.jsonl");
+const earlyPreflightOutput = path.join(temp, "preflight-output");
+await fs.mkdir(path.dirname(earlyPreflightSession), { recursive: true });
+await fs.writeFile(earlyPreflightSession, "this session must not be read\n", "utf8");
+let preflightSessionReads = 0;
+await assert.rejects(() => exportArchive({
+  codexHome: earlyPreflightHome,
+  scope: "all",
+  outputDirectory: earlyPreflightOutput,
+  _assetStoreOptions: { preflightIo: { link: async () => { throw Object.assign(new Error("synthetic unsupported links"), { code: "ENOTSUP" }); } } },
+  _readerOptions: { io: { createReadStream: (...args) => { preflightSessionReads += 1; return fsSync.createReadStream(...args); } } },
+}), (error) => error?.code === "ASSET_HARDLINK_UNSUPPORTED" && /No existing files were overwritten/.test(error.message));
+assert.equal(preflightSessionReads, 0, "hard-link capability failure must occur before any session stream is opened");
+assert.deepEqual(await fs.readdir(earlyPreflightOutput), [], "the failed capability probe must leave no output artifacts");
+
+const changingAssetHome = path.join(temp, "changing-asset-home");
+const changingAssetSource = path.join(changingAssetHome, "sessions", "rollout-changing-assets.jsonl");
+const changingAssetOutput = path.join(temp, "changing-asset-output");
+const changingAssetBytes = Buffer.alloc(1024 * 1024, 0x41);
+Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(changingAssetBytes);
+await fs.mkdir(path.dirname(changingAssetSource), { recursive: true });
+await fs.writeFile(changingAssetSource, jsonl([
+  { type: "session_meta", payload: { id: "session-changing-assets", cwd: "C:\\Projects\\changing-assets", source: "vscode", thread_source: "user" } },
+  { type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_image", image_url: `data:image/png;base64,${changingAssetBytes.toString("base64")}` }] } },
+]));
+let assetPhaseActive = false;
+let assetSourceMutated = false;
+await assert.rejects(() => exportArchive({
+  codexHome: changingAssetHome,
+  scope: "all",
+  outputDirectory: changingAssetOutput,
+  exportProfile: "readable",
+  progressThrottleMs: 0,
+  onProgress: (event) => { if (event.phase === "assets") assetPhaseActive = true; },
+  _readerOptions: {
+    onAttachmentDecodedChunk: () => {
+      if (assetPhaseActive && !assetSourceMutated) {
+        assetSourceMutated = true;
+        fsSync.appendFileSync(changingAssetSource, "{}\n", "utf8");
+      }
+    },
+  },
+}), (error) => error?.code === "SOURCE_CHANGED_DURING_EXPORT" && /assets were collected/.test(error.message));
+assert.equal(assetSourceMutated, true, "the source-change injection must occur during asset collection");
+assert.equal(await pathExists(path.join(changingAssetOutput, "assets", "manifest.json")), false, "an unstable asset pass must not publish its manifest");
+assert.deepEqual(await fs.readdir(path.join(changingAssetOutput, "assets")), [], "an unstable asset pass must remove all run-owned assets and staging files");
+assert.equal(await pathExists(path.join(changingAssetOutput, INCOMPLETE_MARKER_NAME)), true, "an unstable asset pass must leave the generation visibly incomplete");
+
+const betweenPassHome = path.join(temp, "between-pass-home");
+const betweenPassSource = path.join(betweenPassHome, "sessions", "rollout-between-passes.jsonl");
+const betweenPassOutput = path.join(temp, "between-pass-output");
+await fs.mkdir(path.dirname(betweenPassSource), { recursive: true });
+await fs.writeFile(betweenPassSource, jsonl([
+  { type: "session_meta", payload: { id: "session-between-passes", cwd: "C:\\Projects\\between-passes", source: "vscode", thread_source: "user" } },
+  { type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "before" }, { type: "input_image", image_url: "data:image/png;base64,aGVsbG8=" }] } },
+]));
+let betweenPassMutated = false;
+await assert.rejects(() => exportArchive({
+  codexHome: betweenPassHome,
+  scope: "all",
+  outputDirectory: betweenPassOutput,
+  exportProfile: "readable",
+  onDiagnostic: (event) => {
+    if (event.event === "assets_end" && !betweenPassMutated) {
+      betweenPassMutated = true;
+      fsSync.appendFileSync(betweenPassSource, `${JSON.stringify({ type: "response_item", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "after" }] } })}\n`, "utf8");
+    }
+  },
+}), (error) => error?.code === "SOURCE_CHANGED_DURING_EXPORT" && /Markdown rendering/.test(error.message));
+assert.equal(betweenPassMutated, true, "the source-change injection must occur between asset collection and rendering");
+assert.equal(await pathExists(path.join(betweenPassOutput, "assets", "manifest.json")), false, "a cross-pass mismatch must not publish the asset manifest");
+assert.deepEqual(await fs.readdir(path.join(betweenPassOutput, "assets")), [], "a cross-pass mismatch must remove every run-owned asset");
+assert.equal(await pathExists(path.join(betweenPassOutput, INCOMPLETE_MARKER_NAME)), true, "a cross-pass mismatch must leave the generation visibly incomplete");
 
 const protectedSource = path.join(activeDir, "rollout-active.jsonl");
 const protectedSourceHash = await sha256File(protectedSource);
@@ -350,7 +458,12 @@ try {
 }
 
 const markdownAliasOutput = path.join(temp, "markdown-alias-output");
-const markdownAliasPath = path.join(markdownAliasOutput, activeSession.markdown_file);
+const markdownPlanOutput = path.join(temp, "markdown-alias-plan");
+const markdownPlan = await exportArchive({ codexHome, scope: "all", outputDirectory: markdownPlanOutput, exportProfile: "readable" });
+const markdownPlanManifest = JSON.parse(await fs.readFile(markdownPlan.manifestPath, "utf8"));
+const markdownAliasRelative = markdownPlanManifest.sessions.find(session => session.session_id === activeSession.session_id).markdown_file;
+await fs.rm(markdownPlanOutput, { recursive: true, force: true });
+const markdownAliasPath = path.join(markdownAliasOutput, markdownAliasRelative);
 await fs.mkdir(path.dirname(markdownAliasPath), { recursive: true });
 await fs.link(protectedSource, markdownAliasPath);
 await assert.rejects(() => exportArchive({ codexHome, scope: "all", outputDirectory: markdownAliasOutput, exportProfile: "readable" }), (error) => error?.code === "OUTPUT_OVERLAPS_SOURCE");
@@ -376,7 +489,7 @@ await assert.rejects(() => exportArchive({
 assert.equal(await pathExists(path.join(codexHome, "sessions", "unsafe-export")), false, "overlapping output roots must be rejected before mkdir or any export write");
 assert.equal(apiProfile.raw_enabled, false);
 assert.equal(apiProfile.counts.scanned_sessions, 7);
-assert.equal(apiProfile.counts.exported_sessions, 5);
+assert.equal(apiProfile.counts.exported_sessions, 4);
 assert.equal(apiProfile.attachments.embedded_count, 2);
 assert.equal(apiProfile.attachments.embedded_bytes, 17);
 assert.equal(apiProfile.attachments.data_url_count, 1);
@@ -390,12 +503,9 @@ assert.equal(apiProfile.attachments.referenced_unknown_size_count, 2);
 assert.ok(apiProfile.phases.parse_and_classify.duration_ms > 0);
 const readableSourceFiles = [
   path.join(activeDir, "rollout-active.jsonl"),
-  path.join(activeDir, "rollout-empty-project.jsonl"),
   path.join(activeDir, "rollout-subagent.jsonl"),
   path.join(activeDir, "rollout-no-user.jsonl"),
-  path.join(archivedDir, "rollout-archived.jsonl"),
   path.join(archivedDir, "rollout-archived-same-project.jsonl"),
-  path.join(archivedDir, `rollout-2026-05-10T08-00-00-${malformedArchivedId}.jsonl`),
 ];
 const readableSourceBytes = (await Promise.all(readableSourceFiles.map((file) => fs.stat(file)))).reduce((sum, stat) => sum + stat.size, 0);
 assert.equal(apiProfile.phases.parse_and_classify.bytes_read, readableSourceBytes, "readable exports should classify each discovered source exactly once instead of routing and reparsing selected sessions");
@@ -409,14 +519,13 @@ assert.doesNotMatch(apiProfileText, /C:\\\\Projects/);
 
 const profiledRawOutputDir = path.join(temp, "profiled-raw-output");
 const profiledRawPath = path.join(temp, "profiled-raw-performance.json");
-const profiledRawResult = await exportArchive({ codexHome, scope: "project", workspacePath: "C:\\Projects\\alpha", outputDirectory: profiledRawOutputDir, performanceProfilePath: profiledRawPath });
+const profiledRawResult = await exportArchive({ codexHome, scope: "project", workspacePath: primaryProjectPath, outputDirectory: profiledRawOutputDir, performanceProfilePath: profiledRawPath });
 const profiledRawManifest = JSON.parse(await fs.readFile(profiledRawResult.manifestPath, "utf8"));
 const profiledRaw = JSON.parse(await fs.readFile(profiledRawPath, "utf8"));
 const semanticSession = ({ markdown_file, raw_export_file, raw_export_name, raw_verified_at, ...session }) => session;
-assert.deepEqual(profiledRawManifest.sessions.map(semanticSession), manifest.sessions.filter((session) => session.project === "C:\\Projects\\alpha").map(semanticSession), "routing preflight must preserve selected-session manifest semantics");
-const uncertainRoutingFallbackBytes = (await fs.stat(path.join(activeDir, "rollout-empty-project.jsonl"))).size;
-assert.equal(profiledRaw.phases.parse_and_classify.bytes_read, profiledRawManifest.sessions.reduce((sum, session) => sum + session.raw_size_bytes, 0) + uncertainRoutingFallbackBytes, "raw exports should parse accepted snapshots once while retaining the conservative full-parser fallback for uncertain routing metadata");
-assert.ok(profiledRaw.phases.routing.bytes_read > profiledRaw.phases.parse_and_classify.bytes_read, "routing should scan all source bytes without fully classifying unselected sessions");
+assert.deepEqual(profiledRawManifest.sessions.map(semanticSession), manifest.sessions.filter((session) => session.project === primaryProjectPath && session.session_id !== malformedArchivedId).map(semanticSession), "first-record routing must preserve selected-session manifest semantics without assigning a later turn_context cwd");
+assert.equal(profiledRaw.phases.parse_and_classify.bytes_read, profiledRawManifest.sessions.reduce((sum, session) => sum + session.raw_size_bytes, 0), "only selected sources should receive complete metadata classification");
+assert.ok(profiledRaw.phases.routing.bytes_read > 0, "routing should account for first-record metadata reads");
 assert.ok(profiledRaw.phases.snapshot_stability_checks.duration_ms >= 0, "performance profiles should report snapshot stability checks separately");
 assert.ok(profiledRaw.slowest_sessions.some((session) => session.snapshot_attempts >= 1), "profiled raw sessions should expose snapshot attempt counts without attributing attempts to routing-only sessions");
 for (const session of profiledRawManifest.sessions) {
@@ -429,7 +538,7 @@ for (const session of profiledRawManifest.sessions) {
 const reusedOutputDir = path.join(temp, "reused-output");
 await fs.mkdir(path.join(reusedOutputDir, "raw"), { recursive: true });
 await fs.writeFile(path.join(reusedOutputDir, "raw", "stale.jsonl"), "stale raw data\n", "utf8");
-await exportArchive({ codexHome, scope: "project", workspacePath: "C:\\Projects\\alpha", outputDirectory: reusedOutputDir, includeOriginalJsonl: false });
+await exportArchive({ codexHome, scope: "project", workspacePath: primaryProjectPath, outputDirectory: reusedOutputDir, includeOriginalJsonl: false });
 const reusedHtml = await fs.readFile(path.join(reusedOutputDir, "index.html"), "utf8");
 assert.equal(await pathExists(path.join(reusedOutputDir, "raw", "stale.jsonl")), true, "reused outputs should not delete older files");
 assert.doesNotMatch(reusedHtml, /<th>Raw<\/th>/, "an old raw directory must not add a Raw column to the current index");
@@ -441,7 +550,7 @@ const diagnosticEvents = [];
 const sourceSnapshotsResult = await exportArchive({
   codexHome,
   scope: "project",
-  workspacePath: "C:\\Projects\\alpha",
+  workspacePath: primaryProjectPath,
   outputDirectory: sourceSnapshotsOutput,
   exportProfile: "source-snapshots",
   progressThrottleMs: 0,
@@ -459,7 +568,7 @@ assert.match(sourceSnapshotsHtml, /<th>Raw<\/th>/);
 assert.doesNotMatch(sourceSnapshotsHtml, /<th>Title<\/th>/, "source-snapshots must not display unavailable readable titles");
 assert.doesNotMatch(sourceSnapshotsHtml, /<th>Model<\/th>/, "source-snapshots must not display unavailable model metadata");
 assert.match(sourceSnapshotsHtml, /<th>Session ID<\/th>/, "source-snapshots should retain session identity in the reduced index");
-assert.match(sourceSnapshotsHtml, /Project, storage, date, or session ID/);
+assert.match(sourceSnapshotsHtml, /Project, storage, date or session ID/);
 assert.match(sourceSnapshotsHtml, /intentionally use a reduced index and do not inspect complete readable metadata/);
 const sourceSnapshotsManifest = JSON.parse(await fs.readFile(sourceSnapshotsResult.manifestPath, "utf8"));
 assert.equal(sourceSnapshotsManifest.export_profile, "source-snapshots");
@@ -475,14 +584,15 @@ for (const session of sourceSnapshotsManifest.sessions) {
   assert.equal(retiredContinuingIntegrityField in session, false);
   assert.deepEqual(await fs.readFile(path.join(sourceSnapshotsOutput, session.raw_export_file)), await fs.readFile(session.source_jsonl));
 }
-assert.deepEqual(progressEvents.map((event) => event.phase).filter((phase, index, phases) => index === 0 || phase !== phases[index - 1]), ["discovery", "routing", "snapshot", "processing", "writing", "complete"]);
+assert.deepEqual(progressEvents.map((event) => event.phase).filter((phase, index, phases) => index === 0 || phase !== phases[index - 1]), ["discovery", "routing", "snapshot", "processing", "assets", "writing", "complete"]);
 assert.ok(progressEvents.some((event) => event.message === `Processing session ${sourceSnapshotsManifest.sessions.length} of ${sourceSnapshotsManifest.sessions.length}`));
 assert.doesNotMatch(JSON.stringify(progressEvents), /Projects|codex-exporter-test/, "progress events must not expose project names or full paths");
-for (const event of ["core_start", "discovery_start", "discovery_end", "routing_start", "routing_hash_end", "routing_end", "session_start", "snapshot_attempt_start", "source_hash_reused", "snapshot_copy_start", "snapshot_copy_end", "export_hash_start", "export_hash_end", "snapshot_stability_check", "snapshot_attempt_end", "session_end", "index_start", "index_end", "manifest_start", "manifest_end", "verification_start", "verification_end", "core_end"]) {
+for (const event of ["core_start", "discovery_start", "discovery_end", "routing_start", "routing_metadata_end", "routing_end", "session_start", "snapshot_attempt_start", "source_hash_start", "source_hash_end", "snapshot_copy_start", "snapshot_copy_end", "export_hash_start", "export_hash_end", "snapshot_stability_check", "snapshot_attempt_end", "session_end", "assets_start", "assets_end", "index_start", "index_end", "manifest_start", "manifest_end", "verification_start", "verification_end", "core_end"]) {
   assert.ok(diagnosticEvents.some((entry) => entry.event === event), `diagnostic trace should contain ${event}`);
 }
-assert.equal(diagnosticEvents.filter((event) => event.event === "routing_hash_end").length, diagnosticEvents.find((event) => event.event === "discovery_end").scanned_sessions, "each scanned source must be hashed exactly once by routing");
-assert.equal(diagnosticEvents.filter((event) => event.event === "source_hash_start").length, 0, "stable selected sources must not receive a second source hash pass");
+assert.equal(diagnosticEvents.filter((event) => event.event === "routing_metadata_end").length, diagnosticEvents.find((event) => event.event === "discovery_end").scanned_sessions, "each scanned source must contribute only first-record routing metadata");
+assert.ok(diagnosticEvents.filter((event) => event.event === "routing_metadata_end").every(event => event.metadata_bytes_read <= 16 * 1024 * 1024 + 64 * 1024 + 4095));
+assert.equal(diagnosticEvents.filter((event) => event.event === "source_hash_start").length, sourceSnapshotsManifest.sessions.length, "only selected sources should receive a complete source hash pass");
 assert.equal(diagnosticEvents.filter((event) => event.event === "export_hash_start").length, sourceSnapshotsManifest.sessions.length, "each source snapshot must receive exactly one export hash pass");
 assert.equal(diagnosticEvents.filter((event) => event.event === "verification_hash_start").length, 0, "final verification must not hash Raw snapshots a second time");
 assert.ok(diagnosticEvents.every((event) => Number.isFinite(event.monotonic_ms)), "diagnostic events must use monotonic timestamps");
@@ -490,21 +600,21 @@ assert.doesNotMatch(JSON.stringify(diagnosticEvents), new RegExp(temp.replace(/[
 assert.doesNotMatch(JSON.stringify(diagnosticEvents), /automatic startup context|Export both/);
 
 const explicitReadableOutput = path.join(temp, "explicit-readable-output");
-const explicitReadableResult = await exportArchive({ codexHome, scope: "project", workspacePath: "C:\\Projects\\alpha", outputDirectory: explicitReadableOutput, exportProfile: "readable", includeOriginalJsonl: true });
+const explicitReadableResult = await exportArchive({ codexHome, scope: "project", workspacePath: primaryProjectPath, outputDirectory: explicitReadableOutput, exportProfile: "readable", includeOriginalJsonl: true });
 assert.equal(await pathExists(path.join(explicitReadableOutput, "raw")), false, "an explicit readable profile must override the legacy raw boolean");
 assert.equal(JSON.parse(await fs.readFile(explicitReadableResult.manifestPath, "utf8")).export_profile, "readable");
 
 const explicitCompleteOutput = path.join(temp, "explicit-complete-output");
 const completeProgress = [];
 const completeDiagnostics = [];
-const explicitCompleteResult = await exportArchive({ codexHome, scope: "project", workspacePath: "C:\\Projects\\alpha", outputDirectory: explicitCompleteOutput, exportProfile: "complete", includeOriginalJsonl: false, progressThrottleMs: 0, onProgress: (event) => completeProgress.push(event), onDiagnostic: (event) => completeDiagnostics.push(event) });
+const explicitCompleteResult = await exportArchive({ codexHome, scope: "project", workspacePath: primaryProjectPath, outputDirectory: explicitCompleteOutput, exportProfile: "complete", includeOriginalJsonl: false, progressThrottleMs: 0, onProgress: (event) => completeProgress.push(event), onDiagnostic: (event) => completeDiagnostics.push(event) });
 assert.equal(await pathExists(path.join(explicitCompleteOutput, "raw")), true, "an explicit complete profile must override the legacy no-raw boolean");
 for (const session of JSON.parse(await fs.readFile(explicitCompleteResult.manifestPath, "utf8")).sessions) {
   const baseline = profiledRawManifest.sessions.find((candidate) => candidate.session_id === session.session_id);
   assert.equal(await fs.readFile(path.join(explicitCompleteOutput, session.markdown_file), "utf8"), await fs.readFile(path.join(profiledRawOutputDir, baseline.markdown_file), "utf8"), "the complete profile must preserve established Markdown semantics");
 }
-assert.deepEqual(completeProgress.map((event) => event.phase).filter((phase, index, phases) => index === 0 || phase !== phases[index - 1]), ["discovery", "routing", "snapshot", "processing", "rendering", "writing", "complete"], "complete-profile progress phases must be ordered and finite");
-assert.equal(completeDiagnostics.filter((event) => event.event === "source_hash_start").length, 0, "complete exports must reuse stable routing hashes");
+assert.deepEqual(completeProgress.map((event) => event.phase).filter((phase, index, phases) => index === 0 || phase !== phases[index - 1]), ["discovery", "routing", "snapshot", "processing", "assets", "rendering", "writing", "complete"], "complete-profile progress phases must be ordered and finite");
+assert.equal(completeDiagnostics.filter((event) => event.event === "source_hash_start").length, explicitCompleteResult.exportedSessionCount, "complete exports must hash only selected sources after metadata-only routing");
 assert.equal(completeDiagnostics.filter((event) => event.event === "export_hash_start" && event.stage === "snapshot_parse").length, explicitCompleteResult.exportedSessionCount, "complete exports must hash each Raw snapshot during its existing parse pass");
 assert.equal(completeDiagnostics.filter((event) => event.event === "verification_hash_start").length, 0, "complete exports must not add a final duplicate Raw hash pass");
 
@@ -523,7 +633,7 @@ const nestedOuterPromise = exportArchive({
       nestedInnerPromise = exportArchive({
         codexHome,
         scope: "project",
-        workspacePath: "C:\\Projects\\alpha",
+        workspacePath: primaryProjectPath,
         outputDirectory: nestedInnerOutput,
         exportProfile: "readable",
         pathStyle: "readable",
@@ -540,7 +650,7 @@ assert.equal(await pathExists(path.join(nestedOuterOutput, "raw")), true);
 assert.equal(await pathExists(path.join(nestedOuterOutput, "index.md")), false);
 assert.equal(await pathExists(path.join(nestedInnerOutput, "raw")), false);
 assert.equal(await pathExists(path.join(nestedInnerOutput, "index.md")), true);
-assert.ok(nestedInnerManifest.sessions.every((session) => session.project === "C:\\Projects\\alpha"), "the nested workspace filter must not leak into the outer export");
+assert.ok(nestedInnerManifest.sessions.every((session) => session.project === primaryProjectPath), "the nested workspace filter must not leak into the outer export");
 assert.equal(nestedOuterManifest.sessions.length, manifest.sessions.length, "the outer all-session selection must remain isolated from the nested workspace export");
 
 const lockedOutput = path.join(temp, "concurrent-locked-output");
@@ -548,7 +658,7 @@ let competingExport;
 const lockedPrimaryResult = await exportArchive({
   codexHome,
   scope: "project",
-  workspacePath: "C:\\Projects\\alpha",
+  workspacePath: primaryProjectPath,
   outputDirectory: lockedOutput,
   exportProfile: "source-snapshots",
   progressThrottleMs: 0,
@@ -557,7 +667,7 @@ const lockedPrimaryResult = await exportArchive({
       competingExport = exportArchive({
         codexHome,
         scope: "project",
-        workspacePath: "C:\\Projects\\alpha",
+        workspacePath: primaryProjectPath,
         outputDirectory: lockedOutput,
         exportProfile: "readable",
       }).then(
@@ -574,7 +684,7 @@ assert.equal(await pathExists(path.join(lockedOutput, ".codex-export.lock")), fa
 assert.equal(JSON.parse(await fs.readFile(lockedPrimaryResult.manifestPath, "utf8")).export_profile, "source-snapshots", "the rejected export must not overwrite the owner manifest");
 
 const legacyCliOutput = path.join(temp, "legacy-cli-no-raw-output");
-await execFileAsync(process.execPath, [script, "--codex-home", codexHome, "--project", "C:\\Projects\\alpha", "--out", legacyCliOutput, "--no-raw"], { cwd: temp });
+await execFileAsync(process.execPath, [script, "--codex-home", codexHome, "--project", primaryProjectPath, "--out", legacyCliOutput, "--no-raw"], { cwd: temp });
 assert.equal(await pathExists(path.join(legacyCliOutput, "raw")), false, "the existing CLI --no-raw switch must remain compatible");
 assert.equal(JSON.parse(await fs.readFile(path.join(legacyCliOutput, "manifest.json"), "utf8")).export_profile, "readable");
 
@@ -589,7 +699,8 @@ const routerLines = [
   JSON.stringify({ timestamp: "2026-08-16T12:00:02.000Z", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "Router differential control." }] }, type: "response_item" }),
 ];
 await fs.writeFile(routerSource, `${routerLines.join("\n")}\n`, "utf8");
-const routedMeta = await readSessionRoutingMeta(routerSource);
+await assert.rejects(() => readSessionRoutingMeta(routerSource), (error) => error?.code === "SESSION_JSONL_INVALID" && error?.recordNumber === 1);
+const routedMeta = await readSessionRoutingMeta(routerSource, { implementation: SESSION_READER_IMPLEMENTATION.LEGACY_REFERENCE });
 assert.equal(routedMeta.id, "router-session");
 assert.equal(routedMeta.cwd, "C:\\Projects\\router");
 const fallbackSource = path.join(temp, "router-json-parse-fallback.jsonl");
@@ -598,7 +709,13 @@ const fallbackMeta = await readSessionRoutingMeta(fallbackSource);
 assert.equal(fallbackMeta.id, "fallback-session", "an uncertain structured scan must fall back to full JSON parsing");
 assert.equal(fallbackMeta.cwd, "C:\\Projects\\fallback");
 const routerOutput = path.join(temp, "router-output");
-const routerResult = await exportArchive({ codexHome: routerHome, scope: "all", outputDirectory: routerOutput, exportProfile: "complete" });
+const streamingInvalidOutput = path.join(temp, "router-streaming-invalid-output");
+await assert.rejects(
+  () => exportArchive({ codexHome: routerHome, scope: "all", outputDirectory: streamingInvalidOutput, exportProfile: "complete" }),
+  (error) => error?.code === "SOURCE_SNAPSHOT_FAILED" && error.message.includes("JSON validation failed in session record 1"),
+);
+assert.equal(await pathExists(path.join(streamingInvalidOutput, "manifest.json")), false, "the streaming reader must reject invalid JSONL before publishing visible output");
+const routerResult = await exportArchive({ codexHome: routerHome, scope: "all", outputDirectory: routerOutput, exportProfile: "complete", _readerImplementation: SESSION_READER_IMPLEMENTATION.LEGACY_REFERENCE });
 const routerManifest = JSON.parse(await fs.readFile(routerResult.manifestPath, "utf8"));
 assert.equal(routerManifest.sessions[0].session_id, routedMeta.id, "structured routing and full selected-session parsing must agree on session identity");
 assert.equal(routerManifest.sessions[0].project, routedMeta.cwd, "structured routing and full selected-session parsing must agree on project routing");
@@ -778,6 +895,27 @@ assert.equal(await fs.readFile(repeatedGeneration.manifestPath, "utf8"), firstGe
 assert.equal(repeatedGenerationDiagnostics.filter((event) => event.event === "export_hash_start").length, 1, "an unchanged repetition must still verify the published Raw path exactly once");
 assert.notEqual(firstGenerationManifest, "", "the first generation manifest must be complete before repetition");
 
+const additiveRootOutput = path.join(temp, "generation-additive-root-field");
+await fs.cp(generationOutput, additiveRootOutput, { recursive: true });
+const additiveRootManifestPath = path.join(additiveRootOutput, "manifest.json");
+const additiveRootManifest = JSON.parse(await fs.readFile(additiveRootManifestPath, "utf8"));
+additiveRootManifest.future_optional_metadata = { opaque: "ignored by version-1 consumers", path: "future.bin" };
+const additiveRootManifestBytes = Buffer.from(`${JSON.stringify(additiveRootManifest, null, 2)}\n`, "utf8");
+await fs.writeFile(additiveRootManifestPath, additiveRootManifestBytes);
+const additiveRootProtection = Object.freeze({ rootCanonicalPaths: new Set(), fileCanonicalPaths: new Set(), fileIdentities: new Set() });
+const additiveRootGeneration = await beginExportGeneration(additiveRootOutput, additiveRootProtection, { plannedPaths: [] });
+assert.equal(await pathExists(path.join(additiveRootOutput, INCOMPLETE_MARKER_NAME)), true, "a version-1 consumer must tolerate unknown additive root-manifest fields");
+await completeExportGeneration(additiveRootGeneration);
+assert.equal(await pathExists(path.join(additiveRootOutput, INCOMPLETE_MARKER_NAME)), false, "the additive-field compatibility check must clean its run-owned marker");
+assert.deepEqual(await fs.readFile(additiveRootManifestPath), additiveRootManifestBytes, "the version-1 consumer must ignore rather than rewrite unknown additive root fields");
+await fs.writeFile(path.join(additiveRootOutput, "future.bin"), "foreign future file", "utf8");
+await assert.rejects(
+  () => beginExportGeneration(additiveRootOutput, additiveRootProtection, { plannedPaths: ["future.bin"] }),
+  (error) => error?.code === "INVALID_PREVIOUS_MANIFEST" && /unexpected export path/.test(error.message),
+  "an unknown additive root field must never authorize an additional generation path",
+);
+assert.equal(await pathExists(path.join(additiveRootOutput, INCOMPLETE_MARKER_NAME)), false, "rejected unknown-field path authorization must fail before generation mutation");
+
 const repeatedRawPath = path.join(generationOutput, firstGenerationRecord.sessions[0].raw_export_file);
 const repeatedRawBeforeProfileChange = await fs.readFile(repeatedRawPath);
 await assert.rejects(
@@ -792,9 +930,58 @@ async function writePreviousManifest(output, mutate = () => {}) {
   const manifest = structuredClone(firstGenerationRecord);
   mutate(manifest);
   await fs.mkdir(output, { recursive: true });
+  await fs.cp(path.join(generationOutput, "assets"), path.join(output, "assets"), { recursive: true });
   await fs.writeFile(path.join(output, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
   return manifest;
 }
+
+const missingAssetManifestOutput = path.join(temp, "generation-missing-asset-manifest");
+await writePreviousManifest(missingAssetManifestOutput);
+await fs.unlink(path.join(missingAssetManifestOutput, "assets", "manifest.json"));
+await assert.rejects(
+  () => exportArchive({ codexHome: generationHome, scope: "all", outputDirectory: missingAssetManifestOutput, exportProfile: "complete" }),
+  (error) => error?.code === "INVALID_PREVIOUS_MANIFEST" && /missing asset manifest/.test(error.message),
+);
+assert.equal(await pathExists(path.join(missingAssetManifestOutput, INCOMPLETE_MARKER_NAME)), false, "invalid previous asset metadata must fail before generation mutation");
+
+const invalidAssetUsageOutput = path.join(temp, "generation-invalid-asset-usage");
+await writePreviousManifest(invalidAssetUsageOutput);
+const invalidAssetUsagePath = path.join(invalidAssetUsageOutput, "assets", "manifest.json");
+const invalidAssetUsageManifest = JSON.parse(await fs.readFile(invalidAssetUsagePath, "utf8"));
+const invalidAssetBytes = Buffer.from("synthetic invalid previous asset");
+const invalidAssetHash = createHash("sha256").update(invalidAssetBytes).digest("hex");
+invalidAssetUsageManifest.assets.push({
+  sha256: invalidAssetHash,
+  path: `assets/${invalidAssetHash}.bin`,
+  mime_type: "application/octet-stream",
+  extension: "bin",
+  bytes: invalidAssetBytes.length,
+  renderable: false,
+  uses: [{ attachment_ordinal: 1, record_ordinal: 1, session_id: "synthetic-session", source_path: "C:\\private\\source" }],
+});
+await fs.writeFile(path.join(invalidAssetUsageOutput, ...invalidAssetUsageManifest.assets[0].path.split("/")), invalidAssetBytes);
+await fs.writeFile(invalidAssetUsagePath, `${JSON.stringify(invalidAssetUsageManifest, null, 2)}\n`, "utf8");
+await assert.rejects(
+  () => exportArchive({ codexHome: generationHome, scope: "all", outputDirectory: invalidAssetUsageOutput, exportProfile: "complete" }),
+  (error) => error?.code === "INVALID_PREVIOUS_MANIFEST" && /invalid asset record/.test(error.message),
+);
+
+const invalidAssetSummaryOutput = path.join(temp, "generation-invalid-asset-summary");
+await writePreviousManifest(invalidAssetSummaryOutput, (previousManifest) => { previousManifest.asset_occurrences += 1; });
+await assert.rejects(
+  () => exportArchive({ codexHome: generationHome, scope: "all", outputDirectory: invalidAssetSummaryOutput, exportProfile: "complete" }),
+  (error) => error?.code === "INVALID_PREVIOUS_MANIFEST" && /summaries/.test(error.message),
+);
+
+const unownedAssetOutput = path.join(temp, "generation-unowned-asset");
+await writePreviousManifest(unownedAssetOutput);
+const unownedAssetPath = path.join(unownedAssetOutput, "assets", "foreign.bin");
+await fs.writeFile(unownedAssetPath, "foreign asset", "utf8");
+await assert.rejects(
+  () => exportArchive({ codexHome: generationHome, scope: "all", outputDirectory: unownedAssetOutput, exportProfile: "complete" }),
+  (error) => ["INVALID_PREVIOUS_MANIFEST", "UNOWNED_EXPORT_FILE"].includes(error?.code),
+);
+assert.equal(await fs.readFile(unownedAssetPath, "utf8"), "foreign asset", "unowned asset files must remain untouched");
 
 const forgedRawOutput = path.join(temp, "generation-forged-raw");
 const forgedRawManifest = await writePreviousManifest(forgedRawOutput);

@@ -1,5 +1,5 @@
 @echo off
-setlocal EnableExtensions EnableDelayedExpansion
+setlocal EnableExtensions DisableDelayedExpansion
 cd /d "%~dp0"
 
 set "NODE_EXE=node"
@@ -56,12 +56,13 @@ echo ============================
 echo.
 call :ask_export_options
 if errorlevel 1 goto menu
-if "!OUTPUT_DIR!"=="" (
-  "%NODE_EXE%" "%~dp0bin\export-codex-project-chats.mjs" --all !NO_RAW_FLAG!
+if "%OUTPUT_DIR%"=="" (
+  "%NODE_EXE%" "%~dp0bin\export-codex-project-chats.mjs" --all %PROFILE_FLAG% %FORMAT_FLAG%
 ) else (
-  "%NODE_EXE%" "%~dp0bin\export-codex-project-chats.mjs" --all !NO_RAW_FLAG! --out "!OUTPUT_DIR!"
+  "%NODE_EXE%" "%~dp0bin\export-codex-project-chats.mjs" --all %PROFILE_FLAG% %FORMAT_FLAG% --out "%OUTPUT_DIR%"
 )
-call :after_command
+set "COMMAND_ERROR=%ERRORLEVEL%"
+call :after_command %COMMAND_ERROR%
 goto menu
 
 :export_project
@@ -73,13 +74,25 @@ echo Detected projects:
 echo.
 "%NODE_EXE%" "%~dp0bin\export-codex-project-chats.mjs" --list
 if errorlevel 1 (
-  call :after_command
+  call :after_command %ERRORLEVEL%
   goto menu
 )
 echo.
+echo  [1] Legacy name or path search
+echo  [2] Exact recorded absolute path
+echo.
+choice /c 12 /n /m "Select project matching mode: "
+if errorlevel 2 (
+  set "PROJECT_OPTION=--recorded-project"
+  set "PROJECT_PROMPT=Enter the exact recorded absolute path: "
+) else (
+  set "PROJECT_OPTION=--project"
+  set "PROJECT_PROMPT=Enter a project name or path search: "
+)
+echo.
 set "PROJECT_FILTER="
-set /p PROJECT_FILTER=Enter a project name or full stored work-folder path: 
-if "!PROJECT_FILTER!"=="" (
+set /p PROJECT_FILTER=%PROJECT_PROMPT%
+if "%PROJECT_FILTER%"=="" (
   echo.
   echo No project was entered. Nothing was exported.
   pause
@@ -87,12 +100,13 @@ if "!PROJECT_FILTER!"=="" (
 )
 call :ask_export_options
 if errorlevel 1 goto menu
-if "!OUTPUT_DIR!"=="" (
-  "%NODE_EXE%" "%~dp0bin\export-codex-project-chats.mjs" --project "!PROJECT_FILTER!" !NO_RAW_FLAG!
+if "%OUTPUT_DIR%"=="" (
+  "%NODE_EXE%" "%~dp0bin\export-codex-project-chats.mjs" %PROJECT_OPTION% "%PROJECT_FILTER%" %PROFILE_FLAG% %FORMAT_FLAG%
 ) else (
-  "%NODE_EXE%" "%~dp0bin\export-codex-project-chats.mjs" --project "!PROJECT_FILTER!" !NO_RAW_FLAG! --out "!OUTPUT_DIR!"
+  "%NODE_EXE%" "%~dp0bin\export-codex-project-chats.mjs" %PROJECT_OPTION% "%PROJECT_FILTER%" %PROFILE_FLAG% %FORMAT_FLAG% --out "%OUTPUT_DIR%"
 )
-call :after_command
+set "COMMAND_ERROR=%ERRORLEVEL%"
+call :after_command %COMMAND_ERROR%
 goto menu
 
 :list_projects
@@ -101,7 +115,8 @@ echo Detected projects
 echo =================
 echo.
 "%NODE_EXE%" "%~dp0bin\export-codex-project-chats.mjs" --list
-call :after_command
+set "COMMAND_ERROR=%ERRORLEVEL%"
+call :after_command %COMMAND_ERROR%
 goto menu
 
 :list_sessions
@@ -110,14 +125,14 @@ echo Detected sessions
 echo =================
 echo.
 set "REPORT_FILE=%TEMP%\codex-project-chat-exporter-sessions.txt"
-"%NODE_EXE%" "%~dp0bin\export-codex-project-chats.mjs" --list-sessions > "!REPORT_FILE!" 2>&1
-set "COMMAND_ERROR=!ERRORLEVEL!"
-type "!REPORT_FILE!"
+"%NODE_EXE%" "%~dp0bin\export-codex-project-chats.mjs" --list-sessions > "%REPORT_FILE%" 2>&1
+set "COMMAND_ERROR=%ERRORLEVEL%"
+type "%REPORT_FILE%"
 echo.
 echo The same report is opening in Notepad:
-echo !REPORT_FILE!
-start "" notepad.exe "!REPORT_FILE!"
-if not "!COMMAND_ERROR!"=="0" echo The command did not complete successfully.
+echo %REPORT_FILE%
+start "" notepad.exe "%REPORT_FILE%"
+if not "%COMMAND_ERROR%"=="0" echo The command did not complete successfully.
 echo.
 pause
 goto menu
@@ -128,14 +143,14 @@ echo Session detection diagnostics
 echo =============================
 echo.
 set "REPORT_FILE=%TEMP%\codex-project-chat-exporter-diagnostics.txt"
-"%NODE_EXE%" "%~dp0bin\export-codex-project-chats.mjs" --diagnose > "!REPORT_FILE!" 2>&1
-set "COMMAND_ERROR=!ERRORLEVEL!"
-type "!REPORT_FILE!"
+"%NODE_EXE%" "%~dp0bin\export-codex-project-chats.mjs" --diagnose > "%REPORT_FILE%" 2>&1
+set "COMMAND_ERROR=%ERRORLEVEL%"
+type "%REPORT_FILE%"
 echo.
 echo The same report is opening in Notepad:
-echo !REPORT_FILE!
-start "" notepad.exe "!REPORT_FILE!"
-if not "!COMMAND_ERROR!"=="0" echo The command did not complete successfully.
+echo %REPORT_FILE%
+start "" notepad.exe "%REPORT_FILE%"
+if not "%COMMAND_ERROR%"=="0" echo The command did not complete successfully.
 echo.
 pause
 goto menu
@@ -146,11 +161,35 @@ if exist "%~dp0FAQ.md" start "" "%~dp0FAQ.md"
 goto menu
 
 :ask_export_options
-set "NO_RAW_FLAG="
-set "MARKDOWN_ONLY="
-set /p MARKDOWN_ONLY=Create Markdown only and omit unchanged raw JSONL copies? (y/n): 
-if /I "!MARKDOWN_ONLY!"=="Y" set "NO_RAW_FLAG=--no-raw"
-if /I "!MARKDOWN_ONLY!"=="YES" set "NO_RAW_FLAG=--no-raw"
+echo Export profile:
+echo  [1] Complete - Raw JSONL, Markdown and HTML
+echo  [2] Readable - Markdown and HTML without Raw JSONL
+echo  [3] Source snapshots - Raw JSONL and reduced HTML
+echo.
+choice /c 123 /n /m "Select an export profile: "
+if errorlevel 3 (
+  set "PROFILE_FLAG=--profile source-snapshots"
+) else if errorlevel 2 (
+  set "PROFILE_FLAG=--profile readable"
+) else (
+  set "PROFILE_FLAG=--profile complete"
+)
+echo.
+echo Optional document formats:
+echo  [1] Standard formats only
+echo  [2] Add DOCX
+echo  [3] Add PDF
+echo  [4] Add DOCX and PDF
+echo.
+choice /c 1234 /n /m "Select document formats: "
+set "FORMAT_FLAG="
+if errorlevel 4 (
+  set "FORMAT_FLAG=--format docx,pdf"
+) else if errorlevel 3 (
+  set "FORMAT_FLAG=--format pdf"
+) else if errorlevel 2 (
+  set "FORMAT_FLAG=--format docx"
+)
 echo.
 echo Optional output folder. A short path such as C:\cx\codex-export is recommended.
 echo Leave this empty to create a dated folder in Documents.
@@ -159,10 +198,14 @@ set /p OUTPUT_DIR=Output folder:
 exit /b 0
 
 :after_command
-if errorlevel 1 (
+set "COMMAND_ERROR=%~1"
+if not "%COMMAND_ERROR%"=="0" (
   echo.
-  echo The command did not complete successfully.
+  echo The command did not complete successfully. Exit code: %COMMAND_ERROR%
   echo Use menu option 5 for diagnostics or open FAQ.md.
+) else (
+  echo.
+  echo The command completed successfully.
 )
 echo.
 pause

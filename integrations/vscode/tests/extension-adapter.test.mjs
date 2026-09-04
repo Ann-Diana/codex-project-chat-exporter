@@ -9,7 +9,17 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { buildVsix } from "../scripts/build-vsix.mjs";
 
 const require = createRequire(import.meta.url);
-const { COMMANDS, DIAGNOSTIC_BUILD_ID, EXPORT_PROFILES, STATE_LATEST_HTML, STATE_LATEST_HTML_TARGET, STATE_OUTPUT_DIR, STATE_OUTPUT_TARGET, createExtensionAdapter, defaultLoadExporter, formatExportSummary, isWindowsNetworkOrDevicePath, resolveConfiguredProfile } = require("../src/vscode-adapter.cjs");
+const { COMMANDS, DIAGNOSTIC_BUILD_ID, DOCUMENT_FORMATS, EXPORT_PROFILES, EXPORT_SCOPES, STATE_LATEST_HTML, STATE_LATEST_HTML_TARGET, STATE_OUTPUT_DIR, STATE_OUTPUT_TARGET, createExtensionAdapter: createExtensionAdapterCore, defaultLoadExporter, formatExportSummary, isWindowsNetworkOrDevicePath, resolveConfiguredProfile } = require("../src/vscode-adapter.cjs");
+
+function createExtensionAdapter(vscode, injected = {}) {
+  const recordedPathIdentity = (value) => String(value || "").replaceAll("/", "\\").replace(/[\\]+$/, "").toLowerCase();
+  return createExtensionAdapterCore(vscode, {
+    discoverRecordedProjectInventory: defaultInventoryProvider,
+    recordedPathIdentity,
+    sameRecordedPathIdentity: (left, right) => recordedPathIdentity(left) === recordedPathIdentity(right),
+    ...injected,
+  });
+}
 
 function createState() {
   const values = new Map();
@@ -50,7 +60,7 @@ function createFakeVscode(overrides = {}) {
     },
     window: {
       createOutputChannel: () => ({ appendLine: (line) => output.push(line), show: () => {}, dispose: () => {} }),
-      showWarningMessage: async (message) => { messages.push({ type: "warning", message }); return undefined; },
+      showWarningMessage: async (message, ...actions) => { messages.push({ type: "warning", message, actions }); return overrides.warningSelector?.(message, actions); },
       showErrorMessage: async (message) => { messages.push({ type: "error", message }); return undefined; },
       showInformationMessage: async (message, ...actions) => { messages.push({ type: "info", message, actions }); return overrides.infoAction; },
       showQuickPick: async (items, options) => {
@@ -60,7 +70,13 @@ function createFakeVscode(overrides = {}) {
         return items[0];
       },
       showOpenDialog: async (options) => { openDialogs.push(options); return overrides.openDialogResult || []; },
-      withProgress: async (options, task) => { progressCalls.push(options); return task({ report: (event) => progressReports.push(event) }); },
+      withProgress: async (options, task) => {
+        progressCalls.push(options);
+        const callbacks = [];
+        const result = task({ report: (event) => progressReports.push(event) }, { onCancellationRequested(callback) { callbacks.push(callback); return { dispose() {} }; } });
+        if (overrides.cancelProgressImmediately) callbacks.forEach(callback => callback());
+        return result;
+      },
     },
     commands: {
       registerCommand: (name, callback) => { registered.set(name, callback); return { dispose: () => registered.delete(name) }; },
@@ -105,9 +121,29 @@ await fsp.mkdir(oneWorkspace, { recursive: true });
 await fsp.mkdir(twoWorkspace, { recursive: true });
 await fsp.mkdir(outputDirectory, { recursive: true });
 
+async function defaultInventoryProvider() {
+  return {
+    sessionCount: 4,
+    projects: [{
+      cwd: oneWorkspace,
+      recordedPaths: [oneWorkspace],
+      sessionCount: 2,
+      sourceBytes: 12_345,
+      firstSessionAt: "2026-08-01T10:00:00.000Z",
+      lastSessionAt: "2026-08-02T10:00:00.000Z",
+    }],
+  };
+}
+
 let lastOptions;
 let exportCallCount = 0;
 const exporter = {
+  recordedPathIdentity(value) { return String(value || "").replaceAll("/", "\\").replace(/[\\]+$/, "").toLowerCase(); },
+  sameRecordedPathIdentity(left, right) {
+    const normalize = (value) => String(value || "").replaceAll("/", "\\").replace(/[\\]+$/, "").toLowerCase();
+    return normalize(left) === normalize(right);
+  },
+  async readSessionDiscoveryMeta() { throw new Error("The injected adapter inventory must own synthetic discovery"); },
   async exportArchive(options) {
     exportCallCount += 1;
     lastOptions = options;
@@ -156,11 +192,12 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
   ]);
   assert.equal("codexProjectChatExporter.includeOriginalJsonl" in extensionPackage.contributes.configuration.properties, false);
   assert.equal("codexProjectChatExporter.exportProfile" in extensionPackage.contributes.configuration.properties, false);
-  assert.equal(extensionPackage.version, "0.1.3", "the final pre-push candidate must install as a distinguishable extension version");
+  assert.equal(extensionPackage.version, "0.1.4", "the final pre-release candidate must install as a distinguishable extension version");
   assert.equal(extensionPackage.contributes.configuration.properties["codexProjectChatExporter.diagnosticOutput"].default, false);
   assert.equal(extensionPackage.contributes.configuration.properties["codexProjectChatExporter.outputDirectory"].scope, "machine");
   assert.equal(extensionPackage.contributes.configuration.properties["codexProjectChatExporter.codexHome"].scope, "machine");
   assert.equal(extensionPackage.contributes.configuration.properties["codexProjectChatExporter.includeTools"].scope, "application");
+  assert.equal(extensionPackage.contributes.configuration.properties["codexProjectChatExporter.includeTools"].description, "Include potentially sensitive Tool, Browser and view_image content and their assets in Markdown, HTML, DOCX and PDF reading views. When disabled, those records and assets are excluded from reading views.");
   assert.deepEqual(Object.fromEntries(Object.entries(extensionPackage.contributes.configuration.properties).map(([key, value]) => [key, value.default])), {
     "codexProjectChatExporter.outputDirectory": "",
     "codexProjectChatExporter.codexHome": "",
@@ -188,14 +225,14 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
 {
   const buildTemp = await fsp.realpath(await fsp.mkdtemp(path.join(os.tmpdir(), "codex-vsix-build-success-")));
   const distDir = path.join(buildTemp, "dist");
-  const currentCandidate = path.join(distDir, "codex-project-chat-exporter-vscode-0.1.3.vsix");
+  const currentCandidate = path.join(distDir, "codex-project-chat-exporter-vscode-0.1.4.vsix");
   await fsp.mkdir(distDir, { recursive: true });
   await fsp.writeFile(currentCandidate, "previous candidate", "utf8");
   const result = await buildVsix({
     distDir,
     archiveWriter: async ({ archivePath }) => fsp.writeFile(archivePath, "synthetic VSIX", "utf8"),
   });
-  assert.equal(path.basename(result.vsixPath), "codex-project-chat-exporter-vscode-0.1.3.vsix");
+  assert.equal(path.basename(result.vsixPath), "codex-project-chat-exporter-vscode-0.1.4.vsix");
   assert.equal(await fsp.readFile(result.vsixPath, "utf8"), "synthetic VSIX", "the exact canonical candidate may be replaced in a controlled publication step");
   assert.equal((await fsp.stat(result.vsixPath)).isFile(), true);
   assert.equal(await fsp.stat(result.stage).then(() => true, () => false), false, "successful builds must remove their stage directory");
@@ -314,6 +351,15 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
   const loaded = await defaultLoadExporter({ extensionPath: installedRoot });
   assert.equal(loaded.loadedFrom, "packaged", "installed extensions must ignore any external development core");
 
+  const unexpectedRuntimeFile = path.join(installedRoot, "vendor", "codex-project-chat-exporter", "unlisted.mjs");
+  await fsp.writeFile(unexpectedRuntimeFile, "export {};\n", "utf8");
+  await assert.rejects(() => defaultLoadExporter({ extensionPath: installedRoot }), (error) => error?.code === "PACKAGED_EXPORTER_INTEGRITY_FAILED");
+  await fsp.rm(unexpectedRuntimeFile);
+
+  await fsp.writeFile(integrityFile, JSON.stringify({ format: 1, files: { "bin/export-codex-project-chats.mjs": createHash("sha256").update(packagedBytes).digest("hex"), "lib/missing.mjs": "0".repeat(64) } }), "utf8");
+  await assert.rejects(() => defaultLoadExporter({ extensionPath: installedRoot }), (error) => error?.code === "PACKAGED_EXPORTER_INTEGRITY_FAILED");
+  await fsp.writeFile(integrityFile, JSON.stringify({ format: 1, files: { "bin/export-codex-project-chats.mjs": createHash("sha256").update(packagedBytes).digest("hex") } }), "utf8");
+
   const missingRoot = path.join(temp, "installed-extension-missing");
   await fsp.mkdir(missingRoot, { recursive: true });
   await assert.rejects(() => defaultLoadExporter({ extensionPath: missingRoot }), (error) => error?.code === "PACKAGED_EXPORTER_MISSING");
@@ -356,6 +402,7 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
   assert.deepEqual(infoMessage.actions, ["Open HTML Index", "Open Export Folder"]);
   assert.equal(fake.openDialogs[0].title, "Choose Codex export output folder");
   assert.equal(fake.progressCalls[0].title, "Exporting Codex sessions");
+  assert.equal(fake.progressCalls[0].cancellable, true);
   assert.ok(fake.output.includes(`Output directory: ${outputDirectory}`));
   assert.ok(fake.output.includes(`HTML index: ${path.join(outputDirectory, "index.html")}`));
   assert.ok(fake.output.includes(`Manifest: ${path.join(outputDirectory, "manifest.json")}`));
@@ -418,7 +465,8 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
   assert.equal(lastOptions.scope, "project", "central quick pick should route Current Workspace to the project export");
   assert.equal(lastOptions.workspacePath, oneWorkspace);
   assert.equal(lastOptions.exportProfile, "complete");
-  assert.equal(fake.quickPicks.length, 2, "the central command should ask for scope and profile");
+  assert.equal(fake.quickPicks.length, 3, "the central command should ask for scope, profile, and optional document formats");
+  assert.deepEqual(lastOptions.documentFormats, [], "DOCX must remain opt-in");
   const diagnosticOutput = fake.output.filter((line) => line.startsWith("[DIAG] "));
   assert.match(diagnosticOutput[0], new RegExp(`Diagnostic build ${DIAGNOSTIC_BUILD_ID} \\| run_id export-\\d+ \\| command_start`), "the visible output must identify the diagnostic build and run immediately");
   const diagnosticLines = activation.getDiagnosticEvents();
@@ -437,7 +485,11 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
 
 {
   lastOptions = undefined;
-  const fake = createFakeVscode({ config: { outputDirectory }, quickPickSelector: (items, options) => options?.placeHolder === "Choose what to export" ? items.find((item) => item.label === "All Sessions") : items.find((item) => item.label === "Readable export") });
+  const fake = createFakeVscode({ config: { outputDirectory }, quickPickSelector: (items, options) => {
+    if (options?.placeHolder === "Choose what to export") return items.find((item) => item.label === "All Sessions");
+    if (options?.placeHolder === "Choose an export profile") return items.find((item) => item.label === "Readable export");
+    return items.find((item) => item.label === "Standard formats only");
+  } });
   const context = createContext(temp);
   const adapter = createExtensionAdapter(fake.vscode, { loadExporter: async () => exporter });
   await adapter.activate(context);
@@ -448,12 +500,60 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
 
 {
   lastOptions = undefined;
-  const fake = createFakeVscode({ config: { outputDirectory }, quickPickSelector: (items, options) => options?.placeHolder === "Choose what to export" ? items.find((item) => item.label === "All Sessions") : items.find((item) => item.label === "Source snapshots") });
+  const fake = createFakeVscode({ config: { outputDirectory }, quickPickSelector: (items, options) => {
+    if (options?.placeHolder === "Choose what to export") return items.find((item) => item.label === "All Sessions");
+    if (options?.placeHolder === "Choose an export profile") return items.find((item) => item.label === "Source snapshots");
+    return items.find((item) => item.label === "Standard formats only");
+  } });
   const context = createContext(temp);
   const adapter = createExtensionAdapter(fake.vscode, { loadExporter: async () => exporter });
   await adapter.activate(context);
   await fake.registered.get(COMMANDS.exportMenu)();
   assert.equal(lastOptions.exportProfile, "source-snapshots", "the source-snapshot profile must be selectable from the native Quick Pick");
+}
+
+{
+  const fake = createFakeVscode({ workspaceFolders: [folder(oneWorkspace)], config: { outputDirectory }, cancelProgressImmediately: true });
+  const context = createContext(temp);
+  const adapter = createExtensionAdapter(fake.vscode, { loadExporter: async () => ({ async exportArchive(options) {
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(options.abortSignal.aborted, true, "VS Code cancellation must reach the shared core");
+    throw Object.assign(new Error("Cancelled"), { code: "EXPORT_CANCELLED" });
+  } }) });
+  await adapter.activate(context);
+  assert.equal(await adapter.exportCurrentWorkspace(context), undefined);
+  assert.equal(context.globalState.values.size, 0);
+  assert.equal(fake.messages.some(message => message.type === "error"), false);
+  assert.deepEqual(fake.messages.filter(message => message.type === "info").map(message => message.message), ["Export cancelled."]);
+  assert.equal(fake.output.at(-1), "Export cancelled.");
+}
+
+{
+  lastOptions = undefined;
+  const fake = createFakeVscode({ config: { outputDirectory }, quickPickSelector: (items, options) => {
+    if (options?.placeHolder === "Choose what to export") return items.find((item) => item.label === "All Sessions");
+    if (options?.placeHolder === "Choose an export profile") return items.find((item) => item.label === "Readable export");
+    return items.find((item) => item.label === "Add DOCX");
+  } });
+  const context = createContext(temp);
+  const adapter = createExtensionAdapter(fake.vscode, { loadExporter: async () => exporter });
+  await adapter.activate(context);
+  await fake.registered.get(COMMANDS.exportMenu)();
+  assert.deepEqual(lastOptions.documentFormats, ["docx"], "the adapter must pass the shared explicit document-format contract");
+}
+
+{
+  lastOptions = undefined;
+  const fake = createFakeVscode({ config: { outputDirectory }, quickPickSelector: (items, options) => {
+    if (options?.placeHolder === "Choose what to export") return items.find((item) => item.label === "All Sessions");
+    if (options?.placeHolder === "Choose an export profile") return items.find((item) => item.label === "Readable export");
+    return items.find((item) => item.label === "Add PDF");
+  } });
+  const context = createContext(temp);
+  const adapter = createExtensionAdapter(fake.vscode, { loadExporter: async () => exporter });
+  await adapter.activate(context);
+  await fake.registered.get(COMMANDS.exportMenu)();
+  assert.deepEqual(lastOptions.documentFormats, ["pdf"], "Add PDF must pass the same shared explicit document-format contract");
 }
 
 {
@@ -477,6 +577,22 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
   assert.equal(exportCalled, false);
   assert.equal(fake.openDialogs.length, 0, "profile cancellation must not ask for or write an output folder");
   assert.equal(activation.getDiagnosticEvents().at(-1).status, "CANCELLED", "cancellation before profile selection must not be reported as completed");
+}
+
+{
+  let exportCalled = false;
+  const fake = createFakeVscode({ quickPickSelector: (items, options) => {
+    if (options?.placeHolder === "Choose what to export") return items[0];
+    if (options?.placeHolder === "Choose an export profile") return items[0];
+    return undefined;
+  }, config: { diagnosticOutput: true } });
+  const context = createContext(temp);
+  const adapter = createExtensionAdapter(fake.vscode, { loadExporter: async () => ({ exportArchive: async () => { exportCalled = true; } }) });
+  const activation = await adapter.activate(context);
+  assert.equal(await fake.registered.get(COMMANDS.exportMenu)(), undefined, "cancelling the document-format quick pick should stop cleanly");
+  assert.equal(exportCalled, false);
+  assert.equal(fake.openDialogs.length, 0, "format cancellation must happen before output selection");
+  assert.equal(activation.getDiagnosticEvents().at(-1).status, "CANCELLED");
 }
 
 {
@@ -512,7 +628,7 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
   const fake = createFakeVscode({ workspaceFolders: [folder("vscode-remote://ssh/project", "vscode-remote")] });
   const adapter = createExtensionAdapter(fake.vscode, { loadExporter: async () => exporter });
   assert.equal(await adapter.getLocalWorkspacePath(), "", "remote workspace should be rejected");
-  assert.match(fake.messages.at(-1).message, /Remote, virtual, and non-file/);
+  assert.match(fake.messages.at(-1).message, /Remote, virtual and non-file/);
 }
 
 {
@@ -532,6 +648,7 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
   assert.equal(lastOptions.exportProfile, "complete", "hidden compatibility commands use the complete profile");
   assert.equal(lastOptions.pathStyle, "readable");
   assert.equal(lastOptions.includeTools, true);
+  assert.deepEqual(lastOptions.documentFormats, [], "hidden compatibility commands must not enable DOCX");
   assert.equal(result.exportedSessionCount, 4);
 }
 
@@ -805,6 +922,8 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
   const realSessionsDir = path.join(realCodexHome, "sessions", "2026", "08", "16");
   const directOutput = path.join(temp, "real-core-direct-output");
   const adapterOutput = path.join(temp, "real-core-adapter-output");
+  const directPdfOutput = path.join(temp, "real-core-direct-pdf-output");
+  const adapterPdfOutput = path.join(temp, "real-core-adapter-pdf-output");
   await fsp.mkdir(realSessionsDir, { recursive: true });
   const realSource = path.join(realSessionsDir, "rollout-real-adapter.jsonl");
   const realItems = [
@@ -818,13 +937,13 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
   await fsp.writeFile(realSource, `${realItems.map((item) => JSON.stringify(item)).join("\n")}\n`, "utf8");
   const corePath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "bin", "export-codex-project-chats.mjs");
   const realExporter = await import(pathToFileURL(corePath).href);
-  const directResult = await realExporter.exportArchive({ codexHome: realCodexHome, scope: "all", outputDirectory: directOutput, pathStyle: "readable" });
+  const directResult = await realExporter.exportArchive({ codexHome: realCodexHome, scope: "all", outputDirectory: directOutput, pathStyle: "readable", documentFormats: ["docx"] });
 
   const fake = createFakeVscode({ config: { outputDirectory: adapterOutput, codexHome: realCodexHome, pathStyle: "readable" } });
   const context = createContext(temp);
   const adapter = createExtensionAdapter(fake.vscode, { loadExporter: async () => realExporter });
   await adapter.activate(context);
-  const adapterResult = await adapter.exportAllSessions(context);
+  const adapterResult = await adapter.exportAllSessions(context, undefined, ["docx"]);
   const directManifest = JSON.parse(await fsp.readFile(directResult.manifestPath, "utf8"));
   const adapterManifest = JSON.parse(await fsp.readFile(adapterResult.manifestPath, "utf8"));
   for (const manifest of [directManifest, adapterManifest]) {
@@ -835,7 +954,335 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
   for (const session of directManifest.sessions) {
     assert.equal(await fsp.readFile(path.join(adapterOutput, session.markdown_file), "utf8"), await fsp.readFile(path.join(directOutput, session.markdown_file), "utf8"));
     assert.deepEqual(await fsp.readFile(path.join(adapterOutput, session.raw_export_file)), await fsp.readFile(path.join(directOutput, session.raw_export_file)));
+    assert.deepEqual(await fsp.readFile(path.join(adapterOutput, session.docx_file)), await fsp.readFile(path.join(directOutput, session.docx_file)), "VS Code and direct shared-core DOCX bytes must match");
   }
+
+  const directPdfResult = await realExporter.exportArchive({ codexHome: realCodexHome, scope: "all", outputDirectory: directPdfOutput, pathStyle: "readable", documentFormats: ["pdf"] });
+  const pdfFake = createFakeVscode({ config: { outputDirectory: adapterPdfOutput, codexHome: realCodexHome, pathStyle: "readable" } });
+  const pdfContext = createContext(temp);
+  const pdfAdapter = createExtensionAdapter(pdfFake.vscode, { loadExporter: async () => realExporter });
+  await pdfAdapter.activate(pdfContext);
+  const adapterPdfResult = await pdfAdapter.exportAllSessions(pdfContext, undefined, ["pdf"]);
+  const directPdfManifest = JSON.parse(await fsp.readFile(directPdfResult.manifestPath, "utf8"));
+  const adapterPdfManifest = JSON.parse(await fsp.readFile(adapterPdfResult.manifestPath, "utf8"));
+  assert.deepEqual(adapterPdfManifest.sessions.map(stableSessionMetadata), directPdfManifest.sessions.map(stableSessionMetadata), "VS Code and direct shared-core PDF metadata must match");
+  for (const session of directPdfManifest.sessions) {
+    assert.deepEqual(await fsp.readFile(path.join(adapterPdfOutput, session.pdf_file)), await fsp.readFile(path.join(directPdfOutput, session.pdf_file)), "VS Code and direct shared-core PDF bytes must match");
+  }
+
+  if (process.platform === "win32") {
+    const identityOutput = path.join(temp, "real-core-workspace-identity-output");
+    const workspaceVariant = `${oneWorkspace[0].toLowerCase()}${oneWorkspace.slice(1)}\\`;
+    const identityFake = createFakeVscode({ workspaceFolders: [folder(workspaceVariant)], config: { outputDirectory: identityOutput, codexHome: realCodexHome } });
+    const identityContext = createContext(temp);
+    let identityOptions;
+    const identityAdapter = createExtensionAdapter(identityFake.vscode, { loadExporter: async () => ({ ...realExporter, exportArchive(options) { identityOptions = options; return realExporter.exportArchive(options); } }) });
+    await identityAdapter.activate(identityContext);
+    const identityResult = await identityAdapter.exportCurrentWorkspace(identityContext);
+    assert.equal(identityResult.exportedSessionCount, 1);
+    assert.equal(identityOptions.workspacePath, workspaceVariant, "the adapter must pass uri.fsPath to the shared core without rewriting it");
+    assert.equal(identityFake.messages.some(message => message.message.startsWith("No sessions were recorded")), false, "a Windows-equivalent workspace spelling must not enter historical recovery");
+  }
+}
+
+assert.deepEqual(EXPORT_SCOPES.map(({ label, detail }) => ({ label, detail })), [
+  { label: "Current Workspace", detail: "Export sessions recorded for the folder currently open in VS Code" },
+  { label: "Project from Codex history…", detail: "Choose sessions recorded for a different, moved or renamed project folder" },
+  { label: "All Sessions", detail: "Export all local Codex sessions" },
+]);
+assert.deepEqual(DOCUMENT_FORMATS.map(item => item.label), ["Standard formats only", "Add DOCX", "Add PDF", "Add DOCX and PDF"]);
+
+// Historical recovery is resolved before profile, formats, or output and never stores a cwd alias.
+for (const mode of ["recover", "menu", "dismiss-recovery", "dismiss-picker", "dismiss-confirmation"]) {
+  const recordedVariants = ["C:\\Synthetic\\Historical", "c:/synthetic/historical/"];
+  const recorded = {
+    cwd: recordedVariants[0],
+    recordedPaths: recordedVariants,
+    sessionCount: 2,
+    sourceBytes: Math.round(5.3 * 1024 ** 3),
+    firstSessionAt: "2026-08-01T10:00:00.000Z",
+    lastSessionAt: "2026-08-02T10:00:00.000Z",
+  };
+  const modeOutput = path.join(temp, `historical-${mode}`);
+  let coreCalls = 0;
+  let selectedOptions;
+  let historicalConfirmed = false;
+  const fake = createFakeVscode({ workspaceFolders: [folder(oneWorkspace)], config: { outputDirectory: modeOutput },
+    warningSelector: (message) => {
+      if (message.startsWith("No sessions were recorded")) return mode === "dismiss-recovery" ? undefined : "Choose project from Codex history";
+      if (mode === "dismiss-confirmation") return "Cancel";
+      historicalConfirmed = true;
+      return "Export recorded sessions";
+    },
+    quickPickSelector: (items, options) => {
+      if (options.placeHolder === "Choose what to export") return items.find(item => item.scope === (mode === "menu" ? "recorded-project" : "project"));
+      if (options.title === "Choose a project folder from Codex history") return mode === "dismiss-picker" ? undefined : items[0];
+      return items[0];
+    },
+  });
+  const context = createContext(temp);
+  const adapter = createExtensionAdapter(fake.vscode, {
+    discoverRecordedProjectInventory: async () => ({ sessionCount: 2, projects: [recorded] }),
+    loadExporter: async () => ({ ...exporter, async exportArchive(options) {
+      coreCalls += 1;
+      selectedOptions = options;
+      assert.equal(historicalConfirmed, true, "historical confirmation must precede the core call");
+      assert.equal(await options.onSelectRecordedProject({ projects: [recorded], reason: "requested" }), recorded.cwd);
+      return exporter.exportArchive(options);
+    } }),
+  });
+  await adapter.activate(context);
+  const result = await adapter.exportFromQuickPick(context);
+  if (mode.startsWith("dismiss")) {
+    assert.equal(result, undefined);
+    assert.equal(coreCalls, 0);
+    assert.equal(context.globalState.values.size, 0);
+    assert.equal(fake.messages.some(message => message.type === "info" || message.type === "error"), false);
+    assert.equal(fs.existsSync(modeOutput), false, "selection cancellation must not create even a configured output folder");
+    assert.equal(fake.openDialogs.length, 0);
+  } else {
+    assert.equal(coreCalls, 1);
+    assert.equal(selectedOptions.scope, "recorded-project");
+    assert.equal(selectedOptions.recordedProjectPath, undefined);
+    assert.equal(typeof selectedOptions.onSelectRecordedProject, "function");
+    const picker = fake.quickPicks.find(entry => entry.options.title === "Choose a project folder from Codex history");
+    assert.equal(picker.options.placeHolder, "Choose a project folder from Codex history");
+    assert.equal(picker.items[0].label, recorded.cwd);
+    assert.equal(picker.items[0].description, "2 sessions · 5.3 GiB · 2026-08-01 – 2026-08-02");
+    assert.match(picker.items[0].detail, /^2 stored path variants:/);
+    for (const variant of recordedVariants) assert.ok(picker.items[0].detail.includes(variant));
+    const expectedWarning = `Export 2 sessions recorded under ${recorded.cwd}? This differs from the current workspace folder. Codex history may contain sessions from multiple logical projects under the same recorded folder.`;
+    const confirmation = fake.messages.find(message => message.message === expectedWarning);
+    assert.deepEqual(confirmation.actions, [{ modal: true }, "Export recorded sessions", "Cancel"]);
+    assert.ok(fake.quickPicks.indexOf(picker) < fake.quickPicks.findIndex(entry => entry.options.placeHolder === "Choose an export profile"));
+    assert.ok(fake.quickPicks.findIndex(entry => entry.options.placeHolder === "Choose an export profile") < fake.quickPicks.findIndex(entry => entry.options.placeHolder === "Choose optional document formats"));
+    assert.equal([...context.globalState.values.values()].includes(recorded.cwd), false);
+  }
+  if (mode !== "menu") {
+    const recovery = fake.messages.find(message => message.message.startsWith("No sessions were recorded"));
+    assert.equal(recovery.message, "No sessions were recorded for the current workspace folder. The project may have been moved, renamed or opened from another folder.");
+    assert.deepEqual(recovery.actions, ["Choose project from Codex history"]);
+  }
+}
+
+{
+  const expectedProject = { cwd: "C:\\Synthetic\\Stable", recordedPaths: ["C:\\Synthetic\\Stable"], sessionCount: 2, sourceBytes: 100, firstSessionAt: "2026-08-01T00:00:00.000Z", lastSessionAt: "2026-08-02T00:00:00.000Z" };
+  const changedProject = { ...expectedProject, sessionCount: 3 };
+  const changedOutput = path.join(temp, "historical-inventory-changed");
+  const fake = createFakeVscode({ workspaceFolders: [folder(oneWorkspace)], config: { outputDirectory: changedOutput }, warningSelector: () => "Export recorded sessions", quickPickSelector: (items, options) => {
+    if (options.placeHolder === "Choose what to export") return items.find(item => item.scope === "recorded-project");
+    return items[0];
+  } });
+  const adapter = createExtensionAdapter(fake.vscode, {
+    discoverRecordedProjectInventory: async () => ({ sessionCount: 2, projects: [expectedProject] }),
+    loadExporter: async () => ({ ...exporter, async exportArchive(options) {
+      await options.onSelectRecordedProject({ projects: [changedProject], reason: "requested" });
+      throw new Error("unreachable");
+    } }),
+  });
+  const context = createContext(temp);
+  await adapter.activate(context);
+  await assert.rejects(() => adapter.exportFromQuickPick(context), error => error?.code === "RECORDED_PROJECT_INVENTORY_CHANGED");
+  assert.equal(fake.messages.filter(message => message.type === "error").length, 1);
+  assert.equal(fake.messages.some(message => message.type === "info"), false);
+  assert.equal(fs.existsSync(changedOutput), false, "a changed confirmed inventory must fail before a synthetic core publishes output");
+}
+
+{
+  const bothOutput = path.join(temp, "both-document-formats");
+  let coreCalls = 0;
+  const diagnostics = [];
+  const fake = createFakeVscode({ config: { outputDirectory: bothOutput, diagnosticOutput: true }, quickPickSelector: (items, options) => {
+    if (options.placeHolder === "Choose what to export") return items.find(item => item.scope === "all");
+    if (options.placeHolder === "Choose an export profile") return items.find(item => item.profile === "readable");
+    return items.find(item => item.label === "Add DOCX and PDF");
+  } });
+  const context = createContext(temp);
+  const adapter = createExtensionAdapter(fake.vscode, { loadExporter: async () => ({ ...exporter, async exportArchive(options) {
+    coreCalls += 1;
+    options.onDiagnostic?.({ scope: "core", event: "discovery_start" });
+    options.onDiagnostic?.({ scope: "core", event: "routing_start" });
+    diagnostics.push(...(options.documentFormats || []));
+    return exporter.exportArchive(options);
+  } }) });
+  const activation = await adapter.activate(context);
+  await adapter.exportFromQuickPick(context);
+  assert.equal(coreCalls, 1, "DOCX and PDF must share one core export call");
+  assert.deepEqual(diagnostics, ["docx", "pdf"]);
+  const coreEvents = activation.getDiagnosticEvents().filter(event => event.scope === "core");
+  assert.equal(coreEvents.filter(event => event.event === "discovery_start").length, 1);
+  assert.equal(coreEvents.filter(event => event.event === "routing_start").length, 1);
+}
+
+{
+  const compressedDiscoveryHome = path.join(temp, "adapter-compressed-discovery");
+  const compressedDiscoveryRoot = path.join(compressedDiscoveryHome, "sessions", "2026", "09", "03");
+  await fsp.mkdir(compressedDiscoveryRoot, { recursive: true });
+  const compressedOnly = path.join(compressedDiscoveryRoot, "rollout-compressed-only.jsonl.zst");
+  const shadowedPlain = path.join(compressedDiscoveryRoot, "rollout-shadowed.jsonl");
+  const shadowedCompressed = `${shadowedPlain}.zst`;
+  await Promise.all([
+    fsp.writeFile(compressedOnly, "compressed-only-sentinel", "utf8"),
+    fsp.writeFile(shadowedPlain, "plain-sentinel", "utf8"),
+    fsp.writeFile(shadowedCompressed, "compressed-shadow-sentinel", "utf8"),
+  ]);
+  const metadataReads = [];
+  const fake = createFakeVscode({ config: { codexHome: compressedDiscoveryHome }, quickPickSelector: (items, options) => {
+    if (options.placeHolder === "Choose what to export") return items.find((item) => item.scope === "all");
+    if (options.placeHolder === "Choose an export profile") return undefined;
+    return items[0];
+  } });
+  const adapter = createExtensionAdapterCore(fake.vscode, { loadExporter: async () => ({
+    recordedPathIdentity: (value) => value,
+    async readSessionDiscoveryMeta(file) {
+      metadataReads.push(file);
+      const name = path.basename(file);
+      return { id: name, cwd: "C:\\Synthetic\\Compressed", timestamp: "2026-09-03T00:00:00.000Z", fileSize: 1 };
+    },
+  }) });
+  await adapter.activate(createContext(temp));
+  assert.equal(await adapter.exportFromQuickPick(createContext(temp)), undefined);
+  assert.deepEqual(metadataReads.sort(), [compressedOnly, shadowedPlain].sort(), "compressed rollouts must be discovered while a plain sibling shadows its compressed copy");
+  assert.equal(metadataReads.includes(shadowedCompressed), false);
+}
+
+{
+  const discoveryHome = path.join(temp, "adapter-metadata-discovery");
+  const activeRoot = path.join(discoveryHome, "sessions", "2026", "08", "30");
+  const archivedRoot = path.join(discoveryHome, "archived_sessions", "2026", "08", "29");
+  const discoveryOutput = path.join(temp, "adapter-metadata-output-must-not-exist");
+  const workspaceFile = path.join(oneWorkspace, "must-not-be-read.txt");
+  await fsp.mkdir(activeRoot, { recursive: true });
+  await fsp.mkdir(archivedRoot, { recursive: true });
+  await fsp.writeFile(workspaceFile, "workspace sentinel", "utf8");
+  const storedCurrent = `${oneWorkspace[0].toLowerCase()}${oneWorkspace.slice(1).replaceAll("\\", "/")}/`;
+  const historicalVariants = process.platform === "win32"
+    ? ["C:\\Synthetic\\Grouped", "c:/synthetic/grouped/"]
+    : ["/synthetic/Grouped", "/synthetic/Grouped/"];
+  const currentSource = path.join(activeRoot, "rollout-current.jsonl");
+  const currentMetadata = { type: "session_meta", timestamp: "2026-08-03T10:00:00Z", payload: { id: "adapter-current", cwd: storedCurrent, timestamp: "2026-08-03T10:00:00Z" } };
+  const largeConversationRecord = { type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "x".repeat(1024 * 1024) }] } };
+  await fsp.writeFile(currentSource, `${JSON.stringify(currentMetadata)}\n${JSON.stringify(largeConversationRecord)}\n`, "utf8");
+  for (let index = 0; index < historicalVariants.length; index += 1) {
+    const timestamp = `2026-08-0${index + 1}T10:00:00Z`;
+    const record = { type: "session_meta", timestamp, payload: { id: `adapter-historical-${index}`, cwd: historicalVariants[index], timestamp } };
+    await fsp.writeFile(path.join(activeRoot, `rollout-history-${index}.jsonl`), `${JSON.stringify(record)}\n`, "utf8");
+    if (index === 0) await fsp.writeFile(path.join(archivedRoot, "rollout-history-duplicate.jsonl"), `${JSON.stringify(record)}\n`, "utf8");
+  }
+  const corePath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "bin", "export-codex-project-chats.mjs");
+  const realExporter = await import(pathToFileURL(corePath).href);
+  const metadataReads = [];
+  const exporterWithObservedDiscovery = {
+    ...realExporter,
+    async readSessionDiscoveryMeta(file, options) {
+      const meta = await realExporter.readSessionDiscoveryMeta(file, options);
+      metadataReads.push({ file, bytesRead: meta.discoverySnapshot.bytesRead, fileSize: meta.fileSize });
+      return meta;
+    },
+  };
+  const adapterFsPaths = [];
+  const trackingFsp = {
+    ...fsp,
+    async readdir(candidate, options) { adapterFsPaths.push(path.resolve(candidate)); return fsp.readdir(candidate, options); },
+    async stat(candidate, options) { adapterFsPaths.push(path.resolve(candidate)); return fsp.stat(candidate, options); },
+  };
+  const fake = createFakeVscode({ workspaceFolders: [folder(oneWorkspace)], config: { codexHome: discoveryHome, outputDirectory: discoveryOutput }, quickPickSelector: (items, options) => {
+    if (options.placeHolder === "Choose what to export") return items.find(item => item.scope === "project");
+    if (options.placeHolder === "Choose an export profile") return undefined;
+    return items[0];
+  } });
+  const context = createContext(temp);
+  const adapter = createExtensionAdapterCore(fake.vscode, { fsp: trackingFsp, loadExporter: async () => exporterWithObservedDiscovery });
+  await adapter.activate(context);
+  assert.equal(await adapter.exportFromQuickPick(context), undefined);
+  assert.equal(fake.quickPicks.some(entry => entry.options.title === "Choose a project folder from Codex history"), false, "a canonical Current Workspace match must not load the historical picker");
+  assert.equal(fake.messages.some(message => message.message.startsWith("No sessions were recorded")), false);
+  assert.equal(metadataReads.length, 4, "active and archived files are probed once before duplicate-ID retention");
+  const bounded = metadataReads.find(entry => entry.file === currentSource);
+  assert.ok(bounded.bytesRead < bounded.fileSize / 4, "Current Workspace discovery must not read the large conversation tail");
+  assert.equal(adapterFsPaths.some(candidate => candidate === path.resolve(workspaceFile) || candidate.startsWith(`${path.resolve(oneWorkspace)}${path.sep}`)), false, "adapter discovery must never inspect workspace files");
+  assert.equal(fs.existsSync(discoveryOutput), false, "profile cancellation after successful metadata discovery must not create the configured output folder");
+
+  const historyFake = createFakeVscode({ workspaceFolders: [folder(oneWorkspace)], config: { codexHome: discoveryHome, outputDirectory: discoveryOutput }, quickPickSelector: (items, options) => {
+    if (options.placeHolder === "Choose what to export") return items.find(item => item.scope === "recorded-project");
+    if (options.title === "Choose a project folder from Codex history") return undefined;
+    return items[0];
+  } });
+  const historyAdapter = createExtensionAdapterCore(historyFake.vscode, { loadExporter: async () => realExporter });
+  await historyAdapter.activate(createContext(temp));
+  assert.equal(await historyAdapter.exportFromQuickPick(createContext(temp)), undefined);
+  const historyPicker = historyFake.quickPicks.find(entry => entry.options.title === "Choose a project folder from Codex history");
+  const grouped = historyPicker.items.find(item => item.detail.startsWith("2 stored path variants:"));
+  assert.ok(grouped, "canonical host-native spellings must form one visible project identity");
+  assert.match(grouped.description, /^2 sessions · \d+ bytes · 2026-08-01 – 2026-08-02$/);
+  for (const variant of historicalVariants) assert.ok(grouped.detail.includes(variant));
+  assert.equal(fs.existsSync(discoveryOutput), false);
+
+  const historyExportOutput = path.join(temp, "adapter-canonical-history-output");
+  const historyExportFake = createFakeVscode({
+    workspaceFolders: [folder(oneWorkspace)],
+    config: { codexHome: discoveryHome, outputDirectory: historyExportOutput, pathStyle: "readable", includeTools: false },
+    warningSelector: (_message, actions) => actions.find((action) => action === "Export recorded sessions"),
+    quickPickSelector: (items, options) => {
+      if (options.placeHolder === "Choose what to export") return items.find(item => item.scope === "recorded-project");
+      if (options.title === "Choose a project folder from Codex history") return items.find(item => item.detail.startsWith("2 stored path variants:"));
+      if (options.placeHolder === "Choose an export profile") return items.find(item => item.profile === "readable");
+      if (options.placeHolder === "Choose optional document formats") return items.find(item => item.label === "Standard formats only");
+      return items[0];
+    },
+  });
+  const historyExportAdapter = createExtensionAdapterCore(historyExportFake.vscode, { loadExporter: async () => realExporter });
+  await historyExportAdapter.activate(createContext(temp));
+  const historyExportResult = await historyExportAdapter.exportFromQuickPick(createContext(temp));
+  assert.equal(historyExportResult.exportedProjectCount, 1, "VS Code historical selection must preserve one canonical project group");
+  const historyExportManifest = JSON.parse(await fsp.readFile(path.join(historyExportOutput, "manifest.json"), "utf8"));
+  assert.deepEqual(new Set(historyExportManifest.sessions.map((session) => session.project)), new Set(historicalVariants));
+  assert.equal(new Set(historyExportManifest.sessions.map((session) => session.markdown_file.replaceAll("\\", "/").split("/")[1])).size, 1);
+  assert.ok(historyExportFake.messages.some((message) => message.type === "info" && message.message.startsWith("Exported 2 sessions across 1 project to ")));
+}
+
+{
+  const multiOutput = path.join(temp, "multi-root-cancelled");
+  const fake = createFakeVscode({ workspaceFolders: [folder(oneWorkspace), folder(twoWorkspace)], config: { outputDirectory: multiOutput }, quickPickSelector: (items, options) => {
+    if (options.placeHolder === "Choose what to export") return items.find(item => item.scope === "project");
+    if (options.placeHolder === "Choose the local workspace folder to export") return items.find(item => item.folder.uri.fsPath === twoWorkspace);
+    if (options.placeHolder === "Choose an export profile") return undefined;
+    return items[0];
+  } });
+  const adapter = createExtensionAdapter(fake.vscode, { discoverRecordedProjectInventory: async () => ({ sessionCount: 1, projects: [{ cwd: twoWorkspace, recordedPaths: [twoWorkspace], sessionCount: 1, sourceBytes: 1, firstSessionAt: "2026-08-01T00:00:00.000Z", lastSessionAt: "2026-08-01T00:00:00.000Z" }] }), loadExporter: async () => exporter });
+  await adapter.activate(createContext(temp));
+  assert.equal(await adapter.exportFromQuickPick(createContext(temp)), undefined);
+  assert.equal(fake.quickPicks.some(entry => entry.options.title === "Choose a project folder from Codex history"), false);
+  assert.equal(fs.existsSync(multiOutput), false);
+}
+
+{
+  const cancelledOutput = path.join(temp, "discovery-cancelled-output");
+  let sawAbort = false;
+  const fake = createFakeVscode({ cancelProgressImmediately: true, config: { outputDirectory: cancelledOutput }, quickPickSelector: (items, options) => options.placeHolder === "Choose what to export" ? items.find(item => item.scope === "all") : items[0] });
+  const adapter = createExtensionAdapter(fake.vscode, { discoverRecordedProjectInventory: async ({ abortSignal }) => {
+    await new Promise(resolve => setImmediate(resolve));
+    sawAbort = abortSignal.aborted;
+    throw Object.assign(new Error("Cancelled"), { code: "EXPORT_CANCELLED" });
+  }, loadExporter: async () => ({ async exportArchive() { throw new Error("must not run"); } }) });
+  await adapter.activate(createContext(temp));
+  assert.equal(await adapter.exportFromQuickPick(createContext(temp)), undefined);
+  assert.equal(sawAbort, true);
+  assert.equal(fake.messages.length, 0, "pre-export discovery cancellation is a silent picker-stage cancellation");
+  assert.equal(fs.existsSync(cancelledOutput), false);
+}
+
+{
+  let coreCalls = 0;
+  const fake = createFakeVscode({ quickPickSelector: (items, options) => {
+    if (options.placeHolder === "Choose what to export") return items.find(item => item.scope === "all");
+    return items[0];
+  }, openDialogResult: [] });
+  const adapter = createExtensionAdapter(fake.vscode, { loadExporter: async () => ({ async exportArchive() { coreCalls += 1; } }) });
+  await adapter.activate(createContext(temp));
+  assert.equal(await adapter.exportFromQuickPick(createContext(temp)), undefined);
+  assert.equal(coreCalls, 0);
+  assert.equal(fake.messages.some(message => message.type === "info" || message.type === "error" || message.message === "No export folder selected."), false);
 }
 
 const after = await fsp.readFile(sourceFile, "utf8");

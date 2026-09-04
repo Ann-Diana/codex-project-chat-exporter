@@ -8,190 +8,146 @@ The default locations currently observed are:
 - archived sessions: `~/.codex/archived_sessions`
 - thread-name index: `~/.codex/session_index.jsonl`
 
-On Windows, `~` normally means `C:\Users\<you>`.
+On Windows, `~` normally means `C:\Users\<you>`. These locations and formats are internal Codex implementation details and may change.
 
-These paths and file formats are internal Codex implementation details and may change.
+## Does the exporter upload anything or read my workspace files?
 
-## Windows blocks the `.cmd` launcher. Does it need administrator rights?
+The exporter has no uploader, telemetry or application-level remote fetch for export content. It reads the configured local Codex session stores and session index. Selecting a workspace or a historical project does not authorize it to enumerate or copy arbitrary project files.
 
-No. The exporter does not require administrator rights.
+Embedded image data stored in session records can be decoded. Local-path and remote attachment references are not copied or downloaded. Controlled HTTP and HTTPS hyperlinks can remain clickable in derived documents without being opened during export.
 
-A ZIP downloaded from the internet can carry Windows' Mark of the Web. Extracted `.cmd` files may inherit that mark and be blocked by Smart App Control or Attachment Manager before the launcher starts.
+A configured output path can still reside on network-backed storage. The VS Code extension rejects UNC and Windows device paths, but mapped drives cannot be identified reliably in every configuration. Choose a known local destination when locality matters.
 
-Preferred fix:
+## What are Complete, Readable and Source snapshots?
 
-1. Delete the already extracted folder.
-2. Right-click the downloaded ZIP, choose **Properties**, select **Unblock** / **Zulassen**, and apply the change.
-3. Extract the ZIP again.
+- **Complete** (`complete`) creates Markdown transcripts, full indexes, both manifests, deduplicated assets and byte-identical Raw snapshots verified at export time. Unmatched `replacement_history` content can appear under `Additional stored context`.
+- **Readable** (`readable`) creates Markdown transcripts, full indexes, both manifests and deduplicated assets without new Raw snapshots. It suppresses `replacement_history` from every derived reading view without changing source data.
+- **Source snapshots** (`source-snapshots`) creates a reduced responsive HTML index, both manifests, deduplicated assets and verified Raw snapshots without Markdown transcripts or `index.md`. Explicit DOCX or PDF additions use the forensic labelled stored-context policy.
 
-Alternatively, unblock an existing extracted folder from PowerShell:
+Use Readable for ordinary browsing. Use Complete when readable views and source snapshots belong in one generation. Use Source snapshots when source preservation with minimal indexing is the goal.
 
-```powershell
-Get-ChildItem .\codex-project-chat-exporter -Recurse -File | Unblock-File
-```
+CLI `--no-raw` is a legacy shorthand for Readable only when no explicit `--profile` is supplied. It is not an independent Raw switch. Every profile keeps archive format version 1.
 
-Review downloaded code before unblocking it. Do not disable Smart App Control and do not use **Run as administrator** as the normal workaround.
+## Is `pathStyle` another profile?
 
-## Why is an archived chat not shown as a separate project under `--list`?
+No. Path style controls directory and filename presentation only. Short paths such as `md/p001-project/s0001.md` are the default for Windows portability. `--readable-paths` and the VS Code **Path Style** setting choose longer timestamp and title-based names without changing content selection.
 
-`--list` shows unique project/work folders, grouped by the stored `cwd`. Active and archived sessions with the same `cwd` therefore appear on one line with separate counts. The chat title is not used for this grouping.
+## How do I create Word and PDF files?
 
-For Windows users, double-click `export-codex-project-chats.cmd` and choose:
+Use `--format docx`, `--format pdf` or `--format docx,pdf`. The reverse list `pdf,docx` normalizes to the same canonical order. In VS Code choose **Add DOCX**, **Add PDF** or **Add DOCX and PDF**.
 
-```text
-[4] List every detected session
-```
+Each selected session receives its own document. DOCX is editable. PDF is rendered directly from the shared document model and does not use Word, LibreOffice or DOCX conversion. A combined all-session document is not produced.
 
-CLI users can run:
+PNG and JPEG images can be embedded. GIF, WebP and `.bin` remain labelled attachment references in DOCX and PDF. Existing destination files are not silently replaced.
 
-```powershell
-node .\bin\export-codex-project-chats.mjs --list-sessions
-```
+See [Shared document model and DOCX](docs/document-model-and-docx.md) and [Shared document model and PDF](docs/document-model-and-pdf.md).
 
-Do not paste that command into the `.cmd` file. The numbered launcher menu already invokes it.
+## Why can DOCX and PDF have different page counts?
 
-If an archived JSONL file exists but is still absent, choose launcher option:
+They use different layout engines and page-breaking rules. Equal page counts are not expected. Both renderers receive the same ordered shared document model with the same roles, headings, lists, code blocks, text hashes and selected images. A true content omission is a failure even when layout-only page and line breaks differ.
 
-```text
-[5] Diagnose active and archived session detection
-```
+## What happens to images and duplicate assets?
 
-The diagnostic output shows the exact archived-session folder, the number of JSONL files found, and files with incomplete metadata. The exporter also recovers IDs from normal rollout filenames so that an archived file is not silently discarded merely because its `session_meta` record is missing or malformed.
+The shared reading selection decides both visible text and visible assets. Valid embedded PNG, JPEG, GIF and WebP bytes are stored by SHA-256 in the export-local `assets/` directory. One physical asset file can support several legitimate visible uses.
 
-Duplicate active and archived copies with the same session ID are shown once. The active copy takes precedence because both files represent the same Codex session. Different IDs are never deduplicated merely because their titles are identical.
+Verified technical mirror pairs render once. The exporter does not merge uses merely because their hashes match, so the same image can appear again in a different genuine turn. `assets/manifest.json` records provenance, classification, role, record type, content type, timestamp, tool origin and mirror relationships.
 
-## Does the exporter upload anything?
+Unknown, truncated, active or MIME-spoofed payloads are retained as non-renderable `.bin` files when selected. No workspace or preview file is read after the fact.
 
-No built-in uploader, telemetry, or application-level HTTP, web, or API client is used. The exporter reads source files and writes to the configured filesystem destination.
+## What does Include Tools change?
 
-A configured path can still reside on network-backed storage. The VS Code extension rejects UNC and Windows device paths, but mapped network drives cannot be identified reliably in every configuration. Choose a known local destination when locality matters.
+With tools disabled, Tool, Browser and `view_image`-only records plus their assets are excluded from Markdown, responsive HTML, DOCX and PDF reading views. A normal user or assistant message is not excluded merely because it also contains an image.
 
-## How does this differ from Codex's native `/export`?
+With tools enabled, those technical records can appear once after structural mirror canonicalisation. Raw JSONL is unchanged by the tool filter.
 
-[Codex 0.148.0](https://github.com/openai/codex/releases/tag/rust-v0.148.0) added [`/export`](https://github.com/openai/codex/pull/37358) for exporting the current TUI conversation to the clipboard or a Markdown file. It is the better fit when one current TUI conversation is the intended result.
+## What happens to `replacement_history`?
 
-Codex Project Chat Exporter instead bulk-exports detected local sessions for one project/work folder or across all projects, including archived sessions. It creates a static index, manifest, and optional Raw snapshots verified at export time. Its optional VS Code extension provides the corresponding **Current Workspace** and **All Sessions** workflows. It does not try to improve upon the native export's transcript fidelity.
+`replacement_history` is stored compaction context rather than an ordinary visible turn. Readable suppresses it from every derived reading view. Complete retains unmatched content once under the explicit heading `Additional stored context`. Source snapshots preserve it in Raw and use the same labelled forensic policy if DOCX or PDF is explicitly requested. Nothing is silently deleted from source JSONL.
 
-## Does it export both active and archived sessions?
+## Can steering or unclassified records appear?
 
-Yes, by default. Use `--no-archived` to scan only the active sessions directory.
+Yes. Stored inputs or intermediate states can exist in JSONL even when the Codex interface does not show them as ordinary messages. The exporter classifies only what the record structure supports. It can label direct user turns, subagent inputs, automatic runtime contexts and unclassified user-role records without guessing from timing.
 
-Custom locations can be supplied with:
-
-```text
---sessions-dir <dir>
---archived-dir <dir>
-```
-
-## Why can the export contain more sessions than the Codex UI shows?
-
-The exporter scans local session files directly. A valid local rollout file can exist even when the current UI filters, groups, hides, or no longer lists the corresponding thread.
+This is not a universal statement about how every Codex UI version displays steering. Review derived views and Raw separately when provenance matters.
 
 ## How are sessions assigned to projects?
 
-The exporter uses the working directory (`cwd`) stored in the session metadata. The original project folder does not need to exist during export.
+The exporter uses the `cwd` stored in first-record session metadata. The original project folder does not need to exist.
 
-## Where do titles come from?
+**Current Workspace** and CLI `--recorded-project` use exact lexical path identity. Windows drive-letter case, slash direction, trailing separators and equivalent local `\\?\` drive or UNC forms are normalized. Basenames, substrings, descendants, filesystem existence and `realpath` are not used.
 
-The exporter checks `session_index.jsonl`, but does not automatically trust an indexed title that appears to have been derived from a technical context record. It validates the title against classified session events, otherwise derives a display title from the first confirmed direct user turn or uses a neutral deterministic fallback.
+CLI `--project` remains a fuzzy legacy name or path search. It is not automatic moved-project recovery.
 
-Derived titles are only export labels. They do not modify Codex.
+## Why can one recorded path contain mixed logical projects?
 
-## What is the difference between the Markdown view and `raw/`?
+Codex can store several sessions under the same broad `cwd` even when the work later represents different logical projects. Exact path identity cannot split those sessions by meaning. The historical picker therefore shows the recorded path, counts, bytes, date range and stored spelling variants, then requires confirmation when it differs from the current workspace.
 
-`md/` in short-path exports, or `markdown/` in readable-path exports, contains classified reading views. Confirmed direct user turns, subagent inputs, assistant messages, runtime contexts, and uncertain user-role records are labelled separately. Tool details are omitted unless `--include-tools` is used.
+The exporter does not inspect conversation text to invent project boundaries and has no per-session historical picker.
 
-When enabled, `raw/` contains byte-identical JSONL snapshots checked against stable source hashes during export and is the canonical lossless representation. Markdown and HTML are derived views, and classification never changes raw events. Raw filenames may be collision-safe export names; `manifest.json` preserves the portable source mapping and verification metadata.
+## Why can the export contain more sessions than the Codex UI shows?
 
-`raw_verified_at` records when the `VERIFIED_AT_EXPORT` hash check completed. It does not assert continuing integrity: Raw files remain mutable afterward, so compare their current hash with `raw_sha256` to detect changes. Any future importer must repeat that check and reject mismatches. This is not permanent tamper resistance, sealing, or import readiness.
+The exporter scans local session files directly. A valid rollout can remain active or archived even if the current UI filters, groups, hides or no longer lists it. Duplicate active and archived copies with the same session ID are retained once, with the active copy preferred. Different IDs are not merged merely because their titles match.
 
-Both raw files and the manifest can contain sensitive local data. See the [archive format version 1 specification](docs/archive-format-v1.md) for snapshot fields, event pairing, attachment identity, fail-safe classification, and import limits.
+## Where do titles and model histories come from?
 
-## Does Markdown secret masking make the files safe to share?
+The exporter checks `session_index.jsonl` and validates title provenance against session records. Otherwise it uses the first confirmed direct user turn or a neutral deterministic fallback. Display titles do not modify Codex.
 
-No. The redaction patterns catch only some common token-shaped secrets and long base64-like values.
+Confirmed turn-level runtime model fields form the chronological model history. Repeated adjacent values are collapsed. Models from separate subagent sessions are not merged into the parent session.
 
-They do not reliably remove paths, names, email addresses, IP addresses, customer data, source code, proprietary information, or every credential format.
+## Is Raw JSONL safe to share?
 
-## Why is an empty `raw/` folder still present after using `--no-raw`?
+No. When included, Raw is a byte-identical snapshot checked against source hashes at export time. It can contain private messages, usernames, absolute paths, runtime context, steering data, unclassified records, code and attachments. It is canonical source material, not a share-safe derivative.
 
-A previous manifest describes archive membership but is not trusted as proof that files may be deleted or replaced. An unchanged repetition can reuse byte-identical verified files; differing pre-existing files cause the new generation to fail closed, and files no longer needed by the new export remain untouched. If a run fails after generation changes begin, `EXPORT_INCOMPLETE.txt` remains and invalidates the manifest and indexes until the folder is manually reviewed or replaced with a new empty destination.
+`raw_verified_at` and `VERIFIED_AT_EXPORT` describe one completed check. Raw files remain mutable afterward, so later integrity-sensitive use must hash them again and compare with `raw_sha256`.
 
-## Which export profile should I use?
+Markdown secret masking is also best effort. It does not reliably remove names, paths, addresses, customer data, proprietary text or every credential shape. Review every generated file before sharing.
 
-- **Complete** (`complete`) is the default and creates `raw/` checked at export time, Markdown transcripts, `index.html`, `index.md`, `manifest.json`, and `README.txt`.
-- **Readable** (`readable`) creates Markdown transcripts, both indexes, `manifest.json`, and `README.txt` without new Raw snapshots.
-- **Source snapshots** (`source-snapshots`) creates `raw/` checked at export time, a reduced `index.html`, `manifest.json`, and `README.txt` without Markdown transcripts or `index.md`. The reduced index uses project, storage, start time, session ID, and Raw links rather than unavailable title or model metadata.
+## What happens when I cancel an export?
 
-Use **Readable** when the goal is reading or searching transcripts without creating new Raw snapshots. **Complete** and **Source snapshots** can be substantially larger and slower because they copy Raw JSONL and verify it with SHA-256.
+The direct MJS CLI turns the first SIGINT into a shared abort request and exits with code 130 after cleanup. The VS Code progress notification uses the same core abort path. Discovery, session streaming, document-model building, asset work, renderer loops and publication contain cancellation checks.
 
-An explicit CLI `--profile` wins over the legacy switch. Without an explicit profile, CLI `--no-raw` is only a compatibility shorthand for `readable`. The VS Code extension asks for the profile on every export.
+One synchronous third-party packaging call cannot be interrupted from inside JavaScript. Cancellation is checked immediately before and after that call. If publication already began, the output folder can retain `EXPORT_INCOMPLETE.txt`. That marker invalidates the whole generation: do not use its manifests or indexes as a regular archive. Run-owned temporary files are removed and unrelated existing files are not deleted.
 
-## How can I diagnose a slow export without logging chat content?
+Closing a picker before export starts is silent and does not create the selected output folder.
 
-Add `--performance-profile <absolute-json-file>` to a CLI export only when diagnosing performance. It performs additional analysis, can substantially slow the export, and is not intended for normal exports. The privacy-reduced JSON profile records phase times, byte counts, shortened session IDs, sampled RSS, attachment counts/volumes, and snapshot retries, but no message text, full source/output/attachment paths, URLs, or attachment payloads. It distinguishes data URLs, signature-confirmed unprefixed PNG/JPEG Base64, local references, remote references, and unknown forms. Shortened IDs and operational metadata can still be sensitive, so review the file before sharing it.
+## How does the PDF renderer handle missing glyphs?
 
-The optional VS Code diagnostic output follows the same message-free, path-redacted model and is disabled by default. The normal VS Code output channel is different: it records complete output, HTML-index, and manifest paths for usability and can therefore contain sensitive local paths.
+PDF uses bundled hash-verified Noto text, monospace, symbol and monochrome emoji fonts. Supported graphemes remain searchable and copyable through ToUnicode mappings.
 
-Processing is scoped one session at a time, but JSONL parsing still materializes one complete line. A single unusually large line, especially one containing an embedded image, can therefore determine peak memory. The current optimization deliberately avoids forced global garbage collection and a riskier full streaming-parser rewrite.
+A valid grapheme outside the bundled chain receives a visible deterministic marker such as `[unsupported glyph U+10FFFF]`. A multi-codepoint marker lists every code point in order, including variation selectors or joiners when present. The exporter does not claim a true glyph for all Unicode. An unpaired UTF-16 surrogate fails closed.
+
+## How does the exporter handle large sessions?
+
+Sessions are processed sequentially. The bounded JSONL reader streams large strings and incrementally decodes embedded Base64 data. The exporter does not retain the whole source collection in memory.
+
+One unusually large ordinary text field, the visible document model for the current session, renderer page state and font/image subsetting can still affect peak memory. Performance depends on source size, visible content, page count and selected formats. Use `--performance-profile <absolute-json-file>` only for local diagnosis; it adds work and can slow the export.
 
 ## Why does the exporter refuse an output folder?
 
-It refuses to write into its own tool/repository directory by default. This reduces the risk of committing private exports to GitHub.
-
-Choose another folder, for example:
+The exporter refuses source/output overlap, unsupported aliases and its own repository by default. It also uses `.codex-export.lock` to prevent concurrent writes to one destination. Choose a new empty local directory such as:
 
 ```powershell
 node .\bin\export-codex-project-chats.mjs --all --out C:\cx\codex-export
 ```
 
-For deliberate local testing only, use `--allow-output-in-tool-dir`.
+If a lock remains after a crash, first prove no export is running. Inspect its PID and start time, then remove only that confirmed stale lock file. Do not perform broad recursive cleanup.
 
-The exporter also rejects a destination that overlaps a source directly or through a supported alias/link check. A per-folder `.codex-export.lock` prevents two exports from writing to the same destination concurrently.
+## Windows blocks the `.cmd` launcher. Does it need administrator rights?
 
-If a lock remains after a crash, do not delete the output folder or perform recursive cleanup. First ensure no export process is running, inspect the PID and start time stored in `.codex-export.lock`, and remove only that confirmed stale lock file.
+No. The exporter does not require administrator rights. A downloaded ZIP can carry Mark of the Web. Prefer unblocking the ZIP in **Properties** before extracting it again. Do not disable Smart App Control or use **Run as administrator** as the normal workaround.
+
+Alternatively, after reviewing the code, unblock an existing extracted folder:
+
+```powershell
+Get-ChildItem .\codex-project-chat-exporter -Recurse -File | Unblock-File
+```
 
 ## PowerShell says `node` was not found. What now?
 
-Install Node.js 18 or newer, or use the Windows launcher. The launcher also checks one known Codex Desktop bundled-runtime location as a fallback.
+Install a supported Node.js 22 or 24 runtime or use the Windows wrapper. The wrapper can also use one known bundled Codex Desktop Node runtime when it meets the same requirement.
 
-## Can the tool folder be moved?
+## Does it restore sessions or export cloud-only chats?
 
-Yes. Keep the launcher and `bin/` folder together:
+No. There is no import or validated Codex roundtrip. The exporter handles only locally stored Codex session files and does not export ordinary ChatGPT web conversations or cloud-only tasks without a local session.
 
-```text
-codex-project-chat-exporter\
-├─ export-codex-project-chats.cmd
-└─ bin\
-   └─ export-codex-project-chats.mjs
-```
-
-## Why are output filenames short?
-
-Short paths are more reliable when exports are copied, nested, zipped, and unzipped on Windows. `manifest.json` maps the short names back to the original sessions.
-
-Use `--readable-paths` when longer names are preferable.
-
-## Is `index.html` a full-text search engine?
-
-No. Complete and Readable filter the exported session list by metadata such as project, title, date, model, and active/archived status. Source snapshots intentionally omits title, model, and Markdown columns and filters only its reduced metadata.
-
-Search transcript content in the exported Markdown files with your editor, operating-system search, `rg`, or another dedicated session-search tool.
-
-## Are image attachments exported?
-
-The reading views export textual direct-user, assistant, subagent, runtime-context, and unclassified user-role records. They do not extract embedded images or copy attachment files. When raw export is enabled, the canonical JSONL snapshot still preserves whatever attachment data or references existed in the source events.
-
-## Can this restore sessions into Codex on another computer?
-
-No import is implemented. Raw snapshots verified at export time and their portable manifest metadata prepare source material for possible future tooling, but no Codex roundtrip has been validated and Codex does not provide a documented public import interface for rebuilding its complete UI state, indexes, and project associations. A future importer must first compare each current Raw hash with `raw_sha256`.
-
-Treat this as local preservation and migration preparation, not as a guaranteed one-click restore mechanism. See the [format specification](docs/archive-format-v1.md#import-boundary) for the exact boundary.
-
-## Does it export normal ChatGPT chats or cloud-only Codex tasks?
-
-No. It exports only Codex session files available locally on disk.
-
-## Why did the FAQ open automatically?
-
-The Windows launcher opens this file when Node.js cannot be found or when the export command fails.
+See [archive format version 1](docs/archive-format-v1.md) for the exact import boundary.

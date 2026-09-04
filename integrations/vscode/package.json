@@ -2,7 +2,7 @@
   "name": "codex-project-chat-exporter-vscode",
   "displayName": "Codex Project Chat Exporter",
   "description": "Experimental local Visual Studio Code interface for project-aware export of active and archived Codex sessions.",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "publisher": "ann-diana",
   "license": "MIT",
   "repository": {
@@ -14,7 +14,7 @@
   },
   "homepage": "https://github.com/Ann-Diana/codex-project-chat-exporter#readme",
   "engines": {
-    "vscode": "^1.92.0"
+    "vscode": "^1.101.0"
   },
   "categories": [
     "Other"
@@ -27,6 +27,7 @@
     "sessions",
     "JSONL",
     "Markdown",
+    "PDF",
     "project-aware"
   ],
   "main": "./src/extension.cjs",
@@ -87,7 +88,7 @@
           "type": "boolean",
           "default": false,
           "scope": "application",
-          "description": "Include potentially sensitive tool call input and output in the derived Markdown reading views."
+          "description": "Include potentially sensitive Tool, Browser and view_image content and their assets in Markdown, HTML, DOCX and PDF reading views. When disabled, those records and assets are excluded from reading views."
         },
         "codexProjectChatExporter.diagnosticOutput": {
           "type": "boolean",
@@ -98,7 +99,7 @@
     }
   },
   "scripts": {
-    "test": "node ./tests/extension-adapter.test.mjs",
+    "test": "node ./tests/extension-adapter.test.mjs && node ./tests/packaged-vsix.test.mjs",
     "package:vsix": "node ./scripts/build-vsix.mjs"
   },
   "devDependencies": {}

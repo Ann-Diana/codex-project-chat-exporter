@@ -14,6 +14,7 @@ import {
   sha256File,
   validatedSourceRelativePath,
 } from "../bin/export-codex-project-chats.mjs";
+import { SESSION_READER_IMPLEMENTATION } from "../lib/session-record-reader.mjs";
 
 function sessionMeta(overrides = {}) {
   return { type: "session_meta", timestamp: "2026-08-16T10:00:00.000Z", payload: { id: "session-test", cwd: "C:\\Projects\\alpha", timestamp: "2026-08-16T10:00:00.000Z", source: "vscode", thread_source: "user", ...overrides } };
@@ -122,6 +123,23 @@ async function fileIdentity(file) {
   assert.equal(result.classifications.get(2).kind, USER_RECORD_KIND.SUBAGENT_INPUT);
   assert.equal(result.firstDirectUserText, "");
   assert.equal(resolveDisplayTitle({ id: "session-test", sessionKind: result.sessionKind, firstUserText: "", eventAnalysis: result }, "# AGENTS.md instructions").source, "neutral_subagent");
+}
+
+{
+  const direct = classify([sessionMeta({ source: "vscode", thread_source: "user", parent_thread_id: undefined, forked_from_id: undefined })]);
+  assert.equal(direct.sessionKind, SESSION_KIND.DIRECT_USER, "thread_source=user without parent or fork proves a direct main session");
+
+  const coupled = classify([sessionMeta({ source: "vscode", thread_source: "user", parent_thread_id: "parent-session" })]);
+  assert.equal(coupled.sessionKind, SESSION_KIND.SUBAGENT, "an explicit parent must override the old direct-user heuristic");
+
+  const fork = classify([sessionMeta({ source: "vscode", thread_source: "user", forked_from_id: "parent-session" })]);
+  assert.equal(fork.sessionKind, SESSION_KIND.FORK, "an explicit fork origin must not be classified as direct user");
+
+  const contradictory = classify([sessionMeta({ source: { subagent: { other: "review" } }, thread_source: "user" })]);
+  assert.equal(contradictory.sessionKind, SESSION_KIND.UNKNOWN, "contradictory explicit origin evidence must fail closed");
+
+  const missing = classify([{ type: "turn_context", payload: { model: "gpt-5.5" } }]);
+  assert.equal(missing.sessionKind, SESSION_KIND.UNKNOWN, "missing session_meta must not fall back to a direct-user claim");
 }
 
 {
@@ -383,7 +401,8 @@ try {
   const changedAfterRoutingSource = path.join(temp, "changed-after-routing.jsonl");
   const changedAfterRoutingDestination = path.join(temp, "raw", "changed-after-routing.jsonl");
   await fs.writeFile(changedAfterRoutingSource, "AAAA", "utf8");
-  const staleRouting = await readSessionRoutingMeta(changedAfterRoutingSource);
+  await assert.rejects(() => readSessionRoutingMeta(changedAfterRoutingSource), (error) => error?.code === "SESSION_JSONL_INVALID" && error?.recordNumber === 1);
+  const staleRouting = await readSessionRoutingMeta(changedAfterRoutingSource, { implementation: SESSION_READER_IMPLEMENTATION.LEGACY_REFERENCE });
   await fs.writeFile(changedAfterRoutingSource, "BBBB", "utf8");
   const currentStat = await fs.stat(changedAfterRoutingSource);
   staleRouting.routingSnapshot.beforeSizeBytes = currentStat.size;
@@ -402,7 +421,7 @@ try {
   assert.ok(afterRoutingDiagnostics.some((event) => event.reason === "HASH_MISMATCH"), "size and mtime alone must never establish snapshot integrity");
 
   const manipulatedDestination = path.join(temp, "raw", "manipulated.jsonl");
-  const manipulatedRouting = await readSessionRoutingMeta(changedAfterRoutingSource);
+  const manipulatedRouting = await readSessionRoutingMeta(changedAfterRoutingSource, { implementation: SESSION_READER_IMPLEMENTATION.LEGACY_REFERENCE });
   await assert.rejects(() => copyStableRawSnapshot(changedAfterRoutingSource, manipulatedDestination, {
     maxAttempts: 1,
     routingSnapshot: manipulatedRouting.routingSnapshot,
@@ -424,7 +443,7 @@ try {
   await assert.rejects(() => fs.stat(replacedAfterRenameDestination), /ENOENT/, "an equal-size replacement after rename must never retain verified output");
 
   const incompleteDestination = path.join(temp, "raw", "incomplete.jsonl");
-  const incompleteRouting = await readSessionRoutingMeta(changedAfterRoutingSource);
+  const incompleteRouting = await readSessionRoutingMeta(changedAfterRoutingSource, { implementation: SESSION_READER_IMPLEMENTATION.LEGACY_REFERENCE });
   await assert.rejects(() => copyStableRawSnapshot(changedAfterRoutingSource, incompleteDestination, {
     maxAttempts: 1,
     routingSnapshot: incompleteRouting.routingSnapshot,
@@ -575,7 +594,7 @@ try {
   assert.deepEqual(await fs.readFile(changedAfterRoutingSource), sourceBytesBeforeIdentityAttacks);
 
   const countedDestination = path.join(temp, "raw", "counted.jsonl");
-  const countedRouting = await readSessionRoutingMeta(changedAfterRoutingSource);
+  const countedRouting = await readSessionRoutingMeta(changedAfterRoutingSource, { implementation: SESSION_READER_IMPLEMENTATION.LEGACY_REFERENCE });
   const hashCalls = [];
   const countedDiagnostics = [];
   const counted = await copyStableRawSnapshot(changedAfterRoutingSource, countedDestination, {

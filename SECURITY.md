@@ -14,7 +14,15 @@ The required invariants are:
 - source and output remain separate across canonical paths and supported link/alias checks;
 - temporary files are unique to and verifiably owned by the current run;
 - cleanup removes only files proven to belong to that run;
+- the target filesystem passes an in-place exclusive hard-link identity/content probe before session streams are opened;
+- decoded asset filenames and types come only from decoded SHA-256 and a bounded internal raster allowlist; unknown or active content is never rendered automatically;
+- DOCX permits only bounded canonical HTTP/HTTPS hyperlink relationships; external image/media/resource relationships, local or active link schemes, macros, and other active content are rejected, and remote targets are never fetched;
+- PDF permits only bounded canonical HTTP/HTTPS URI actions; external images, file/launch/JavaScript actions, forms, embedded files, and other active content are not produced, and remote targets are never fetched;
+- PDF validation parses the classic cross-reference table, object dictionaries, escaped names and strings, references, and exact stream lengths. Binary stream bytes and literal text are not action names. Unsupported incremental updates, encryption, object streams, and xref streams fail closed; this is validation of generated PDFKit output, not a general PDF import API;
+- PDF fonts are repository-local, hash-verified Noto assets; no operating-system font lookup is performed. Valid graphemes use the deterministic bundled symbol/emoji/monospace fallback chain. Multi-codepoint shaping must preserve every code point in order; an unsupported complete grapheme receives one visible PDF-only `[unsupported glyph …]` marker listing all of its code points. Invalid unpaired UTF-16 surrogates still fail closed with session ID and code unit only;
+- existing asset targets are rehashed, size/type checked, and never overwritten;
 - invocation contexts never mix, and concurrent exports to one destination are rejected;
+- project discovery tokenizes only bounded first-record `session_meta` or `turn_context` metadata and never scans later JSONL conversation records to infer a path; Windows workspace identity normalizes only lexical absolute-path representation differences and never performs basename, descendant, fuzzy or filesystem matching; recorded-project recovery uses only an explicitly selected exact cwd from that inventory, with adapter confirmation for a different workspace identity; stored cwd values never authorize filesystem collection or automatic fallback;
 - source changes cause a retry or fail-closed error;
 - `raw_sha256` and `raw_verified_at` describe verification only at export time;
 - published Raw files remain mutable, so later use or a future importer must hash them again and reject a mismatch.
@@ -33,7 +41,7 @@ Active filesystem races by another process running under the same user account a
 
 ## Redaction limits
 
-Markdown applies best-effort masking for some token shapes and long base64-like values. It can miss names, paths, addresses, customer data, source code, proprietary text, and credentials. Raw JSONL is byte-preserving and unredacted. Raw files and manifests are not share-safe.
+Markdown applies best-effort masking for some token shapes and long base64-like values. It can miss names, paths, addresses, customer data, source code, proprietary text, and credentials. Raw JSONL is byte-preserving and unredacted. Decoded assets preserve their original bytes. Raw files, both manifests, and `assets/` are not share-safe.
 
 ## Safe use
 

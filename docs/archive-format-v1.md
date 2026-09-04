@@ -8,6 +8,7 @@ An export can contain:
 
 - canonical raw JSONL snapshots in `raw/`;
 - classified Markdown reading views in `md/` or `markdown/`;
+- deduplicated decoded embedded attachments and their usage manifest in `assets/`;
 - `index.html` and `index.md` for navigation;
 - `manifest.json` for export and source-mapping metadata;
 - `README.txt` with a local summary.
@@ -16,9 +17,25 @@ When raw export is enabled, each raw JSONL file is a byte-identical snapshot of 
 
 When raw export is disabled, the export contains no new canonical session bytes. The manifest still identifies `raw_jsonl` as the canonical representation type but marks each omitted snapshot explicitly.
 
+## Persisted rollout boundaries
+
+The exporter treats each selected rollout JSONL file as an append-ordered source and streams it through the physical end of the file. A historical `task_started` record without a matching terminal event does not bound the session, invent a terminal event or hide later complete turns. This preserves the local records implicated by [Codex issue #41591](https://github.com/openai/codex/issues/41591) without attempting to repair Codex state.
+
+Codex 0.153.0 can store a paginated rollout reference in `session_meta.payload.history_base` when `session_meta.payload.history_mode` is `paginated`. Its `thread_id` names the immutable source rollout ID. `end_ordinal_exclusive` is the first excluded source ordinal and `end_byte_offset` is the byte immediately after the last included JSONL record. The byte offset addresses the uncompressed JSONL representation. The exporter resolves that ID only through its already inventoried active and archived session roots, validates both boundaries against the same exact prefix and reconstructs the logical stream as oldest Parent prefix through Child delta. Duplicate earlier ordinals do not terminate streaming; the ordinal at the validated boundary must still equal `end_ordinal_exclusive - 1`.
+
+Canonical filenames use their sole UUID as both stable thread ID and rollout ID. A replaced or reverted filename has the form `rollout-<timestamp>-<stable-thread-id>_<rollout-id>.jsonl`; references resolve by the trailing rollout ID while export identity remains the stable thread ID. Multi-stage chains are followed recursively. Missing, ambiguous, cyclic, malformed, out-of-range, record-splitting or ordinal-mismatched references fail the generation before it can be reported as complete.
+
+Discovery reads only a bounded first metadata record. A selected record that exceeds that bound fails with `SESSION_METADATA_LIMIT_EXCEEDED` rather than proceeding without potentially late history fields.
+
+Codex can opt in to Zstandard-compressed `.jsonl.zst` rollouts. A plain `.jsonl` file shadows its compressed sibling. Discovery recognises the compressed name and uses Node's built-in streaming decoder when the runtime provides it, so the source cannot disappear silently. Full compressed export is currently refused with `COMPRESSED_ROLLOUT_UNSUPPORTED`: the package supports Node.js from 22.0.0, while the required built-in Zstandard stream is absent from earlier supported Node 22 releases. No external executable, native module, network retrieval or unreviewed dependency is used. Invalid compressed metadata fails as `COMPRESSED_ROLLOUT_INVALID`.
+
+`session_index.jsonl` may supply a title only through the documented title-validation path. Its timestamp does not determine last activity, turn count or export extent. Those values come from the selected rollout itself, including records later than a stale index entry. This is the exporter boundary relevant to [Codex issue #41707](https://github.com/openai/codex/issues/41707).
+
+Persisted `function_call`, `function_call_output`, `custom_tool_call` and `custom_tool_call_output` records remain tool records. `include_tools` controls their derived Markdown, DOCX, PDF and asset representation without reclassifying them as direct conversation messages. A subagent rollout remains an independent session, while its explicit source `parent_thread_id` stays preserved in Raw JSONL. This covers the persisted collaboration and Unified Exec forms relevant to [Codex issue #41590](https://github.com/openai/codex/issues/41590); it does not promise import, resume or repair behavior.
+
 ## Generation completion marker
 
-`EXPORT_INCOMPLETE.txt` invalidates the entire export generation while it exists. In that state, `manifest.json`, `index.html`, and `index.md` are not valid descriptions or reading views of the current files, even if they are present and individually well formed.
+`EXPORT_INCOMPLETE.txt` invalidates the entire export generation while it exists. In that state, `manifest.json`, `assets/manifest.json`, `index.html`, and `index.md` are not valid descriptions or reading views of the current files, even if they are present and individually well formed.
 
 The exporter creates the marker before changing files from an existing generation. It publishes and verifies the new manifest before removing the run-owned marker. Marker removal is the generation commit point. A failed or interrupted export leaves the marker in place; it does not claim that the previous generation was restored.
 
@@ -36,7 +53,14 @@ The manifest describes archive membership and source mapping. It is not an authe
   "canonical_representation": "raw_jsonl",
   "canonical_representation_included": true,
   "export_profile": "complete",
-  "formats": { "raw": true, "markdown": true, "html": true, "docx": false, "pdf": false, "attachments": false }
+  "formats": { "raw": true, "markdown": true, "html": true, "docx": false, "pdf": false, "attachments": true },
+  "assets_manifest": "assets/manifest.json",
+  "include_tools": false,
+  "replacement_history_in_reading_views": false,
+  "replacement_history_source_unchanged": true,
+  "asset_occurrences": 2,
+  "unique_assets": 1,
+  "unique_asset_bytes": 68
 }
 ```
 
@@ -46,13 +70,57 @@ Relevant top-level fields include:
 - `canonical_representation`: currently `raw_jsonl`.
 - `canonical_representation_included`: whether this export contains the canonical Raw JSONL snapshots.
 - `export_profile`: `complete`, `readable`, or `source-snapshots`.
-- `formats`: explicit current and reserved format flags. Word, PDF, and extracted attachments remain false and are not selectable.
+- `formats`: explicit format flags. Deduplicated embedded attachments are always enabled; `docx` or `pdf` is true only after its explicit format selection.
 - `generated_at`: export timestamp.
 - `codex_home`, `sessions_dir`, `archived_sessions_dir`, and `session_index`: local diagnostic paths.
 - `path_style`: `short` or `readable`.
+- `assets_manifest`: the canonical export-relative `assets/manifest.json` path.
+- `include_tools`: the effective tool-record selection used by all derived reading views.
+- `replacement_history_in_reading_views`: whether `replacement_history` may contribute the labelled `Additional stored context` area. It is `false` for Readable and `true` for Complete and Source snapshots.
+- `replacement_history_source_unchanged`: always `true`; profile filtering changes only derived views and selected derived assets, never source or Raw JSONL bytes.
+- `asset_occurrences`, `unique_assets`, and `unique_asset_bytes`: aggregate decoded-asset counts and unique-byte volume. `deduplicated_asset_bytes_saved` additionally reports repeated occurrence bytes not stored again.
 - `sessions`: ordered exported-session metadata.
+- `history_reference_closure`: optional paginated-history source evidence for affected sessions only.
 
 Top-level absolute paths are local diagnostics. They are not needed to reconstruct the portable source mapping and are not share-safe.
+
+The version-1 root manifest has an open, forward-compatible content model. A consumer that supports `archive_format_version: 1` must ignore unknown top-level fields while continuing to validate every field it uses for format selection, path authorization, integrity, or source mapping. Producers may add optional root metadata without changing the archive-format version only when it does not alter the meaning or required validation of existing fields. Consumers are not required to preserve unknown fields when writing a new generation. An incompatible semantic or structural change requires a new `archive_format_version`.
+
+This rule applies only to additive fields in the root `manifest.json`. It does not relax the separately versioned and deliberately strict `assets/manifest.json` schema, and an unknown root field never authorizes an additional archive path.
+
+`session_model_histories` is additive root metadata. It contains one entry per exported session with the session ID, the chronological sequence of models confirmed by `turn_context.payload.model` after consecutive duplicates are collapsed, and a status. `thread_settings.model` is corroborating configuration only and cannot add a model to this sequence. The legacy `sessions[].model` field remains the last confirmed value for version-1 consumers; reading views and the HTML index use the complete root history. A fork whose copied records cannot be separated reliably from fork-local turns has status `WITHHELD_FORK_INHERITANCE` and an empty sequence rather than an inferred history.
+
+`history_reference_closure` is also additive root metadata. It does not change the meaning, byte identity or path of any selected `sessions[]` Raw snapshot. An older version-1 consumer may ignore this field and any unreferenced derived prefix file, but it must not interpret an unknown field as permission to read, overwrite or delete that file. The current exporter validates the field before it treats a derived prefix path as part of a replaceable generation. Because the canonical selected-session mapping and every pre-existing required field retain their version-1 meaning, paginated exports remain archive format version 1. A future change that replaces selected-session Raw semantics or makes closure mandatory for all consumers would require a new archive-format version.
+
+Each closure entry identifies one selected Child session and contains its ordered inherited segments. A segment records:
+
+- immutable `rollout_id` and stable filename `thread_id`;
+- `storage`, `source_root` and a validated root-relative `source_relative_path`;
+- `source_representation`;
+- exact `end_ordinal_exclusive`, `end_byte_offset`, `prefix_size_bytes` and lowercase `prefix_sha256`;
+- `snapshot_kind` and `snapshot_file`.
+
+`NOT_INCLUDED` means the profile does not publish source bytes. `SELECTED_FULL_SOURCE` reuses the Parent's already selected byte-identical Raw snapshot. `DERIVED_EXACT_PREFIX` stores only the referenced bytes below `raw/history-prefixes/`; it is labelled as a derived range and never as a complete original rollout. Identical required prefixes share one physical file. Later Parent bytes are neither read for reconstruction nor copied into that derived snapshot. Cross-project sources remain visible through their storage class and source-relative mapping without widening the selected session set.
+
+## Asset manifest schema 2
+
+Every profile includes `assets/manifest.json`, even when no embedded attachments occur. Its stable header is:
+
+```json
+{
+  "schema_version": 2,
+  "hash_algorithm": "sha256",
+  "assets": []
+}
+```
+
+Each selected unique decoded byte sequence appears once as `assets/<lowercase-sha256>.<validated-extension>`. The asset entry records the SHA-256, path, canonical MIME type, validated extension, byte count, renderability, and every retained ordered use. Uses include role, record/content type, timestamp, classification, tool origin, reading disposition, and canonical/mirror ordinals in addition to the schema-1 identity and optional MIME fields. Equal bytes in different genuine turns remain separate uses; only structurally proven mirrors share a canonical occurrence.
+
+Schema 2 preserves the schema-1 asset-entry and path contract but is an explicit consumer compatibility boundary. Consumers that require version 1 must add schema-2 handling. Root `archive_format_version` remains 1 because Raw/session layout and canonical restore semantics are unchanged; the exporter accepts prior asset schema 1 during safe replacement validation.
+
+PNG, JPEG, GIF, and WebP require bounded decoded-header validation. Other bytes, SVG, HTML, truncated signatures, and MIME spoofing are retained as non-renderable `.bin` with `application/octet-stream`. Declared MIME never determines a filename or renderability. Local and remote references are not copied or downloaded.
+
+The exporter probes exclusive hard-link publication inside the target filesystem before opening session streams. Asset files are never overwritten. An authorized existing target is reused only after regular-file, identity, size, SHA-256, and validated-type checks. `assets/manifest.json` is published only after all records, assets, uses, and final validations succeed. See [the asset-store contract](asset-store.md) for the complete publication and cleanup rules.
 
 ## Portable source mapping
 
@@ -135,6 +203,8 @@ The parser separates:
 
 Subagent inputs are not counted as direct human user turns. Runtime-context labels can identify bounded AGENTS, plugin, or environment markers, but text keywords alone do not promote an arbitrary record to a trusted classification.
 
+Session origin uses explicit first-party metadata before source heuristics. A non-empty `parent_thread_id` establishes a coupled `SUBAGENT`; without a parent, a non-empty `forked_from_id` establishes `FORK`. `thread_source: user` establishes `DIRECT_USER` only when neither parent nor fork metadata is present. Contradictory explicit evidence and missing session metadata remain `UNKNOWN`; a source-string heuristic is considered only when usable explicit origin fields are absent.
+
 Classification affects only derived metadata and reading-view labels. It never deletes or rewrites raw JSONL events.
 
 ## Mirrored user-event pairing
@@ -181,18 +251,24 @@ Markdown includes:
 - labelled subagent inputs, runtime contexts, and unclassified user-role records;
 - tool calls and tool outputs only when explicitly enabled.
 
+Attachments follow the same record selection. Verified user-event and browser/tool-result mirrors render once. Readable suppresses every `replacement_history` occurrence from Markdown, HTML, DOCX, and PDF, including history-only assets. Complete retains unmatched history images once in a labelled `Additional stored context` section rather than as ordinary turns. Source snapshots preserve their existing forensic stored-context behavior. Source and Raw JSONL bytes are never changed by this policy.
+
 Reasoning, internal events, invalid JSON lines, and other event types remain available only in raw JSONL unless separately rendered. Markdown masking is best effort and does not make the view safe to share.
 
 `index.html` and, where present, `index.md` provide metadata navigation. Complete and Readable HTML indexes filter project, title, date, model, and storage status; they are not transcript full-text search engines.
 
-The `source-snapshots` profile intentionally omits Markdown transcripts and `index.md`. Its HTML metadata index links only to Raw snapshots checked at export time and does not imply that event classification was performed; classification-derived counters are `null` in that profile.
+When DOCX is selected, each session manifest entry includes one `docx_file` export-relative path and the indexes link to that per-session document. DOCX is a classified derived view based on the shared document contract; it is never canonical and never combines sessions. PNG/JPEG media may be embedded, while conservative attachment references represent GIF, WebP, `.bin`, missing rendering support, or blocked local links. Controlled HTTP/HTTPS hyperlink relationships are allowed; external image/media/resource relationships and active content are forbidden, and no remote target is fetched.
+
+When PDF is selected, each session entry similarly includes one `pdf_file` path. PDF is rendered directly from the same common document contract, not through DOCX. It embeds repository-local hash-verified fonts and PNG/JPEG assets, uses attachment references for GIF/WebP/`.bin`, and permits only controlled HTTP/HTTPS URI actions. File, launch, JavaScript, forms, embedded files, external images, and remote retrieval are forbidden.
+
+Without DOCX or PDF selection, the `source-snapshots` profile intentionally omits Markdown transcripts and `index.md`. Its reduced HTML metadata index links to Raw snapshots checked at export time and to assets selected by the same streamed reading policy; classification-derived session counters remain `null`. Selecting DOCX or PDF explicitly adds the per-session document pass, populated counters, document links, and the corresponding full metadata index while still omitting Markdown.
 
 ## Import boundary
 
-Version 1 prepares portable preservation metadata but implements no import command and has no validated Codex roundtrip. It does not promise reconstruction of Codex UI state, indexes, project registration, sidebar history, attachment files, or future compatibility with Codex's internal format.
+Version 1 prepares portable preservation metadata but implements no import command and has no validated Codex roundtrip. It does not promise reconstruction of Codex UI state, indexes, project registration, sidebar history, Codex-native attachment registration, or future compatibility with Codex's internal format.
 
 A future importer must reject any generation containing `EXPORT_INCOMPLETE.txt` before reading its manifest. For a completed generation, it must use canonical raw JSONL and validated manifest mapping, hash every current Raw file again, compare that digest with `raw_sha256`, and reject any mismatch before consuming the file. It must also avoid overwriting an existing local session unless a separately designed, explicit conflict policy proves that action safe. Markdown or HTML alone is insufficient. Neither the format version, a stored hash, nor portable source mapping establishes import capability, permanent tamper resistance, sealing, or restore readiness.
 
 ## Privacy boundary
 
-Raw JSONL, Markdown, HTML, and `manifest.json` can contain confidential chats, local paths, runtime contexts, tool data, source code, identifiers, and attachment data or references. Absolute diagnostic paths must be removed from any separately designed share-safe derivative. No current export format should be published without manual privacy review.
+Raw JSONL, Markdown, HTML, DOCX, PDF, both manifests, and decoded files below `assets/` can contain confidential chats, local paths, runtime contexts, tool data, source code, identifiers, and attachment data or references. Absolute diagnostic paths must be removed from any separately designed share-safe derivative. No current export format should be published without manual privacy review.

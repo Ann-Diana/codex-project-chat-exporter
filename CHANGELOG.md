@@ -2,7 +2,25 @@
 
 All notable changes to this project are documented here.
 
+The last published state proven by local repository tags is `v0.2.0`. Package metadata identifies the current development line as `0.3.0`, but no `v0.3.0` tag exists.
+
 ## Unreleased
+
+## 0.3.0 – 2026-09-04
+
+### Added
+
+- Added deterministic per-session DOCX and PDF exports, individually or together, from one shared document model.
+- Added inline image rendering with a deduplicated asset folder and provenance manifest.
+- Added confirmed chronological model histories without merging subagent models into parent sessions.
+- Added exact historical project selection, canonical path grouping and recorded spelling variants.
+- Added direct CLI text or JSON reports, stable error codes and controlled cancellation cleanup.
+
+### Changed
+
+- Improved readable document structure for headings, lists, code blocks, links and selected images.
+- Added deterministic bundled emoji and glyph fallback with visible ordered code-point markers for unsupported graphemes.
+- Reconstructed paginated fork histories from validated local `history_base` rollout references.
 
 ## 0.2.0 – 2026-08-20
 

@@ -1,13 +1,22 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { promisify } from "node:util";
 
-const execFileAsync = promisify(execFile);
+import JSZip from "jszip";
+
 const defaultExtensionRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const defaultRepoRoot = path.resolve(defaultExtensionRoot, "..", "..");
+const FIXED_ARCHIVE_DATE = new Date("2000-01-01T00:00:00.000Z");
+const RUNTIME_ROOT = "extension/vendor/codex-project-chat-exporter";
+const FORBIDDEN_NATIVE_EXTENSIONS = new Set([".dll", ".dylib", ".exe", ".node", ".so"]);
+const PUBLIC_IMAGE_HASHES = new Map([
+  ["codex-project-chat-exporter-hero.png", "36a0a0923c97c040d85d16e9584a80b997c8b265d93a5d8cb7a01b08c07dd311"],
+  ["01-scope-picker.png", "78ba8cf95d07d48be0eb06a773ac702aac02d3155a760aaf0da664f7646ab5b0"],
+  ["02-project-history-picker.png", "437b751ede0c909e6b188b0dfaddaffc066d87ba4b7f1ee3f7e9f64463c31fd5"],
+  ["03-document-format-picker.png", "5167954996b948e269b8db5c3236f5297fb81ecfd6128f9c25542862254c91bf"],
+  ["04-export-success.png", "f5eb92017ad651cfdbcb50171a0c8e520e901dbb450594b64e5d52c0a13c112b"],
+]);
 
 export async function buildVsix(options = {}) {
   const extensionRoot = path.resolve(options.extensionRoot || defaultExtensionRoot);
@@ -46,6 +55,9 @@ export async function buildVsix(options = {}) {
       "extension/vendor",
       "extension/vendor/codex-project-chat-exporter",
       "extension/vendor/codex-project-chat-exporter/bin",
+      "extension/vendor/codex-project-chat-exporter/fonts",
+      "extension/vendor/codex-project-chat-exporter/lib",
+      "extension/vendor/codex-project-chat-exporter/node_modules",
     ]) {
       await createOwnedStageDirectory(stageOwned, stage, relative);
     }
@@ -54,26 +66,21 @@ export async function buildVsix(options = {}) {
     await copyVerifiedFile(path.join(extensionRoot, "README.md"), path.join(stage, "extension", "README.md"), stageOwned, stage);
     await copyVerifiedFile(path.join(extensionRoot, "PACKAGED_TEST_PLAN.md"), path.join(stage, "extension", "PACKAGED_TEST_PLAN.md"), stageOwned, stage);
     await copyVerifiedFile(path.join(extensionRoot, "LICENSE"), path.join(stage, "extension", "LICENSE"), stageOwned, stage);
-    await copyVerifiedFile(path.join(extensionRoot, "images", "icon.png"), path.join(stage, "extension", "images", "icon.png"), stageOwned, stage);
+    for (const name of [
+      "icon.png",
+      "codex-project-chat-exporter-hero.png",
+      "01-scope-picker.png",
+      "02-project-history-picker.png",
+      "03-document-format-picker.png",
+      "04-export-success.png",
+    ]) {
+      const hash = await copyVerifiedFile(path.join(extensionRoot, "images", name), path.join(stage, "extension", "images", name), stageOwned, stage);
+      const expectedHash = PUBLIC_IMAGE_HASHES.get(name);
+      if (expectedHash && hash !== expectedHash) throw new Error(`Public image differs from its approved SHA-256: ${name}`);
+    }
     await copyVerifiedFile(path.join(extensionRoot, "src", "extension.cjs"), path.join(stage, "extension", "src", "extension.cjs"), stageOwned, stage);
     await copyVerifiedFile(path.join(extensionRoot, "src", "vscode-adapter.cjs"), path.join(stage, "extension", "src", "vscode-adapter.cjs"), stageOwned, stage);
-    const packagedCore = path.join(stage, "extension", "vendor", "codex-project-chat-exporter", "bin", "export-codex-project-chats.mjs");
-    const packagedCoreSha256 = await copyVerifiedFile(path.join(repoRoot, "bin", "export-codex-project-chats.mjs"), packagedCore, stageOwned, stage);
-    await copyVerifiedFile(path.join(repoRoot, "LICENSE"), path.join(stage, "extension", "vendor", "codex-project-chat-exporter", "LICENSE"), stageOwned, stage);
-    await writeOwnedStageFile(stageOwned, stage, path.join(stage, "extension", "vendor", "codex-project-chat-exporter", "integrity.json"), `${JSON.stringify({ format: 1, files: { "bin/export-codex-project-chats.mjs": packagedCoreSha256 } }, null, 2)}\n`);
-
-    await writeOwnedStageFile(stageOwned, stage, path.join(stage, "[Content_Types].xml"), `<?xml version="1.0" encoding="utf-8"?>
-<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
-  <Default Extension="json" ContentType="application/json"/>
-  <Default Extension="md" ContentType="text/markdown"/>
-  <Default Extension="txt" ContentType="text/plain"/>
-  <Default Extension="cjs" ContentType="application/javascript"/>
-  <Default Extension="mjs" ContentType="application/javascript"/>
-  <Default Extension="png" ContentType="image/png"/>
-  <Default Extension="vsixmanifest" ContentType="text/xml"/>
-  <Default Extension="xml" ContentType="text/xml"/>
-</Types>
-`);
+    const packagedCore = await packageExporterRuntime({ repoRoot, stage, stageOwned });
 
     await writeOwnedStageFile(stageOwned, stage, path.join(stage, "extension.vsixmanifest"), `<?xml version="1.0" encoding="utf-8"?>
 <PackageManifest Version="2.0.0" xmlns="http://schemas.microsoft.com/developer/vsx-schema/2011">
@@ -104,6 +111,13 @@ export async function buildVsix(options = {}) {
   </Assets>
 </PackageManifest>
 `);
+
+    await writeOwnedStageFile(stageOwned, stage, path.join(stage, "[Content_Types].xml"), createContentTypes(stageOwned, stage));
+    try {
+      await import(`${pathToFileURL(packagedCore).href}?build=${randomUUID()}`);
+    } catch (error) {
+      throw new Error(`Packaged exporter runtime cannot resolve its complete import tree: ${error?.message || error}`, { cause: error });
+    }
 
     if (options.beforeArchiveWrite) await options.beforeArchiveWrite({ stage, archivePath });
     await verifyOwnedStageForArchive(stageOwned, stage, distDir);
@@ -147,6 +161,195 @@ async function copyVerifiedFile(source, destination, stageOwned, stage) {
     throw new Error(`Packaged source copy differs from its source: ${path.basename(source)}`);
   }
   return createHash("sha256").update(sourceBytes).digest("hex");
+}
+
+async function packageExporterRuntime({ repoRoot, stage, stageOwned }) {
+  const packageJson = parseJsonFile(await fs.readFile(path.join(repoRoot, "package.json"), "utf8"), "root package.json");
+  const packageLock = parseJsonFile(await fs.readFile(path.join(repoRoot, "package-lock.json"), "utf8"), "root package-lock.json");
+  validateProductionLock(packageJson, packageLock);
+  const runtimeHashes = new Map();
+  const copyRuntimeFile = async (source, relativePath) => {
+    const normalized = normalizeRuntimeRelativePath(relativePath);
+    const destination = path.join(stage, RUNTIME_ROOT, ...normalized.split("/"));
+    await ensureOwnedStageDirectory(stageOwned, stage, path.dirname(path.join(RUNTIME_ROOT, ...normalized.split("/"))));
+    const hash = await copyVerifiedFile(source, destination, stageOwned, stage);
+    runtimeHashes.set(normalized, hash);
+  };
+
+  for (const relativePath of ["package.json", "package-lock.json", "LICENSE", "bin/export-codex-project-chats.mjs"]) {
+    await copyRuntimeFile(path.join(repoRoot, ...relativePath.split("/")), relativePath);
+  }
+  await copyRuntimeDirectory(path.join(repoRoot, "lib"), "lib", copyRuntimeFile);
+  await copyRuntimeDirectory(path.join(repoRoot, "fonts"), "fonts", copyRuntimeFile);
+
+  const licenseSections = [
+    "Third-party production dependencies bundled in this VSIX",
+    "Generated deterministically from package-lock.json and installed package metadata.",
+    "",
+  ];
+  const productionPackages = Object.entries(packageLock.packages)
+    .filter(([key, value]) => key.startsWith("node_modules/") && value?.dev !== true)
+    .sort(([left], [right]) => compareOrdinal(left, right));
+  for (const [lockPath, lockEntry] of productionPackages) {
+    const installedRoot = path.join(repoRoot, ...lockPath.split("/"));
+    const installedPackage = parseJsonFile(await fs.readFile(path.join(installedRoot, "package.json"), "utf8"), `${lockPath}/package.json`);
+    validateInstalledProductionPackage(lockPath, lockEntry, installedPackage);
+    await copyRuntimeDirectory(installedRoot, lockPath, copyRuntimeFile, { skipNestedPackageTree: true });
+    const licenseSources = await selectLicenseSources(installedRoot);
+    licenseSections.push(
+      `Package: ${installedPackage.name}@${installedPackage.version}`,
+      `Declared license: ${String(installedPackage.license || lockEntry.license || "UNKNOWN")}`,
+      `Source: ${licenseSources.map((name) => `${lockPath}/${name}`).join(", ")}`,
+    );
+    for (const name of licenseSources) {
+      licenseSections.push("", await fs.readFile(path.join(installedRoot, name), "utf8"), "");
+    }
+    licenseSections.push("----", "");
+  }
+  const fontLicense = await fs.readFile(path.join(repoRoot, "fonts", "OFL.txt"), "utf8");
+  const symbolFontLicense = await fs.readFile(path.join(repoRoot, "fonts", "OFL-SYMBOLS.txt"), "utf8");
+  const emojiFontLicense = await fs.readFile(path.join(repoRoot, "fonts", "OFL-EMOJI.txt"), "utf8");
+  licenseSections.push(
+    "Bundled font assets",
+    "Noto Sans 2.015 and Noto Sans Mono 2.014",
+    "Declared license: SIL Open Font License 1.1",
+    "Source: fonts/OFL.txt",
+    "",
+    fontLicense,
+    "",
+    "----",
+    "",
+    "Bundled symbol font assets",
+    "Noto Sans Symbols 2.003 and Noto Sans Symbols 2 2.008",
+    "Declared license: SIL Open Font License 1.1",
+    "Source: fonts/OFL-SYMBOLS.txt",
+    "",
+    symbolFontLicense,
+    "",
+    "----",
+    "",
+    "Bundled monochrome emoji font asset",
+    "Noto Emoji 3.002 at Google Fonts commit ade3d1533e06b2b1462ffcde8e08b129627ca360",
+    "Declared license: SIL Open Font License 1.1",
+    "Source: fonts/OFL-EMOJI.txt",
+    "",
+    emojiFontLicense,
+    "",
+    "----",
+    "",
+  );
+  const thirdPartyRelative = "THIRD_PARTY_LICENSES.txt";
+  const thirdPartyBytes = Buffer.from(`${licenseSections.join("\n").replaceAll("\r\n", "\n").trimEnd()}\n`, "utf8");
+  await writeOwnedStageFile(stageOwned, stage, path.join(stage, RUNTIME_ROOT, thirdPartyRelative), thirdPartyBytes);
+  runtimeHashes.set(thirdPartyRelative, createHash("sha256").update(thirdPartyBytes).digest("hex"));
+
+  const integrity = Object.fromEntries([...runtimeHashes].sort(([left], [right]) => compareOrdinal(left, right)));
+  await writeOwnedStageFile(
+    stageOwned,
+    stage,
+    path.join(stage, RUNTIME_ROOT, "integrity.json"),
+    `${JSON.stringify({ format: 1, files: integrity }, null, 2)}\n`,
+  );
+  return path.join(stage, RUNTIME_ROOT, "bin", "export-codex-project-chats.mjs");
+}
+
+function validateProductionLock(packageJson, packageLock) {
+  if (!Number.isSafeInteger(packageLock?.lockfileVersion) || packageLock.lockfileVersion < 3 || !packageLock.packages || typeof packageLock.packages !== "object") {
+    throw new Error("package-lock.json must be a reproducible npm lockfileVersion 3 package map");
+  }
+  const declared = packageJson.dependencies || {};
+  const locked = packageLock.packages[""]?.dependencies || {};
+  if (JSON.stringify(sortObject(declared)) !== JSON.stringify(sortObject(locked))) throw new Error("package.json production dependencies differ from package-lock.json");
+  for (const script of ["preinstall", "install", "postinstall"]) {
+    if (typeof packageJson.scripts?.[script] === "string") throw new Error(`Root package contains an install script: ${script}`);
+  }
+  for (const [lockPath, entry] of Object.entries(packageLock.packages)) {
+    if (!lockPath.startsWith("node_modules/") || entry?.dev === true) continue;
+    if (typeof entry.version !== "string" || !entry.version || typeof entry.integrity !== "string" || !entry.integrity.startsWith("sha512-")) {
+      throw new Error(`Production dependency lacks a reproducible version or SHA-512 lock entry: ${lockPath}`);
+    }
+    if (typeof entry.resolved !== "string" || !entry.resolved.startsWith("https://registry.npmjs.org/")) {
+      throw new Error(`Production dependency has an unexpected resolution source: ${lockPath}`);
+    }
+    if (entry.hasInstallScript === true) throw new Error(`Production dependency declares an install script: ${lockPath}`);
+  }
+}
+
+function validateInstalledProductionPackage(lockPath, lockEntry, installedPackage) {
+  const expectedName = lockEntry.name || lockPath.slice(lockPath.lastIndexOf("node_modules/") + "node_modules/".length);
+  if (installedPackage.name !== expectedName || installedPackage.version !== lockEntry.version) {
+    throw new Error(`Installed production dependency differs from package-lock.json: ${lockPath}`);
+  }
+  for (const script of ["preinstall", "install", "postinstall"]) {
+    if (typeof installedPackage.scripts?.[script] === "string") throw new Error(`Production dependency contains an install script: ${installedPackage.name} (${script})`);
+  }
+}
+
+async function copyRuntimeDirectory(sourceRoot, runtimeRelativeRoot, copyRuntimeFile, options = {}) {
+  const rootStat = await fs.lstat(sourceRoot);
+  if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) throw new Error(`Runtime source must be a regular directory: ${sourceRoot}`);
+  const canonical = await fs.realpath(sourceRoot);
+  if (buildPathKey(canonical) !== buildPathKey(sourceRoot)) throw new Error(`Runtime source directory resolves through an alias: ${sourceRoot}`);
+  async function visit(directory, relativeDirectory) {
+    const entries = (await fs.readdir(directory, { withFileTypes: true })).sort((left, right) => compareOrdinal(left.name, right.name));
+    for (const entry of entries) {
+      if (options.skipNestedPackageTree && directory === sourceRoot && entry.name === "node_modules" && entry.isDirectory()) continue;
+      const source = path.join(directory, entry.name);
+      const relative = `${relativeDirectory}/${entry.name}`;
+      const stat = await fs.lstat(source);
+      if (stat.isSymbolicLink()) throw new Error(`Symbolic links are forbidden in the packaged runtime: ${relative}`);
+      if (stat.isDirectory()) {
+        await visit(source, relative);
+      } else if (stat.isFile()) {
+        if (FORBIDDEN_NATIVE_EXTENSIONS.has(path.extname(entry.name).toLowerCase())) throw new Error(`Native binary is forbidden in the packaged runtime: ${relative}`);
+        await copyRuntimeFile(source, relative);
+      } else {
+        throw new Error(`Special files are forbidden in the packaged runtime: ${relative}`);
+      }
+    }
+  }
+  await visit(sourceRoot, runtimeRelativeRoot);
+}
+
+async function selectLicenseSources(packageRoot) {
+  const names = await fs.readdir(packageRoot);
+  const licenseFiles = names.filter((name) => {
+    const lower = name.toLowerCase();
+    return lower.startsWith("license") || lower.startsWith("copying") || lower.startsWith("notice");
+  }).sort(compareOrdinal);
+  if (licenseFiles.length) return licenseFiles;
+  const readme = names.filter((name) => name.toLowerCase().startsWith("readme")).sort(compareOrdinal)[0];
+  if (!readme) throw new Error(`Production dependency lacks a license or README source: ${packageRoot}`);
+  return [readme];
+}
+
+async function ensureOwnedStageDirectory(stageOwned, stage, relativePath) {
+  const normalized = String(relativePath).replaceAll("\\", "/");
+  let current = path.resolve(stage);
+  for (const segment of normalized.split("/").filter(Boolean)) {
+    current = path.join(current, segment);
+    if (stageOwned.byPath.has(buildPathKey(current))) continue;
+    await createOwnedStageDirectory(stageOwned, stage, path.relative(stage, current));
+  }
+}
+
+function normalizeRuntimeRelativePath(relativePath) {
+  const normalized = String(relativePath).replaceAll("\\", "/");
+  const segments = normalized.split("/");
+  if (!normalized || normalized.startsWith("/") || segments.some((segment) => !segment || segment === "." || segment === "..")) throw new Error(`Unsafe packaged runtime path: ${relativePath}`);
+  return normalized;
+}
+
+function parseJsonFile(text, label) {
+  try {
+    return JSON.parse(text);
+  } catch (error) {
+    throw new Error(`Invalid ${label}: ${error?.message || error}`, { cause: error });
+  }
+}
+
+function sortObject(value) {
+  return Object.fromEntries(Object.entries(value || {}).sort(([left], [right]) => compareOrdinal(left, right)));
 }
 
 async function createOwnedStageDirectory(stageOwned, stage, relativePath) {
@@ -347,18 +550,57 @@ function escapeXml(value) {
   return String(value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
-function powershellLiteral(value) {
-  return `'${String(value).replace(/'/g, "''")}'`;
+function createContentTypes(stageOwned, stage) {
+  const known = new Map([
+    ["cjs", "application/javascript"], ["js", "application/javascript"], ["json", "application/json"],
+    ["map", "application/json"], ["md", "text/markdown"], ["markdown", "text/markdown"],
+    ["mjs", "application/javascript"], ["png", "image/png"], ["ttf", "font/ttf"], ["txt", "text/plain"],
+    ["vsixmanifest", "text/xml"], ["xml", "text/xml"],
+  ]);
+  const extensions = new Set();
+  const extensionless = [];
+  for (const owned of stageOwned.files) {
+    const relative = path.relative(stage, owned.path).replaceAll("\\", "/");
+    const extension = path.posix.extname(relative).slice(1).toLowerCase();
+    if (extension) extensions.add(extension);
+    else extensionless.push(relative);
+  }
+  const defaults = [...extensions].sort(compareOrdinal).map((extension) => `  <Default Extension="${escapeXml(extension)}" ContentType="${escapeXml(known.get(extension) || "application/octet-stream")}"/>`);
+  const overrides = extensionless.sort(compareOrdinal).map((relative) => `  <Override PartName="/${escapeXml(relative)}" ContentType="application/octet-stream"/>`);
+  return `<?xml version="1.0" encoding="utf-8"?>\n<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">\n${[...defaults, ...overrides].join("\n")}\n</Types>\n`;
 }
 
-function createZipCommand(sourceDirectory, destinationFile) {
-  const source = powershellLiteral(sourceDirectory);
-  const destination = powershellLiteral(destinationFile);
-  return `Add-Type -AssemblyName System.IO.Compression; $source=${source}; $stream=[System.IO.File]::Open(${destination}, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None); $archive=[System.IO.Compression.ZipArchive]::new($stream, [System.IO.Compression.ZipArchiveMode]::Create, $false); try { Get-ChildItem -LiteralPath $source -File -Recurse | Sort-Object FullName | ForEach-Object { $relative=$_.FullName.Substring($source.Length).TrimStart([System.IO.Path]::DirectorySeparatorChar).Replace([System.IO.Path]::DirectorySeparatorChar, [char]'/'); $entry=$archive.CreateEntry($relative, [System.IO.Compression.CompressionLevel]::Optimal); $input=[System.IO.File]::OpenRead($_.FullName); $output=$entry.Open(); try { $input.CopyTo($output) } finally { $output.Dispose(); $input.Dispose() } } } finally { $archive.Dispose(); $stream.Dispose() }`;
+function compareOrdinal(left, right) {
+  return left < right ? -1 : left > right ? 1 : 0;
 }
 
 async function writeZipArchive({ stage, archivePath }) {
-  await execFileAsync("powershell.exe", ["-NoProfile", "-Command", createZipCommand(stage, archivePath)]);
+  const zip = new JSZip();
+  const files = [];
+  async function visit(directory) {
+    const entries = (await fs.readdir(directory, { withFileTypes: true })).sort((left, right) => compareOrdinal(left.name, right.name));
+    for (const entry of entries) {
+      const candidate = path.join(directory, entry.name);
+      const stat = await fs.lstat(candidate);
+      if (stat.isSymbolicLink()) throw new Error(`Symbolic links are forbidden in the VSIX archive: ${candidate}`);
+      if (stat.isDirectory()) await visit(candidate);
+      else if (stat.isFile()) files.push(candidate);
+      else throw new Error(`Special files are forbidden in the VSIX archive: ${candidate}`);
+    }
+  }
+  await visit(stage);
+  for (const candidate of files.sort((left, right) => compareOrdinal(path.relative(stage, left), path.relative(stage, right)))) {
+    const relative = path.relative(stage, candidate).replaceAll("\\", "/");
+    zip.file(relative, await fs.readFile(candidate), {
+      binary: true,
+      createFolders: false,
+      date: FIXED_ARCHIVE_DATE,
+      compression: "DEFLATE",
+      compressionOptions: { level: 9 },
+    });
+  }
+  const bytes = await zip.generateAsync({ type: "nodebuffer", platform: "DOS", compression: "DEFLATE", compressionOptions: { level: 9 } });
+  await fs.writeFile(archivePath, bytes, { flag: "wx" });
 }
 
 if (process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url) {
