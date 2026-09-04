@@ -24,6 +24,9 @@ const FIXED_DATE = "2000-01-01T00:00:00.000Z";
 const extensionRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const ONE_PIXEL_PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
 const ONE_PIXEL_PNG_SHA256 = "431ced6916a2a21a156e38701afe55bbd7f88969fbbfc56d7fe099d47f265460";
+const PACKAGED_PARENT_PROJECT = process.platform === "win32" ? "C:\\Synthetic\\parent" : "/synthetic/parent";
+const PACKAGED_CHILD_PROJECT = process.platform === "win32" ? "C:\\Synthetic\\link-check" : "/synthetic/link-check";
+const PACKAGED_MISSING_PROJECT = process.platform === "win32" ? "C:\\Synthetic\\renamed" : "/synthetic/renamed";
 
 function sha256(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
@@ -109,7 +112,7 @@ async function writeSyntheticSession(codexHome) {
   const message = "# Linktest\n\nUmlaute äöü & <XML>. Symbole → ← ↑ ↓ ✓ ⚠ ± ≤ ≥. Emoji 😄 und ⚠️. ZWJ 👩‍💻 und 😄‍😄. ANSI \u001b[31m.\n\nLink: [OpenAI](https://openai.com/).\n\n- eins\n- zwei\n\n```js\nconst value = '<&> → ✓ ⚠ ≤ ≥';\n```";
   const imageUrl = `data:image/png;base64,${ONE_PIXEL_PNG.toString("base64")}`;
   const parentPrefix = [
-    { ordinal: 0, type: "session_meta", timestamp: "2026-08-24T09:00:00.000Z", payload: { id: parentId, cwd: "C:\\Synthetic\\parent", timestamp: "2026-08-24T09:00:00.000Z", source: "vscode", thread_source: "user", history_mode: "paginated" } },
+    { ordinal: 0, type: "session_meta", timestamp: "2026-08-24T09:00:00.000Z", payload: { id: parentId, cwd: PACKAGED_PARENT_PROJECT, timestamp: "2026-08-24T09:00:00.000Z", source: "vscode", thread_source: "user", history_mode: "paginated" } },
     { ordinal: 1, type: "response_item", timestamp: "2026-08-24T09:00:01.000Z", payload: { type: "message", role: "user", content: [{ type: "input_text", text: message }, { type: "input_image", image_url: imageUrl }], internal_chat_message_metadata_passthrough: { turn_id: "turn-1" } } },
     { ordinal: 2, type: "event_msg", timestamp: "2026-08-24T09:00:01.001Z", payload: { type: "user_message", message, images: [imageUrl] } },
   ];
@@ -118,7 +121,7 @@ async function writeSyntheticSession(codexHome) {
   await fs.writeFile(parentFile, Buffer.concat([parentPrefixBytes, Buffer.from(`${JSON.stringify({ ordinal: 3, type: "response_item", timestamp: "2026-08-24T09:00:02.000Z", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "AFTER_REFERENCE_BOUNDARY" }] } })}\n`, "utf8")]));
   const historyBase = { thread_id: parentId, end_ordinal_exclusive: 3, end_byte_offset: parentPrefixBytes.length };
   const records = [
-    { ordinal: 3, type: "session_meta", timestamp: "2026-08-24T10:00:00.000Z", payload: { id: sessionId, cwd: "C:\\Synthetic\\link-check", timestamp: "2026-08-24T10:00:00.000Z", source: "vscode", thread_source: "user", forked_from_id: parentId, history_mode: "paginated", history_base: historyBase } },
+    { ordinal: 3, type: "session_meta", timestamp: "2026-08-24T10:00:00.000Z", payload: { id: sessionId, cwd: PACKAGED_CHILD_PROJECT, timestamp: "2026-08-24T10:00:00.000Z", source: "vscode", thread_source: "user", forked_from_id: parentId, history_mode: "paginated", history_base: historyBase } },
     { ordinal: 4, type: "response_item", timestamp: "2026-08-24T10:00:02.000Z", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "Antwort. [Query](https://example.invalid/3D?a=1&b=2)." }] } },
   ];
   const childFile = path.join(directory, `rollout-2026-08-24T10-00-00-${sessionId}.jsonl`);
@@ -200,11 +203,11 @@ test("regular VSIX builds are byte-identical and their packaged runtime exports 
     const paginatedFixture = await writeSyntheticSession(codexHome);
     const exporter = await withoutNetwork(() => defaultLoadExporter({ extensionPath: installedRoot }));
     let choices = 0;
-    const result = await withoutNetwork(() => exporter.exportArchive({ codexHome, scope: "project", workspacePath: "C:\\Synthetic\\renamed", outputDirectory, exportProfile: "complete", documentFormats: ["docx", "pdf"], onSelectRecordedProject: ({ projects, reason }) => {
+    const result = await withoutNetwork(() => exporter.exportArchive({ codexHome, scope: "project", workspacePath: PACKAGED_MISSING_PROJECT, outputDirectory, exportProfile: "complete", documentFormats: ["docx", "pdf"], onSelectRecordedProject: ({ projects, reason }) => {
       choices++;
       assert.equal(reason, "no-match");
       assert.equal(projects.length, 2);
-      const childProject = projects.find((project) => project.cwd === "C:\\Synthetic\\link-check");
+      const childProject = projects.find((project) => project.cwd === PACKAGED_CHILD_PROJECT);
       assert.equal(childProject.sessionCount, 1);
       return childProject.cwd;
     } }));

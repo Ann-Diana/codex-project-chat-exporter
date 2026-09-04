@@ -213,6 +213,7 @@ test("README profile matrix agrees with committed profile goldens", async () => 
 
 test("semantic documentation prefixes accept CRLF without accepting changed content", () => {
   const expected = "# Heading\n\nStable content.\n";
+  const releaseHeading = "## Unreleased\n\n## 0.3.0 – 2026-09-04";
   assert.equal(hasSemanticTextPrefix(expected, expected), true);
   assert.equal(hasSemanticTextPrefix(expected.replaceAll("\n", "\r\n"), expected), true);
   assert.equal(hasSemanticTextPrefix("# Heading\r\n\r\nChanged content.\r\n", expected), false);
@@ -221,6 +222,10 @@ test("semantic documentation prefixes accept CRLF without accepting changed cont
   assert.equal(includesSemanticText(`Before\r\n${expected.replaceAll("\n", "\r\n")}After\r\n`, expected), true);
   assert.equal(includesSemanticText("Before\r\n# Heading\r\n\r\nChanged content.\r\nAfter\r\n", expected), false);
   assert.equal(includesSemanticText("Before\r\n# Heading\r\nStable content.\r\nAfter\r\n", expected), false);
+  assert.equal(includesSemanticText(releaseHeading.replaceAll("\n", "\r\n"), releaseHeading), true);
+  assert.equal(includesSemanticText(releaseHeading, "## Pending\n\n## 0.3.0 – 2026-09-04"), false);
+  assert.equal(includesSemanticText(releaseHeading, "## Unreleased\n\n## 0.3.1 – 2026-09-04"), false);
+  assert.equal(includesSemanticText(releaseHeading, "## Unreleased\n\n## 0.3.0 – 2026-09-05"), false);
 });
 
 test("public documentation keeps scope, format, privacy and version contracts consistent", async () => {
@@ -280,7 +285,7 @@ test("public documentation keeps scope, format, privacy and version contracts co
 
   const changelog = await fs.readFile(path.join(repositoryRoot, "CHANGELOG.md"), "utf8");
   const releasePreparation = changelog.slice(0, changelog.indexOf("## 0.2.0"));
-  assert.ok(releasePreparation.includes("## Unreleased\n\n## 0.3.0 – 2026-09-04"));
+  assert.ok(includesSemanticText(releasePreparation, "## Unreleased\n\n## 0.3.0 – 2026-09-04"));
   assert.ok(releasePreparation.includes("last published state proven by local repository tags is `v0.2.0`"));
   for (const forbiddenOxfordPhrase of ["text, monospace, symbol, and", "DOCX, PDF, and", "active, truncated, or"]) {
     assert.equal(releasePreparation.includes(forbiddenOxfordPhrase), false, forbiddenOxfordPhrase);

@@ -1156,7 +1156,9 @@ for (const mode of ["recover", "menu", "dismiss-recovery", "dismiss-picker", "di
   await fsp.mkdir(archivedRoot, { recursive: true });
   await fsp.writeFile(workspaceFile, "workspace sentinel", "utf8");
   const storedCurrent = `${oneWorkspace[0].toLowerCase()}${oneWorkspace.slice(1).replaceAll("\\", "/")}/`;
-  const historicalVariants = ["C:\\Synthetic\\Grouped", "c:/synthetic/grouped/"];
+  const historicalVariants = process.platform === "win32"
+    ? ["C:\\Synthetic\\Grouped", "c:/synthetic/grouped/"]
+    : ["/synthetic/Grouped", "/synthetic/Grouped/"];
   const currentSource = path.join(activeRoot, "rollout-current.jsonl");
   const currentMetadata = { type: "session_meta", timestamp: "2026-08-03T10:00:00Z", payload: { id: "adapter-current", cwd: storedCurrent, timestamp: "2026-08-03T10:00:00Z" } };
   const largeConversationRecord = { type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "x".repeat(1024 * 1024) }] } };
@@ -1211,7 +1213,7 @@ for (const mode of ["recover", "menu", "dismiss-recovery", "dismiss-picker", "di
   assert.equal(await historyAdapter.exportFromQuickPick(createContext(temp)), undefined);
   const historyPicker = historyFake.quickPicks.find(entry => entry.options.title === "Choose a project folder from Codex history");
   const grouped = historyPicker.items.find(item => item.detail.startsWith("2 stored path variants:"));
-  assert.ok(grouped, "canonical Windows spellings must form one visible project identity");
+  assert.ok(grouped, "canonical host-native spellings must form one visible project identity");
   assert.match(grouped.description, /^2 sessions · \d+ bytes · 2026-08-01 – 2026-08-02$/);
   for (const variant of historicalVariants) assert.ok(grouped.detail.includes(variant));
   assert.equal(fs.existsSync(discoveryOutput), false);
