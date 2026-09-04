@@ -135,8 +135,8 @@ test("Readable text semantics are shared by Markdown, DOCX, and PDF while Comple
     const popplerBin = process.env.POPPLER_BIN || "";
     const pdftotext = popplerBin ? path.join(popplerBin, process.platform === "win32" ? "pdftotext.exe" : "pdftotext") : "pdftotext";
     try {
-      const readableText = (await execFileAsync(pdftotext, [readablePdfPath, "-"], { encoding: "utf8" })).stdout;
-      const completeText = (await execFileAsync(pdftotext, [completePdfPath, "-"], { encoding: "utf8" })).stdout;
+      const readableText = (await execFileAsync(pdftotext, ["-enc", "UTF-8", readablePdfPath, "-"], { encoding: "utf8" })).stdout;
+      const completeText = (await execFileAsync(pdftotext, ["-enc", "UTF-8", completePdfPath, "-"], { encoding: "utf8" })).stdout;
       assert.equal(readableText.includes("oai-mem-citation"), false);
       assert.ok(readableText.includes("Natural – prose") && readableText.includes("literal — code"));
       assert.ok(readableText.includes("[unsupported glyph U+10FFFF]") && !readableText.includes(fixture.unsupported));
