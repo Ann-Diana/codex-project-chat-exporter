@@ -21,6 +21,8 @@ const codexHome = path.join(temp, ".codex");
 const activeDir = path.join(codexHome, "sessions", "2026", "07", "20");
 const archivedDir = path.join(codexHome, "archived_sessions");
 const outputDir = path.join(temp, "output");
+const primaryProjectPath = process.platform === "win32" ? "C:\\Projects\\alpha" : "/synthetic/projects/alpha";
+const foreignStyleProjectPath = process.platform === "win32" ? "/synthetic/projects/alpha" : "C:\\Projects\\alpha";
 const dangerousTitle = "Escaping plain | one|two \\ slash\\\\ before\\|pipe \\\\|combo C:\\Temp\\file already\\|escaped Unicode π";
 const dangerousProject = "/home/demo/projects/beta\rbare\nline\r\nend";
 
@@ -41,9 +43,9 @@ function jsonl(items) {
 }
 
 await fs.writeFile(path.join(activeDir, "rollout-active.jsonl"), jsonl([
-  { type: "session_meta", timestamp: "2026-07-20T10:00:00.000Z", payload: { id: "session-active", cwd: "C:\\Projects\\alpha", timestamp: "2026-07-20T10:00:00.000Z", source: "vscode", thread_source: "user" } },
+  { type: "session_meta", timestamp: "2026-07-20T10:00:00.000Z", payload: { id: "session-active", cwd: primaryProjectPath, timestamp: "2026-07-20T10:00:00.000Z", source: "vscode", thread_source: "user" } },
   { type: "response_item", timestamp: "2026-07-20T10:00:00.500Z", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "# AGENTS.md instructions\n<environment_context>automatic startup context</environment_context>" }, { type: "input_image", image_url: "data:image/png;base64,aGVsbG8=" }, { type: "input_image", image_url: "iVBORw0KGgoBAgME" }, { type: "local_image", path: "C:\\Private\\screenshot.png" }, { type: "input_image", image_url: "https://example.invalid/capture.png" }, { type: "input_image", image_url: "opaque-attachment-token" }], internal_chat_message_metadata_passthrough: { turn_id: "turn-active-1" } } },
-  { type: "turn_context", timestamp: "2026-07-20T10:00:01.000Z", payload: { cwd: "C:\\Projects\\alpha", model: "gpt-test" } },
+  { type: "turn_context", timestamp: "2026-07-20T10:00:01.000Z", payload: { cwd: primaryProjectPath, model: "gpt-test" } },
   { type: "response_item", timestamp: "2026-07-20T10:00:02.000Z", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "Create the release archive and preserve the literal terms AGENTS.md and <environment_context>." }], internal_chat_message_metadata_passthrough: { turn_id: "turn-active-1" } } },
   { type: "event_msg", timestamp: "2026-07-20T10:00:02.001Z", payload: { type: "user_message", message: "Create the release archive and preserve the literal terms AGENTS.md and <environment_context>." } },
   { type: "event_msg", timestamp: "2026-07-20T10:00:03.000Z", payload: { type: "agent_message", message: "Done." } },
@@ -73,7 +75,7 @@ await fs.writeFile(path.join(archivedDir, "rollout-archived.jsonl"), jsonl([
 ]));
 
 await fs.writeFile(path.join(archivedDir, "rollout-archived-same-project.jsonl"), jsonl([
-  { type: "session_meta", timestamp: "2026-05-15T08:00:00.000Z", payload: { id: "session-archived-same-project", cwd: "C:\\Projects\\alpha", timestamp: "2026-05-15T08:00:00.000Z", source: "vscode", thread_source: "user" } },
+  { type: "session_meta", timestamp: "2026-05-15T08:00:00.000Z", payload: { id: "session-archived-same-project", cwd: primaryProjectPath, timestamp: "2026-05-15T08:00:00.000Z", source: "vscode", thread_source: "user" } },
   { type: "response_item", timestamp: "2026-05-15T08:00:02.000Z", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "Release archive" }], internal_chat_message_metadata_passthrough: { turn_id: "turn-archived-alpha" } } },
   { type: "event_msg", timestamp: "2026-05-15T08:00:02.000Z", payload: { type: "user_message", message: "Release archive" } },
   { type: "event_msg", timestamp: "2026-05-15T08:00:03.000Z", payload: { type: "agent_message", message: "Archived copy." } },
@@ -81,7 +83,7 @@ await fs.writeFile(path.join(archivedDir, "rollout-archived-same-project.jsonl")
 ]));
 
 await fs.writeFile(path.join(activeDir, "rollout-subagent.jsonl"), jsonl([
-  { type: "session_meta", timestamp: "2026-07-21T10:00:00.000Z", payload: { id: "session-subagent", cwd: "C:\\Projects\\alpha", timestamp: "2026-07-21T10:00:00.000Z", source: { subagent: { other: "guardian" } }, thread_source: "subagent", parent_thread_id: "session-active" } },
+  { type: "session_meta", timestamp: "2026-07-21T10:00:00.000Z", payload: { id: "session-subagent", cwd: primaryProjectPath, timestamp: "2026-07-21T10:00:00.000Z", source: { subagent: { other: "guardian" } }, thread_source: "subagent", parent_thread_id: "session-active" } },
   { type: "response_item", timestamp: "2026-07-21T10:00:00.500Z", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "# AGENTS.md instructions\n<environment_context>automatic subagent context</environment_context>" }], internal_chat_message_metadata_passthrough: { turn_id: "turn-subagent" } } },
   { type: "response_item", timestamp: "2026-07-21T10:00:01.000Z", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "[1] user: retained parent material\n[7] assistant: retained parent material" }], internal_chat_message_metadata_passthrough: { turn_id: "turn-subagent" } } },
   { type: "event_msg", timestamp: "2026-07-21T10:00:01.000Z", payload: { type: "user_message", message: "[1] user: retained parent material\n[7] assistant: retained parent material" } },
@@ -90,14 +92,14 @@ await fs.writeFile(path.join(activeDir, "rollout-subagent.jsonl"), jsonl([
 ]));
 
 await fs.writeFile(path.join(activeDir, "rollout-no-user.jsonl"), jsonl([
-  { type: "session_meta", timestamp: "2026-07-22T10:00:00.000Z", payload: { id: "session-no-user", cwd: "C:\\Projects\\alpha", timestamp: "2026-07-22T10:00:00.000Z", source: "unknown" } },
+  { type: "session_meta", timestamp: "2026-07-22T10:00:00.000Z", payload: { id: "session-no-user", cwd: primaryProjectPath, timestamp: "2026-07-22T10:00:00.000Z", source: "unknown" } },
   { type: "response_item", timestamp: "2026-07-22T10:00:01.000Z", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "# AGENTS.md instructions" }], internal_chat_message_metadata_passthrough: { turn_id: "turn-unconfirmed" } } },
 ]));
 
 const malformedArchivedId = "019f0000-1111-7222-8333-444444444444";
 await fs.writeFile(path.join(archivedDir, `rollout-2026-05-10T08-00-00-${malformedArchivedId}.jsonl`), jsonl([
   { type: "response_item", timestamp: "2026-05-10T08:00:01.000Z", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "Release archive" }] } },
-  { type: "turn_context", timestamp: "2026-05-10T08:00:02.000Z", payload: { cwd: "C:\\Projects\\alpha", model: "gpt-test" } },
+  { type: "turn_context", timestamp: "2026-05-10T08:00:02.000Z", payload: { cwd: primaryProjectPath, model: "gpt-test" } },
   { type: "response_item", timestamp: "2026-05-10T08:00:03.000Z", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "Recovered from filename metadata." }] } },
 ]));
 
@@ -113,12 +115,12 @@ const version = await execFileAsync(process.execPath, [script, "--version"], { c
 assert.equal(version.stdout.trim(), "0.3.0");
 
 const projectList = await execFileAsync(process.execPath, [script, "--codex-home", codexHome, "--list"], { cwd: temp });
-assert.match(projectList.stdout, /C:\\Projects\\alpha \(4: 3 active, 1 archived\)/);
+assert.ok(projectList.stdout.includes(`${primaryProjectPath} (4: 3 active, 1 archived)`));
 assert.match(projectList.stdout, /\(unknown\) \(2: 1 active, 1 archived\)/, "metadata-only listing must not inspect later conversation/context records for a missing first-record cwd");
 
 const sessionList = await execFileAsync(process.execPath, [script, "--codex-home", codexHome, "--list-sessions"], { cwd: temp });
-assert.match(sessionList.stdout, /\[active\] Create the release archive and preserve the literal terms AGENTS\.md and <environment_context>\. \| C:\\Projects\\alpha/);
-assert.match(sessionList.stdout, /\[archived\] Release archive \| C:\\Projects\\alpha/);
+assert.ok(sessionList.stdout.includes(`[active] Create the release archive and preserve the literal terms AGENTS.md and <environment_context>. | ${primaryProjectPath}`));
+assert.ok(sessionList.stdout.includes(`[archived] Release archive | ${primaryProjectPath}`));
 assert.match(sessionList.stdout, new RegExp(`\\[archived\\].*${malformedArchivedId}`));
 
 const diagnostics = await execFileAsync(process.execPath, [script, "--codex-home", codexHome, "--diagnose"], { cwd: temp });
@@ -221,7 +223,12 @@ assert.doesNotMatch(html, /<img src="assets\/[0-9a-f]{64}\.bin"/, "non-renderabl
 
 const apiOutputDir = path.join(temp, "api-output");
 const apiProfilePath = path.join(temp, "api-performance-profile.json");
-const apiResult = await exportArchive({ codexHome, scope: "project", workspacePath: "C:\\Projects\\alpha", outputDirectory: apiOutputDir, includeOriginalJsonl: false, performanceProfilePath: apiProfilePath });
+const apiResult = await exportArchive({ codexHome, scope: "project", workspacePath: primaryProjectPath, outputDirectory: apiOutputDir, includeOriginalJsonl: false, performanceProfilePath: apiProfilePath });
+await assert.rejects(
+  () => exportArchive({ codexHome, scope: "project", workspacePath: foreignStyleProjectPath, outputDirectory: path.join(temp, "foreign-path-style-output"), includeOriginalJsonl: false }),
+  (error) => error?.code === "NO_PROJECT_MATCH",
+  "a foreign platform's absolute-path syntax must not become a host-dependent exact match",
+);
 assert.equal(apiResult.exportedSessionCount, 4);
 assert.equal(apiResult.exportedProjectCount, 1);
 assert.equal(apiResult.activeSessionCount, 3);
@@ -512,11 +519,11 @@ assert.doesNotMatch(apiProfileText, /C:\\\\Projects/);
 
 const profiledRawOutputDir = path.join(temp, "profiled-raw-output");
 const profiledRawPath = path.join(temp, "profiled-raw-performance.json");
-const profiledRawResult = await exportArchive({ codexHome, scope: "project", workspacePath: "C:\\Projects\\alpha", outputDirectory: profiledRawOutputDir, performanceProfilePath: profiledRawPath });
+const profiledRawResult = await exportArchive({ codexHome, scope: "project", workspacePath: primaryProjectPath, outputDirectory: profiledRawOutputDir, performanceProfilePath: profiledRawPath });
 const profiledRawManifest = JSON.parse(await fs.readFile(profiledRawResult.manifestPath, "utf8"));
 const profiledRaw = JSON.parse(await fs.readFile(profiledRawPath, "utf8"));
 const semanticSession = ({ markdown_file, raw_export_file, raw_export_name, raw_verified_at, ...session }) => session;
-assert.deepEqual(profiledRawManifest.sessions.map(semanticSession), manifest.sessions.filter((session) => session.project === "C:\\Projects\\alpha" && session.session_id !== malformedArchivedId).map(semanticSession), "first-record routing must preserve selected-session manifest semantics without assigning a later turn_context cwd");
+assert.deepEqual(profiledRawManifest.sessions.map(semanticSession), manifest.sessions.filter((session) => session.project === primaryProjectPath && session.session_id !== malformedArchivedId).map(semanticSession), "first-record routing must preserve selected-session manifest semantics without assigning a later turn_context cwd");
 assert.equal(profiledRaw.phases.parse_and_classify.bytes_read, profiledRawManifest.sessions.reduce((sum, session) => sum + session.raw_size_bytes, 0), "only selected sources should receive complete metadata classification");
 assert.ok(profiledRaw.phases.routing.bytes_read > 0, "routing should account for first-record metadata reads");
 assert.ok(profiledRaw.phases.snapshot_stability_checks.duration_ms >= 0, "performance profiles should report snapshot stability checks separately");
@@ -531,7 +538,7 @@ for (const session of profiledRawManifest.sessions) {
 const reusedOutputDir = path.join(temp, "reused-output");
 await fs.mkdir(path.join(reusedOutputDir, "raw"), { recursive: true });
 await fs.writeFile(path.join(reusedOutputDir, "raw", "stale.jsonl"), "stale raw data\n", "utf8");
-await exportArchive({ codexHome, scope: "project", workspacePath: "C:\\Projects\\alpha", outputDirectory: reusedOutputDir, includeOriginalJsonl: false });
+await exportArchive({ codexHome, scope: "project", workspacePath: primaryProjectPath, outputDirectory: reusedOutputDir, includeOriginalJsonl: false });
 const reusedHtml = await fs.readFile(path.join(reusedOutputDir, "index.html"), "utf8");
 assert.equal(await pathExists(path.join(reusedOutputDir, "raw", "stale.jsonl")), true, "reused outputs should not delete older files");
 assert.doesNotMatch(reusedHtml, /<th>Raw<\/th>/, "an old raw directory must not add a Raw column to the current index");
@@ -543,7 +550,7 @@ const diagnosticEvents = [];
 const sourceSnapshotsResult = await exportArchive({
   codexHome,
   scope: "project",
-  workspacePath: "C:\\Projects\\alpha",
+  workspacePath: primaryProjectPath,
   outputDirectory: sourceSnapshotsOutput,
   exportProfile: "source-snapshots",
   progressThrottleMs: 0,
@@ -593,14 +600,14 @@ assert.doesNotMatch(JSON.stringify(diagnosticEvents), new RegExp(temp.replace(/[
 assert.doesNotMatch(JSON.stringify(diagnosticEvents), /automatic startup context|Export both/);
 
 const explicitReadableOutput = path.join(temp, "explicit-readable-output");
-const explicitReadableResult = await exportArchive({ codexHome, scope: "project", workspacePath: "C:\\Projects\\alpha", outputDirectory: explicitReadableOutput, exportProfile: "readable", includeOriginalJsonl: true });
+const explicitReadableResult = await exportArchive({ codexHome, scope: "project", workspacePath: primaryProjectPath, outputDirectory: explicitReadableOutput, exportProfile: "readable", includeOriginalJsonl: true });
 assert.equal(await pathExists(path.join(explicitReadableOutput, "raw")), false, "an explicit readable profile must override the legacy raw boolean");
 assert.equal(JSON.parse(await fs.readFile(explicitReadableResult.manifestPath, "utf8")).export_profile, "readable");
 
 const explicitCompleteOutput = path.join(temp, "explicit-complete-output");
 const completeProgress = [];
 const completeDiagnostics = [];
-const explicitCompleteResult = await exportArchive({ codexHome, scope: "project", workspacePath: "C:\\Projects\\alpha", outputDirectory: explicitCompleteOutput, exportProfile: "complete", includeOriginalJsonl: false, progressThrottleMs: 0, onProgress: (event) => completeProgress.push(event), onDiagnostic: (event) => completeDiagnostics.push(event) });
+const explicitCompleteResult = await exportArchive({ codexHome, scope: "project", workspacePath: primaryProjectPath, outputDirectory: explicitCompleteOutput, exportProfile: "complete", includeOriginalJsonl: false, progressThrottleMs: 0, onProgress: (event) => completeProgress.push(event), onDiagnostic: (event) => completeDiagnostics.push(event) });
 assert.equal(await pathExists(path.join(explicitCompleteOutput, "raw")), true, "an explicit complete profile must override the legacy no-raw boolean");
 for (const session of JSON.parse(await fs.readFile(explicitCompleteResult.manifestPath, "utf8")).sessions) {
   const baseline = profiledRawManifest.sessions.find((candidate) => candidate.session_id === session.session_id);
@@ -626,7 +633,7 @@ const nestedOuterPromise = exportArchive({
       nestedInnerPromise = exportArchive({
         codexHome,
         scope: "project",
-        workspacePath: "C:\\Projects\\alpha",
+        workspacePath: primaryProjectPath,
         outputDirectory: nestedInnerOutput,
         exportProfile: "readable",
         pathStyle: "readable",
@@ -643,7 +650,7 @@ assert.equal(await pathExists(path.join(nestedOuterOutput, "raw")), true);
 assert.equal(await pathExists(path.join(nestedOuterOutput, "index.md")), false);
 assert.equal(await pathExists(path.join(nestedInnerOutput, "raw")), false);
 assert.equal(await pathExists(path.join(nestedInnerOutput, "index.md")), true);
-assert.ok(nestedInnerManifest.sessions.every((session) => session.project === "C:\\Projects\\alpha"), "the nested workspace filter must not leak into the outer export");
+assert.ok(nestedInnerManifest.sessions.every((session) => session.project === primaryProjectPath), "the nested workspace filter must not leak into the outer export");
 assert.equal(nestedOuterManifest.sessions.length, manifest.sessions.length, "the outer all-session selection must remain isolated from the nested workspace export");
 
 const lockedOutput = path.join(temp, "concurrent-locked-output");
@@ -651,7 +658,7 @@ let competingExport;
 const lockedPrimaryResult = await exportArchive({
   codexHome,
   scope: "project",
-  workspacePath: "C:\\Projects\\alpha",
+  workspacePath: primaryProjectPath,
   outputDirectory: lockedOutput,
   exportProfile: "source-snapshots",
   progressThrottleMs: 0,
@@ -660,7 +667,7 @@ const lockedPrimaryResult = await exportArchive({
       competingExport = exportArchive({
         codexHome,
         scope: "project",
-        workspacePath: "C:\\Projects\\alpha",
+        workspacePath: primaryProjectPath,
         outputDirectory: lockedOutput,
         exportProfile: "readable",
       }).then(
@@ -677,7 +684,7 @@ assert.equal(await pathExists(path.join(lockedOutput, ".codex-export.lock")), fa
 assert.equal(JSON.parse(await fs.readFile(lockedPrimaryResult.manifestPath, "utf8")).export_profile, "source-snapshots", "the rejected export must not overwrite the owner manifest");
 
 const legacyCliOutput = path.join(temp, "legacy-cli-no-raw-output");
-await execFileAsync(process.execPath, [script, "--codex-home", codexHome, "--project", "C:\\Projects\\alpha", "--out", legacyCliOutput, "--no-raw"], { cwd: temp });
+await execFileAsync(process.execPath, [script, "--codex-home", codexHome, "--project", primaryProjectPath, "--out", legacyCliOutput, "--no-raw"], { cwd: temp });
 assert.equal(await pathExists(path.join(legacyCliOutput, "raw")), false, "the existing CLI --no-raw switch must remain compatible");
 assert.equal(JSON.parse(await fs.readFile(path.join(legacyCliOutput, "manifest.json"), "utf8")).export_profile, "readable");
 

@@ -35,6 +35,10 @@ function sha256(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
+function hasSemanticTextPrefix(actual, expected) {
+  return actual.replaceAll("\r\n", "\n").startsWith(expected.replaceAll("\r\n", "\n"));
+}
+
 function runCli(args) {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [cli, ...args], {
@@ -199,6 +203,14 @@ test("README profile matrix agrees with committed profile goldens", async () => 
   }
 });
 
+test("semantic documentation prefixes accept CRLF without accepting changed content", () => {
+  const expected = "# Heading\n\nStable content.\n";
+  assert.equal(hasSemanticTextPrefix(expected, expected), true);
+  assert.equal(hasSemanticTextPrefix(expected.replaceAll("\n", "\r\n"), expected), true);
+  assert.equal(hasSemanticTextPrefix("# Heading\r\n\r\nChanged content.\r\n", expected), false);
+  assert.equal(hasSemanticTextPrefix("# Heading\r\nStable content.\r\n", expected), false);
+});
+
 test("public documentation keeps scope, format, privacy and version contracts consistent", async () => {
   const documents = Object.fromEntries(await Promise.all(publicDocuments.map(async (relative) => [relative, await fs.readFile(path.join(repositoryRoot, relative), "utf8")])));
   const positioning = [
@@ -224,7 +236,7 @@ test("public documentation keeps scope, format, privacy and version contracts co
     "- **PDF:** searchable, fixed-layout files for sharing, printing and archiving.",
     "- **One source:** Markdown, HTML, DOCX and PDF follow the same session order and readable content selection.",
   ].join("\n");
-  assert.ok(documents["README.md"].startsWith(`# Codex Project Chat Exporter\n\n${readmePositioning}\n\n${whyDocuments}\n`));
+  assert.ok(hasSemanticTextPrefix(documents["README.md"], `# Codex Project Chat Exporter\n\n${readmePositioning}\n\n${whyDocuments}\n`));
   assert.ok(documents["integrations/vscode/README.md"].includes(positioning));
   for (const relative of ["README.md", "integrations/vscode/README.md"]) {
     for (const scope of scopes) assert.ok(documents[relative].includes(scope), `${relative}: ${scope}`);
