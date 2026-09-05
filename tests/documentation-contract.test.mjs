@@ -228,6 +228,33 @@ test("semantic documentation prefixes accept CRLF without accepting changed cont
   assert.equal(includesSemanticText(releaseHeading, "## Unreleased\n\n## 0.3.0 – 2026-09-05"), false);
 });
 
+test("CHANGELOG published release statement matches its first release heading without Git history", async () => {
+  const changelog = normalizeTextLineEndings(await fs.readFile(path.join(repositoryRoot, "CHANGELOG.md"), "utf8"));
+  const lines = changelog.split("\n");
+  const unreleasedIndex = lines.indexOf("## Unreleased");
+  assert.ok(unreleasedIndex >= 0, "Unreleased heading is missing");
+
+  const releaseHeading = lines.slice(unreleasedIndex + 1).find((line) => line.startsWith("## "));
+  assert.ok(releaseHeading, "published release heading is missing");
+  const headingText = releaseHeading.slice("## ".length);
+  const separator = " – ";
+  const separatorIndex = headingText.indexOf(separator);
+  assert.ok(separatorIndex > 0, "published release heading must contain a version and date");
+
+  const version = headingText.slice(0, separatorIndex);
+  const date = headingText.slice(separatorIndex + separator.length);
+  const introduction = lines.slice(0, unreleasedIndex).join("\n");
+  assert.ok(
+    introduction.includes(`The latest published release is \`v${version}\`, dated ${date}.`),
+    "published release statement must match the first release heading",
+  );
+  assert.equal(
+    introduction.includes(`no \`v${version}\` tag exists`),
+    false,
+    "introduction must not deny the published release tag",
+  );
+});
+
 test("public documentation keeps scope, format, privacy and version contracts consistent", async () => {
   const documents = Object.fromEntries(await Promise.all(publicDocuments.map(async (relative) => [relative, await fs.readFile(path.join(repositoryRoot, relative), "utf8")])));
   const positioning = [
@@ -286,7 +313,7 @@ test("public documentation keeps scope, format, privacy and version contracts co
   const changelog = await fs.readFile(path.join(repositoryRoot, "CHANGELOG.md"), "utf8");
   const releasePreparation = changelog.slice(0, changelog.indexOf("## 0.2.0"));
   assert.ok(includesSemanticText(releasePreparation, "## Unreleased\n\n## 0.3.0 – 2026-09-04"));
-  assert.ok(releasePreparation.includes("last published state proven by local repository tags is `v0.2.0`"));
+  assert.ok(releasePreparation.includes("The latest published release is `v0.3.0`, dated 2026-09-04."));
   for (const forbiddenOxfordPhrase of ["text, monospace, symbol, and", "DOCX, PDF, and", "active, truncated, or"]) {
     assert.equal(releasePreparation.includes(forbiddenOxfordPhrase), false, forbiddenOxfordPhrase);
   }

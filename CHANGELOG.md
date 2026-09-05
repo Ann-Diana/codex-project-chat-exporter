@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented here.
 
-The last published state proven by local repository tags is `v0.2.0`. Package metadata identifies the current development line as `0.3.0`, but no `v0.3.0` tag exists.
+The latest published release is `v0.3.0`, dated 2026-09-04.
 
 ## Unreleased
 
