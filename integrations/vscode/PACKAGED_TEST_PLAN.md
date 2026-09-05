@@ -13,9 +13,9 @@ Use this checklist for the uniquely named final candidate prepared during the la
 
 1. Prepare a small synthetic Codex home with direct-user, assistant, subagent, runtime-context, and unclassified samples; do not use private sessions.
 2. Open a local `file:` workspace matching one synthetic session.
-3. Create or select a new empty absolute output folder. Do not reuse an earlier export folder.
+3. For each format run, create or select a new empty absolute output folder. Do not reuse an earlier export folder.
 4. Use the desired `short` or `readable` path style and leave `includeTools` disabled unless tool content is intentionally under review. The export command asks for the profile on every run.
-5. Run **Codex Export: Export…**, choose **Current Workspace**, choose **Complete export**, and then test **Add DOCX** and **Add PDF** in separate exports.
+5. Run **Codex Export: Export…**, choose **Current Workspace**, choose **Complete export**, and then test **Add DOCX**, **Add PDF** and **Add DOCX and PDF** in three separate exports. In the combined-format run, confirm that both per-session documents are produced by that one export.
 6. Confirm that the success message uses the correct singular or plural session/project wording and that **Open HTML Index** and **Open Export Folder** open the newly created output.
 7. Confirm that progress advances through phases and shows at least one `Processing session X of Y` message.
 8. Confirm that the output channel records complete output-folder, HTML-index, and manifest paths.
