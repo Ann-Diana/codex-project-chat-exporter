@@ -258,7 +258,7 @@ test("CHANGELOG published release statement matches its first release heading wi
 test("public documentation keeps scope, format, privacy and version contracts consistent", async () => {
   const documents = Object.fromEntries(await Promise.all(publicDocuments.map(async (relative) => [relative, await fs.readFile(path.join(repositoryRoot, relative), "utf8")])));
   const positioning = [
-    "Turn local Codex project history into independent, portable archives – including editable Word documents and searchable PDFs.",
+    "Export local Codex project history into independent, portable archives – including editable Word documents and searchable PDFs.",
     "",
     "> **To our knowledge, the only Codex session exporter with built-in DOCX and PDF output.**",
     ">",
@@ -280,9 +280,16 @@ test("public documentation keeps scope, format, privacy and version contracts co
     "- **PDF:** searchable, fixed-layout files for sharing, printing and archiving.",
     "- **One source:** Markdown, HTML, DOCX and PDF follow the same session order and readable content selection.",
   ].join("\n");
-  assert.ok(hasSemanticTextPrefix(documents["README.md"], `# Codex Project Chat Exporter\n\n${readmePositioning}\n\n${whyDocuments}\n`));
-  assert.ok(includesSemanticText(documents["integrations/vscode/README.md"], positioning));
+  const requirements = [
+    "## Requirements at a glance",
+    "",
+    "- <kbd>VSIX</kbd> <kbd>VS Code Desktop 1.101+</kbd> <kbd>Local Codex data</kbd> <kbd>Trusted local environment</kbd>: no separate Node.js, Word or LibreOffice required.",
+    "- <kbd>CLI</kbd> <kbd>Node.js 22+</kbd> <kbd>Package dependencies installed</kbd> <kbd>Local Codex data</kbd> <kbd>Local output destination</kbd>",
+  ].join("\n");
+  assert.ok(hasSemanticTextPrefix(documents["README.md"], `# Codex Project Chat Exporter\n\n${readmePositioning}\n\n${requirements}\n\n${whyDocuments}\n`));
+  assert.ok(hasSemanticTextPrefix(documents["integrations/vscode/README.md"], `# Codex Project Chat Exporter for Visual Studio Code\n\n${positioning}\n\n${requirements}\n`));
   for (const relative of ["README.md", "integrations/vscode/README.md"]) {
+    assert.ok(includesSemanticText(documents[relative], requirements), `${relative}: requirements`);
     for (const scope of scopes) assert.ok(documents[relative].includes(scope), `${relative}: ${scope}`);
     for (const format of formatChoices) assert.ok(documents[relative].includes(format), `${relative}: ${format}`);
     assert.equal(documents[relative].includes("—"), false, `${relative}: em dash`);

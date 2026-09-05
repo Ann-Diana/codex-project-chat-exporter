@@ -1,6 +1,6 @@
 # Codex Project Chat Exporter for Visual Studio Code
 
-Turn local Codex project history into independent, portable archives – including editable Word documents and searchable PDFs.
+Export local Codex project history into independent, portable archives – including editable Word documents and searchable PDFs.
 
 > **To our knowledge, the only Codex session exporter with built-in DOCX and PDF output.**
 >
@@ -10,6 +10,11 @@ Turn local Codex project history into independent, portable archives – includi
 - Get Markdown, responsive HTML, manifests and optional verified source snapshots.
 - Add DOCX, PDF or both from the same readable document model.
 - Local and read-only toward original Codex data. No telemetry, import or repair.
+
+## Requirements at a glance
+
+- <kbd>VSIX</kbd> <kbd>VS Code Desktop 1.101+</kbd> <kbd>Local Codex data</kbd> <kbd>Trusted local environment</kbd>: no separate Node.js, Word or LibreOffice required.
+- <kbd>CLI</kbd> <kbd>Node.js 22+</kbd> <kbd>Package dependencies installed</kbd> <kbd>Local Codex data</kbd> <kbd>Local output destination</kbd>
 
 ![Illustration of Codex chat windows being exported](images/codex-project-chat-exporter-hero.png)
 
