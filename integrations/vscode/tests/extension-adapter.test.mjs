@@ -192,7 +192,7 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
   ]);
   assert.equal("codexProjectChatExporter.includeOriginalJsonl" in extensionPackage.contributes.configuration.properties, false);
   assert.equal("codexProjectChatExporter.exportProfile" in extensionPackage.contributes.configuration.properties, false);
-  assert.equal(extensionPackage.version, "0.1.4", "the final pre-release candidate must install as a distinguishable extension version");
+  assert.equal(extensionPackage.version, "0.1.5", "the final pre-release candidate must install as a distinguishable extension version");
   assert.equal(extensionPackage.contributes.configuration.properties["codexProjectChatExporter.diagnosticOutput"].default, false);
   assert.equal(extensionPackage.contributes.configuration.properties["codexProjectChatExporter.outputDirectory"].scope, "machine");
   assert.equal(extensionPackage.contributes.configuration.properties["codexProjectChatExporter.codexHome"].scope, "machine");
@@ -225,14 +225,14 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
 {
   const buildTemp = await fsp.realpath(await fsp.mkdtemp(path.join(os.tmpdir(), "codex-vsix-build-success-")));
   const distDir = path.join(buildTemp, "dist");
-  const currentCandidate = path.join(distDir, "codex-project-chat-exporter-vscode-0.1.4.vsix");
+  const currentCandidate = path.join(distDir, "codex-project-chat-exporter-vscode-0.1.5.vsix");
   await fsp.mkdir(distDir, { recursive: true });
   await fsp.writeFile(currentCandidate, "previous candidate", "utf8");
   const result = await buildVsix({
     distDir,
     archiveWriter: async ({ archivePath }) => fsp.writeFile(archivePath, "synthetic VSIX", "utf8"),
   });
-  assert.equal(path.basename(result.vsixPath), "codex-project-chat-exporter-vscode-0.1.4.vsix");
+  assert.equal(path.basename(result.vsixPath), "codex-project-chat-exporter-vscode-0.1.5.vsix");
   assert.equal(await fsp.readFile(result.vsixPath, "utf8"), "synthetic VSIX", "the exact canonical candidate may be replaced in a controlled publication step");
   assert.equal((await fsp.stat(result.vsixPath)).isFile(), true);
   assert.equal(await fsp.stat(result.stage).then(() => true, () => false), false, "successful builds must remove their stage directory");

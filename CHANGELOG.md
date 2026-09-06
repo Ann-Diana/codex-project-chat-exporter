@@ -2,9 +2,21 @@
 
 All notable changes to this project are documented here.
 
-The latest published release is `v0.3.0`, dated 2026-09-04.
+The latest published release is `v0.3.1`, dated 2026-09-06.
 
 ## Unreleased
+
+## 0.3.1 – 2026-09-06
+
+### Fixed
+
+- Fixed five broken documentation links in the packaged Visual Studio Code extension.
+
+### Changed
+
+- Presented requirements, entry points, and HTML, DOCX, and PDF output more clearly.
+- Updated GitHub Actions to immutably pinned Node 24-based versions.
+- Export behavior and the archive format remain unchanged.
 
 ## 0.3.0 – 2026-09-04
 

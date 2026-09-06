@@ -55,7 +55,7 @@ import {
   isCompressedRolloutPath,
 } from "../lib/rollout-source.mjs";
 
-const VERSION = "0.3.0";
+const VERSION = "0.3.1";
 const ARCHIVE_FORMAT_VERSION = 1;
 const EXPORT_PROFILE = Object.freeze({
   COMPLETE: "complete",

@@ -382,16 +382,16 @@ test("public documentation keeps scope, format, privacy and version contracts co
 
   const changelog = await fs.readFile(path.join(repositoryRoot, "CHANGELOG.md"), "utf8");
   const releasePreparation = changelog.slice(0, changelog.indexOf("## 0.2.0"));
-  assert.ok(includesSemanticText(releasePreparation, "## Unreleased\n\n## 0.3.0 – 2026-09-04"));
-  assert.ok(releasePreparation.includes("The latest published release is `v0.3.0`, dated 2026-09-04."));
+  assert.ok(includesSemanticText(releasePreparation, "## Unreleased\n\n## 0.3.1 – 2026-09-06"));
+  assert.ok(releasePreparation.includes("The latest published release is `v0.3.1`, dated 2026-09-06."));
 
   const rootPackage = JSON.parse(await fs.readFile(path.join(repositoryRoot, "package.json"), "utf8"));
   const lockfile = JSON.parse(await fs.readFile(path.join(repositoryRoot, "package-lock.json"), "utf8"));
-  assert.equal(rootPackage.version, "0.3.0");
+  assert.equal(rootPackage.version, "0.3.1");
   assert.equal(lockfile.version, rootPackage.version);
   assert.equal(lockfile.packages[""].version, rootPackage.version);
   const extensionPackage = JSON.parse(await fs.readFile(path.join(repositoryRoot, "integrations", "vscode", "package.json"), "utf8"));
-  assert.equal(extensionPackage.version, "0.1.4");
+  assert.equal(extensionPackage.version, "0.1.5");
   for (const [relative, expected] of publicImages) {
     assert.equal(sha256(await fs.readFile(path.join(repositoryRoot, relative))), expected, relative);
   }

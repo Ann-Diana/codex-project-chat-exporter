@@ -112,7 +112,7 @@ await fs.writeFile(path.join(codexHome, "session_index.jsonl"), [
 ].join("\n") + "\n");
 
 const version = await execFileAsync(process.execPath, [script, "--version"], { cwd: temp });
-assert.equal(version.stdout.trim(), "0.3.0");
+assert.equal(version.stdout.trim(), "0.3.1");
 
 const projectList = await execFileAsync(process.execPath, [script, "--codex-home", codexHome, "--list"], { cwd: temp });
 assert.ok(projectList.stdout.includes(`${primaryProjectPath} (4: 3 active, 1 archived)`));

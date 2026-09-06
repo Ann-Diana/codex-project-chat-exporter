@@ -256,7 +256,7 @@ test("regular VSIX builds are byte-identical and their packaged runtime exports 
     const rootPackage = JSON.parse(await fs.readFile("package.json", "utf8"));
     const lock = JSON.parse(await fs.readFile("package-lock.json", "utf8"));
     const extensionPackage = JSON.parse(await fs.readFile(path.join("integrations", "vscode", "package.json"), "utf8"));
-    assert.equal(extensionPackage.version, "0.1.4");
+    assert.equal(extensionPackage.version, "0.1.5");
     const publicImages = new Map([
       ["codex-project-chat-exporter-hero.png", "36a0a0923c97c040d85d16e9584a80b997c8b265d93a5d8cb7a01b08c07dd311"],
       ["01-scope-picker.png", "78ba8cf95d07d48be0eb06a773ac702aac02d3155a760aaf0da664f7646ab5b0"],
