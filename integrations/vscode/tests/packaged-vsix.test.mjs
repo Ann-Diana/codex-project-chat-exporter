@@ -16,7 +16,7 @@ import { inflateSync } from "node:zlib";
 import JSZip from "jszip";
 import xmlJs from "xml-js";
 
-import { buildVsix } from "../scripts/build-vsix.mjs";
+import { buildVsix, PACKAGED_README_SOURCE_REF, transformPackagedReadme } from "../scripts/build-vsix.mjs";
 
 const require = createRequire(import.meta.url);
 const { xml2js } = xmlJs;
@@ -27,6 +27,34 @@ const ONE_PIXEL_PNG_SHA256 = "431ced6916a2a21a156e38701afe55bbd7f88969fbbfc56d7f
 const PACKAGED_PARENT_PROJECT = process.platform === "win32" ? "C:\\Synthetic\\parent" : "/synthetic/parent";
 const PACKAGED_CHILD_PROJECT = process.platform === "win32" ? "C:\\Synthetic\\link-check" : "/synthetic/link-check";
 const PACKAGED_MISSING_PROJECT = process.platform === "win32" ? "C:\\Synthetic\\renamed" : "/synthetic/renamed";
+const PACKAGED_README_REPOSITORY_URL = "https://github.com/Ann-Diana/codex-project-chat-exporter";
+const PACKAGED_README_TRANSFORMATIONS = [
+  {
+    source: 'src="images/codex-project-chat-exporter-hero.png"',
+    packaged: `src="${PACKAGED_README_REPOSITORY_URL}/raw/${PACKAGED_README_SOURCE_REF}/integrations/vscode/images/codex-project-chat-exporter-hero.png"`,
+    expectedOccurrences: 1,
+  },
+  ...[
+    "01-scope-picker.png",
+    "02-project-history-picker.png",
+    "03-document-format-picker.png",
+    "04-export-success.png",
+  ].map((name) => ({
+    source: `](images/${name})`,
+    packaged: `](${PACKAGED_README_REPOSITORY_URL}/raw/${PACKAGED_README_SOURCE_REF}/integrations/vscode/images/${name})`,
+    expectedOccurrences: 1,
+  })),
+  {
+    source: "](LICENSE)",
+    packaged: `](${PACKAGED_README_REPOSITORY_URL}/blob/${PACKAGED_README_SOURCE_REF}/integrations/vscode/LICENSE)`,
+    expectedOccurrences: 2,
+  },
+  {
+    source: "](PACKAGED_TEST_PLAN.md)",
+    packaged: `](${PACKAGED_README_REPOSITORY_URL}/blob/${PACKAGED_README_SOURCE_REF}/integrations/vscode/PACKAGED_TEST_PLAN.md)`,
+    expectedOccurrences: 1,
+  },
+];
 
 function sha256(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
@@ -80,28 +108,38 @@ function isAllowedAbsoluteHttpsUrl(target, allowedHostname) {
   }
 }
 
-function assertPackagedReadmeTargets(zip, readme) {
+function assertPackagedReadmeTargets(readme) {
   const targets = [...markdownLinkTargets(readme), ...htmlImageSources(readme)];
   for (const rawTarget of targets) {
     const target = rawTarget.startsWith("<") && rawTarget.endsWith(">") ? rawTarget.slice(1, -1) : rawTarget;
     if (!target || target.startsWith("#")) continue;
-    if (target.startsWith("https://") || target.startsWith("http://")) {
-      assert.equal(
-        isAllowedAbsoluteHttpsUrl(target, "github.com") || isAllowedAbsoluteHttpsUrl(target, "img.shields.io"),
-        true,
-        `packaged README absolute URL is not allowed: ${target}`,
-      );
-      continue;
-    }
-
-    const filePart = decodeURIComponent(target.split("#", 1)[0]);
-    assert.equal(filePart.includes("\\"), false, `packaged README uses a backslash path: ${target}`);
-    const segments = filePart.split("/");
-    assert.ok(segments.every((segment) => segment && segment !== "." && segment !== ".."), `packaged README leaves its package folder: ${target}`);
-    const packagedPath = path.posix.join("extension", ...segments);
-    assert.ok(packagedPath.startsWith("extension/"), `packaged README leaves its package folder: ${target}`);
-    assert.ok(zip.file(packagedPath), `packaged README target is missing: ${target}`);
+    assert.equal(
+      isAllowedAbsoluteHttpsUrl(target, "github.com") || isAllowedAbsoluteHttpsUrl(target, "img.shields.io"),
+      true,
+      `packaged README target is not a permitted absolute HTTPS URL: ${target}`,
+    );
   }
+}
+
+function literalOccurrenceCount(text, needle) {
+  let count = 0;
+  let cursor = 0;
+  while (cursor <= text.length - needle.length) {
+    const index = text.indexOf(needle, cursor);
+    if (index < 0) break;
+    count += 1;
+    cursor = index + needle.length;
+  }
+  return count;
+}
+
+function expectedPackagedReadme(sourceReadme) {
+  let expected = sourceReadme;
+  for (const { source, packaged, expectedOccurrences } of PACKAGED_README_TRANSFORMATIONS) {
+    assert.equal(literalOccurrenceCount(expected, source), expectedOccurrences, source);
+    expected = expected.replaceAll(source, packaged);
+  }
+  return expected;
 }
 
 test("packaged README GitHub URL validation uses an exact HTTPS hostname and fails closed", () => {
@@ -119,6 +157,32 @@ test("packaged README GitHub URL validation uses an exact HTTPS hostname and fai
   for (const [target, expected] of cases) {
     assert.equal(isAllowedAbsoluteHttpsUrl(target, "github.com"), expected, target);
   }
+});
+
+test("packaged README transformation is exact, pinned and fails closed", async () => {
+  const sourceReadme = await fs.readFile(path.join(extensionRoot, "README.md"), "utf8");
+  assert.equal(PACKAGED_README_SOURCE_REF, "c0d31b9712edfa577ea3276254e941651e7badfd");
+  assert.equal(PACKAGED_README_SOURCE_REF.length, 40);
+  assert.ok([...PACKAGED_README_SOURCE_REF].every((character) => "0123456789abcdef".includes(character)));
+  assert.equal(
+    sourceReadme.includes('code --install-extension "C:\\path\\to\\codex-project-chat-exporter-vscode-<version>.vsix" --force'),
+    false,
+  );
+  assert.equal(transformPackagedReadme(sourceReadme), expectedPackagedReadme(sourceReadme));
+
+  const missingHero = sourceReadme.replace(
+    'src="images/codex-project-chat-exporter-hero.png"',
+    'src="https://example.invalid/missing-hero.png"',
+  );
+  assert.throws(() => transformPackagedReadme(missingHero), /Expected 1 VSIX README occurrence/);
+  assert.throws(
+    () => transformPackagedReadme(`${sourceReadme}\n![duplicate](images/01-scope-picker.png)\n`),
+    /Expected 1 VSIX README occurrence/,
+  );
+  assert.throws(
+    () => transformPackagedReadme(`${sourceReadme}\n[unexpected](EXTRA.md)\n`),
+    /Unmapped relative VSIX README target/,
+  );
 });
 
 function collectElements(value, name, result = []) {
@@ -233,9 +297,16 @@ test("regular VSIX builds are byte-identical and their packaged runtime exports 
     assert.ok(files.every((entry) => entry.date.toISOString() === FIXED_DATE));
     const packagedReadmeBytes = await zip.file("extension/README.md")?.async("nodebuffer");
     assert.ok(packagedReadmeBytes, "packaged README is missing");
-    assert.deepEqual(packagedReadmeBytes, await fs.readFile(path.join(extensionRoot, "README.md")));
+    const sourceReadme = await fs.readFile(path.join(extensionRoot, "README.md"), "utf8");
     const packagedReadme = packagedReadmeBytes.toString("utf8");
-    assertPackagedReadmeTargets(zip, packagedReadme);
+    assert.notEqual(packagedReadme, sourceReadme);
+    assert.equal(packagedReadme, expectedPackagedReadme(sourceReadme));
+    assertPackagedReadmeTargets(packagedReadme);
+    assert.equal(packagedReadme.includes("../../"), false);
+    for (const { source, packaged, expectedOccurrences } of PACKAGED_README_TRANSFORMATIONS) {
+      assert.equal(literalOccurrenceCount(packagedReadme, source), 0, source);
+      assert.equal(literalOccurrenceCount(packagedReadme, packaged), expectedOccurrences, packaged);
+    }
     for (const requiredTarget of [
       "extension/LICENSE",
       "extension/PACKAGED_TEST_PLAN.md",

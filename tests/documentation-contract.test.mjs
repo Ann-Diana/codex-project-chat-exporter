@@ -451,6 +451,21 @@ test("VSIX README uses the four approved badges and syntactic HTTPS links", asyn
       `VSIX README absolute URL is not allowed: ${target}`,
     );
   }
+
+  const installCommand = 'code --install-extension "C:\\path\\to\\codex-project-chat-exporter-vscode-<version>.vsix"';
+  assert.equal(literalOccurrenceCount(readme, installCommand), 1);
+  assert.equal(readme.includes(`${installCommand} --force`), false);
+  assert.equal(literalOccurrenceCount(readme, 'src="images/codex-project-chat-exporter-hero.png"'), 1);
+  for (const image of [
+    "01-scope-picker.png",
+    "02-project-history-picker.png",
+    "03-document-format-picker.png",
+    "04-export-success.png",
+  ]) assert.equal(literalOccurrenceCount(readme, `](images/${image})`), 1, image);
+  assert.equal(literalOccurrenceCount(readme, "](LICENSE)"), 2);
+  assert.equal(literalOccurrenceCount(readme, "](PACKAGED_TEST_PLAN.md)"), 1);
+  assert.equal(readme.includes("/raw/c0d31b9712edfa577ea3276254e941651e7badfd/integrations/vscode/images/"), false);
+  assert.equal(readme.includes("/blob/c0d31b9712edfa577ea3276254e941651e7badfd/integrations/vscode/"), false);
 });
 
 test("root README keeps the three entry points and their runtime requirements accurate", async () => {

@@ -35,7 +35,7 @@ The extension is distributed as a VSIX and is not published in the Visual Studio
 Terminal installation is also available:
 
 ```powershell
-code --install-extension "C:\path\to\codex-project-chat-exporter-vscode-<version>.vsix" --force
+code --install-extension "C:\path\to\codex-project-chat-exporter-vscode-<version>.vsix"
 ```
 
 ## Export
