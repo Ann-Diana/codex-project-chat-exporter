@@ -1,6 +1,6 @@
 {
   "name": "codex-project-chat-exporter",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "private": true,
   "description": "IDE-agnostic, project-aware local bulk export for active and archived Codex sessions.",
   "type": "module",

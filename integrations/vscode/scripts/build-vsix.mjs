@@ -10,6 +10,35 @@ const defaultRepoRoot = path.resolve(defaultExtensionRoot, "..", "..");
 const FIXED_ARCHIVE_DATE = new Date("2000-01-01T00:00:00.000Z");
 const RUNTIME_ROOT = "extension/vendor/codex-project-chat-exporter";
 const FORBIDDEN_NATIVE_EXTENSIONS = new Set([".dll", ".dylib", ".exe", ".node", ".so"]);
+export const PACKAGED_README_SOURCE_REF = "c0d31b9712edfa577ea3276254e941651e7badfd";
+const PACKAGED_README_REPOSITORY_URL = "https://github.com/Ann-Diana/codex-project-chat-exporter";
+const PACKAGED_README_TRANSFORMATIONS = Object.freeze([
+  {
+    source: 'src="images/codex-project-chat-exporter-hero.png"',
+    packaged: `src="${PACKAGED_README_REPOSITORY_URL}/raw/${PACKAGED_README_SOURCE_REF}/integrations/vscode/images/codex-project-chat-exporter-hero.png"`,
+    expectedOccurrences: 1,
+  },
+  ...[
+    "01-scope-picker.png",
+    "02-project-history-picker.png",
+    "03-document-format-picker.png",
+    "04-export-success.png",
+  ].map((name) => ({
+    source: `](images/${name})`,
+    packaged: `](${PACKAGED_README_REPOSITORY_URL}/raw/${PACKAGED_README_SOURCE_REF}/integrations/vscode/images/${name})`,
+    expectedOccurrences: 1,
+  })),
+  {
+    source: "](LICENSE)",
+    packaged: `](${PACKAGED_README_REPOSITORY_URL}/blob/${PACKAGED_README_SOURCE_REF}/integrations/vscode/LICENSE)`,
+    expectedOccurrences: 2,
+  },
+  {
+    source: "](PACKAGED_TEST_PLAN.md)",
+    packaged: `](${PACKAGED_README_REPOSITORY_URL}/blob/${PACKAGED_README_SOURCE_REF}/integrations/vscode/PACKAGED_TEST_PLAN.md)`,
+    expectedOccurrences: 1,
+  },
+]);
 const PUBLIC_IMAGE_HASHES = new Map([
   ["codex-project-chat-exporter-hero.png", "36a0a0923c97c040d85d16e9584a80b997c8b265d93a5d8cb7a01b08c07dd311"],
   ["01-scope-picker.png", "78ba8cf95d07d48be0eb06a773ac702aac02d3155a760aaf0da664f7646ab5b0"],
@@ -63,7 +92,8 @@ export async function buildVsix(options = {}) {
     }
 
     await copyVerifiedFile(path.join(extensionRoot, "package.json"), path.join(stage, "extension", "package.json"), stageOwned, stage);
-    await copyVerifiedFile(path.join(extensionRoot, "README.md"), path.join(stage, "extension", "README.md"), stageOwned, stage);
+    const sourceReadme = await fs.readFile(path.join(extensionRoot, "README.md"), "utf8");
+    await writeOwnedStageFile(stageOwned, stage, path.join(stage, "extension", "README.md"), transformPackagedReadme(sourceReadme));
     await copyVerifiedFile(path.join(extensionRoot, "PACKAGED_TEST_PLAN.md"), path.join(stage, "extension", "PACKAGED_TEST_PLAN.md"), stageOwned, stage);
     await copyVerifiedFile(path.join(extensionRoot, "LICENSE"), path.join(stage, "extension", "LICENSE"), stageOwned, stage);
     for (const name of [
@@ -151,6 +181,76 @@ export async function buildVsix(options = {}) {
       await removeOwnedStage(stageOwned, stage, distDir);
     }
   }
+}
+
+export function transformPackagedReadme(sourceReadme) {
+  if (typeof sourceReadme !== "string") throw new TypeError("VSIX README source must be text");
+  if (PACKAGED_README_SOURCE_REF.length !== 40 || [...PACKAGED_README_SOURCE_REF].some((character) => !"0123456789abcdef".includes(character))) {
+    throw new Error("PACKAGED_README_SOURCE_REF must be a full lowercase 40-character commit SHA");
+  }
+
+  const mappedRelativeTargets = new Set(PACKAGED_README_TRANSFORMATIONS.map(({ source }) => source));
+  const relativeTargets = collectPackagedReadmeRelativeTargetLiterals(sourceReadme);
+  for (const target of relativeTargets) {
+    if (!mappedRelativeTargets.has(target)) throw new Error(`Unmapped relative VSIX README target: ${target}`);
+  }
+
+  let packagedReadme = sourceReadme;
+  for (const { source, packaged, expectedOccurrences } of PACKAGED_README_TRANSFORMATIONS) {
+    const actualOccurrences = literalOccurrenceCount(packagedReadme, source);
+    if (actualOccurrences !== expectedOccurrences) {
+      throw new Error(`Expected ${expectedOccurrences} VSIX README occurrence(s) of ${source}, found ${actualOccurrences}`);
+    }
+    packagedReadme = packagedReadme.replaceAll(source, packaged);
+  }
+
+  const remainingRelativeTargets = collectPackagedReadmeRelativeTargetLiterals(packagedReadme);
+  if (remainingRelativeTargets.length > 0) throw new Error(`Untransformed relative VSIX README target: ${remainingRelativeTargets[0]}`);
+  return packagedReadme;
+}
+
+function collectPackagedReadmeRelativeTargetLiterals(readme) {
+  const literals = [];
+  let cursor = 0;
+  while (cursor < readme.length) {
+    const marker = readme.indexOf("](", cursor);
+    if (marker < 0) break;
+    const end = readme.indexOf(")", marker + 2);
+    if (end < 0) throw new Error("Unterminated Markdown target in VSIX README");
+    const target = readme.slice(marker + 2, end).trim();
+    if (target && !target.startsWith("#") && !target.startsWith("https://")) literals.push(`](${target})`);
+    cursor = end + 1;
+  }
+
+  cursor = 0;
+  while (cursor < readme.length) {
+    const imageStart = readme.indexOf("<img", cursor);
+    if (imageStart < 0) break;
+    const imageEnd = readme.indexOf(">", imageStart + 4);
+    if (imageEnd < 0) throw new Error("Unterminated HTML image in VSIX README");
+    const sourceStart = readme.indexOf('src="', imageStart + 4);
+    if (sourceStart >= 0 && sourceStart < imageEnd) {
+      const valueStart = sourceStart + 'src="'.length;
+      const valueEnd = readme.indexOf('"', valueStart);
+      if (valueEnd < 0 || valueEnd > imageEnd) throw new Error("Unterminated HTML image source in VSIX README");
+      const target = readme.slice(valueStart, valueEnd);
+      if (target && !target.startsWith("https://")) literals.push(`src="${target}"`);
+    }
+    cursor = imageEnd + 1;
+  }
+  return literals;
+}
+
+function literalOccurrenceCount(text, needle) {
+  let count = 0;
+  let cursor = 0;
+  while (cursor <= text.length - needle.length) {
+    const index = text.indexOf(needle, cursor);
+    if (index < 0) break;
+    count += 1;
+    cursor = index + needle.length;
+  }
+  return count;
 }
 
 async function copyVerifiedFile(source, destination, stageOwned, stage) {

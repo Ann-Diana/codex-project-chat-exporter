@@ -57,12 +57,12 @@ async function createFixture() {
 test("direct CLI help and version remain non-interactive with locked stdin", async () => {
   const help = await runCli(["--help"]);
   assert.equal(help.code, 0);
-  assert.match(help.stdout, /Codex Project Chat Exporter 0\.3\.0/);
+  assert.match(help.stdout, /Codex Project Chat Exporter 0\.3\.1/);
   assert.equal(help.stderr, "");
   const version = await runCli(["--version", "--report-format", "json"]);
   assert.equal(version.code, 0);
   assert.equal(version.stderr, "");
-  assert.deepEqual(JSON.parse(version.stdout), { schema_version: 1, kind: "version", message: "0.3.0", exit_code: 0, version: "0.3.0" });
+  assert.deepEqual(JSON.parse(version.stdout), { schema_version: 1, kind: "version", message: "0.3.1", exit_code: 0, version: "0.3.1" });
 });
 
 test("mixed information and action flags retain their historical priority", async () => {

@@ -382,16 +382,16 @@ test("public documentation keeps scope, format, privacy and version contracts co
 
   const changelog = await fs.readFile(path.join(repositoryRoot, "CHANGELOG.md"), "utf8");
   const releasePreparation = changelog.slice(0, changelog.indexOf("## 0.2.0"));
-  assert.ok(includesSemanticText(releasePreparation, "## Unreleased\n\n## 0.3.0 – 2026-09-04"));
-  assert.ok(releasePreparation.includes("The latest published release is `v0.3.0`, dated 2026-09-04."));
+  assert.ok(includesSemanticText(releasePreparation, "## Unreleased\n\n## 0.3.1 – 2026-09-06"));
+  assert.ok(releasePreparation.includes("The latest published release is `v0.3.1`, dated 2026-09-06."));
 
   const rootPackage = JSON.parse(await fs.readFile(path.join(repositoryRoot, "package.json"), "utf8"));
   const lockfile = JSON.parse(await fs.readFile(path.join(repositoryRoot, "package-lock.json"), "utf8"));
-  assert.equal(rootPackage.version, "0.3.0");
+  assert.equal(rootPackage.version, "0.3.1");
   assert.equal(lockfile.version, rootPackage.version);
   assert.equal(lockfile.packages[""].version, rootPackage.version);
   const extensionPackage = JSON.parse(await fs.readFile(path.join(repositoryRoot, "integrations", "vscode", "package.json"), "utf8"));
-  assert.equal(extensionPackage.version, "0.1.4");
+  assert.equal(extensionPackage.version, "0.1.5");
   for (const [relative, expected] of publicImages) {
     assert.equal(sha256(await fs.readFile(path.join(repositoryRoot, relative))), expected, relative);
   }
@@ -451,6 +451,21 @@ test("VSIX README uses the four approved badges and syntactic HTTPS links", asyn
       `VSIX README absolute URL is not allowed: ${target}`,
     );
   }
+
+  const installCommand = 'code --install-extension "C:\\path\\to\\codex-project-chat-exporter-vscode-<version>.vsix"';
+  assert.equal(literalOccurrenceCount(readme, installCommand), 1);
+  assert.equal(readme.includes(`${installCommand} --force`), false);
+  assert.equal(literalOccurrenceCount(readme, 'src="images/codex-project-chat-exporter-hero.png"'), 1);
+  for (const image of [
+    "01-scope-picker.png",
+    "02-project-history-picker.png",
+    "03-document-format-picker.png",
+    "04-export-success.png",
+  ]) assert.equal(literalOccurrenceCount(readme, `](images/${image})`), 1, image);
+  assert.equal(literalOccurrenceCount(readme, "](LICENSE)"), 2);
+  assert.equal(literalOccurrenceCount(readme, "](PACKAGED_TEST_PLAN.md)"), 1);
+  assert.equal(readme.includes("/raw/c0d31b9712edfa577ea3276254e941651e7badfd/integrations/vscode/images/"), false);
+  assert.equal(readme.includes("/blob/c0d31b9712edfa577ea3276254e941651e7badfd/integrations/vscode/"), false);
 });
 
 test("root README keeps the three entry points and their runtime requirements accurate", async () => {
