@@ -65,15 +65,32 @@ function htmlImageSources(text) {
   return sources;
 }
 
+function isAllowedAbsoluteHttpsUrl(target, allowedHostname) {
+  const authorityStart = "https://".length;
+  if (!target.startsWith("https://") || target.length === authorityStart || "/?#".includes(target[authorityStart])) return false;
+  try {
+    const url = new URL(target);
+    return url.protocol === "https:"
+      && url.hostname === allowedHostname
+      && url.username === ""
+      && url.password === ""
+      && url.port === "";
+  } catch {
+    return false;
+  }
+}
+
 function assertPackagedReadmeTargets(zip, readme) {
   const targets = [...markdownLinkTargets(readme), ...htmlImageSources(readme)];
   for (const rawTarget of targets) {
     const target = rawTarget.startsWith("<") && rawTarget.endsWith(">") ? rawTarget.slice(1, -1) : rawTarget;
     if (!target || target.startsWith("#")) continue;
     if (target.startsWith("https://") || target.startsWith("http://")) {
-      const url = new URL(target);
-      assert.equal(url.protocol, "https:", target);
-      if (target.includes("github.com")) assert.equal(url.hostname, "github.com", target);
+      assert.equal(
+        isAllowedAbsoluteHttpsUrl(target, "github.com") || isAllowedAbsoluteHttpsUrl(target, "img.shields.io"),
+        true,
+        `packaged README absolute URL is not allowed: ${target}`,
+      );
       continue;
     }
 
@@ -86,6 +103,23 @@ function assertPackagedReadmeTargets(zip, readme) {
     assert.ok(zip.file(packagedPath), `packaged README target is missing: ${target}`);
   }
 }
+
+test("packaged README GitHub URL validation uses an exact HTTPS hostname and fails closed", () => {
+  const cases = [
+    ["https://github.com/Ann-Diana/codex-project-chat-exporter", true],
+    ["https://github.com.evil.example/path", false],
+    ["https://example.test/?next=github.com", false],
+    ["http://github.com/path", false],
+    ["https://[invalid", false],
+    ["https:github.com/path", false],
+    ["https:///github.com/path", false],
+    ["https://github.com@evil.example/path", false],
+    ["https://evil.example@github.com/path", false],
+  ];
+  for (const [target, expected] of cases) {
+    assert.equal(isAllowedAbsoluteHttpsUrl(target, "github.com"), expected, target);
+  }
+});
 
 function collectElements(value, name, result = []) {
   if (!value || typeof value !== "object") return result;

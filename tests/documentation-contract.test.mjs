@@ -200,6 +200,21 @@ function htmlImageSources(text) {
   return sources;
 }
 
+function isAllowedAbsoluteHttpsUrl(target, allowedHostname) {
+  const authorityStart = "https://".length;
+  if (!target.startsWith("https://") || target.length === authorityStart || "/?#".includes(target[authorityStart])) return false;
+  try {
+    const url = new URL(target);
+    return url.protocol === "https:"
+      && url.hostname === allowedHostname
+      && url.username === ""
+      && url.password === ""
+      && url.port === "";
+  } catch {
+    return false;
+  }
+}
+
 function markdownSection(markdown, heading) {
   const normalized = normalizeTextLineEndings(markdown);
   const start = normalized.indexOf(`${heading}\n`);
@@ -399,6 +414,23 @@ test("root README uses only the four approved dynamic badges", async () => {
   assert.equal(externalImageSources.length, 4);
 });
 
+test("GitHub URL validation uses an exact HTTPS hostname and fails closed", () => {
+  const cases = [
+    ["https://github.com/Ann-Diana/codex-project-chat-exporter", true],
+    ["https://github.com.evil.example/path", false],
+    ["https://example.test/?next=github.com", false],
+    ["http://github.com/path", false],
+    ["https://[invalid", false],
+    ["https:github.com/path", false],
+    ["https:///github.com/path", false],
+    ["https://github.com@evil.example/path", false],
+    ["https://evil.example@github.com/path", false],
+  ];
+  for (const [target, expected] of cases) {
+    assert.equal(isAllowedAbsoluteHttpsUrl(target, "github.com"), expected, target);
+  }
+});
+
 test("VSIX README uses the four approved badges and syntactic HTTPS links", async () => {
   const readme = await fs.readFile(path.join(repositoryRoot, "integrations", "vscode", "README.md"), "utf8");
   for (const badge of approvedVsixBadges) {
@@ -413,11 +445,11 @@ test("VSIX README uses the four approved badges and syntactic HTTPS links", asyn
 
   for (const target of markdownLinkTargets(readme)) {
     if (!target.startsWith("https://") && !target.startsWith("http://")) continue;
-    const url = new URL(target);
-    assert.equal(url.protocol, "https:", target);
-    assert.equal(url.username, "", target);
-    assert.equal(url.password, "", target);
-    if (target.includes("github.com")) assert.equal(url.hostname, "github.com", target);
+    assert.equal(
+      isAllowedAbsoluteHttpsUrl(target, "github.com") || isAllowedAbsoluteHttpsUrl(target, "img.shields.io"),
+      true,
+      `VSIX README absolute URL is not allowed: ${target}`,
+    );
   }
 });
 
