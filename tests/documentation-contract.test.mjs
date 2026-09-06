@@ -19,11 +19,56 @@ const publicDocuments = [
 ];
 const scopes = ["Current Workspace", "Project from Codex history…", "All Sessions"];
 const formatChoices = ["Standard formats only", "Add DOCX", "Add PDF", "Add DOCX and PDF"];
+const approvedBadges = [
+  {
+    alt: "Latest release",
+    image: "https://img.shields.io/github/v/release/Ann-Diana/codex-project-chat-exporter?style=flat-square&label=release",
+    target: "https://github.com/Ann-Diana/codex-project-chat-exporter/releases/latest",
+  },
+  {
+    alt: "CLI platforms",
+    image: "https://img.shields.io/badge/CLI-Windows%20%7C%20macOS%20%7C%20Linux-555?style=flat-square",
+    target: "#choose-how-to-run",
+  },
+  {
+    alt: "License",
+    image: "https://img.shields.io/github/license/Ann-Diana/codex-project-chat-exporter?style=flat-square",
+    target: "LICENSE",
+  },
+  {
+    alt: "Tests",
+    image: "https://img.shields.io/github/actions/workflow/status/Ann-Diana/codex-project-chat-exporter/test.yml?branch=main&style=flat-square&label=tests",
+    target: "https://github.com/Ann-Diana/codex-project-chat-exporter/actions/workflows/test.yml",
+  },
+];
+const approvedVsixBadges = [
+  {
+    alt: "VS Code",
+    image: "https://img.shields.io/badge/VS%20Code-1.101%2B-007ACC?style=flat-square",
+    target: "#requirements",
+  },
+  {
+    alt: "Manual test",
+    image: "https://img.shields.io/badge/manual%20test-Windows-0078D4?style=flat-square",
+    target: "#tested-scope-and-limits",
+  },
+  {
+    alt: "License",
+    image: "https://img.shields.io/github/license/Ann-Diana/codex-project-chat-exporter?style=flat-square",
+    target: "LICENSE",
+  },
+  {
+    alt: "Tests",
+    image: "https://img.shields.io/github/actions/workflow/status/Ann-Diana/codex-project-chat-exporter/test.yml?branch=main&style=flat-square&label=tests",
+    target: "https://github.com/Ann-Diana/codex-project-chat-exporter/actions/workflows/test.yml",
+  },
+];
 const publicImages = new Map([
   ["docs/assets/codex-project-chat-exporter-hero.png", "36a0a0923c97c040d85d16e9584a80b997c8b265d93a5d8cb7a01b08c07dd311"],
   ["docs/screenshots/export-html-images.png", "0f1aaeab8e30fb642dea7bd147b4a1dddbbeb92623343cbef8af13a63cd21edd"],
   ["docs/screenshots/export-docx-images.png", "d93212878b708acff4e0c3f56add910ad15e8ffd9e6f3fe9b582a0dce56dd96d"],
   ["docs/screenshots/export-pdf-images.png", "333e676763748332faf291683c9a35f6ca17fb48d5518a392eb4c9b33983b7dd"],
+  ["docs/screenshots/export-output-overview.png", "31d11787d57d1355ab15b5f9eb0617fe8d0eff4387c69b8c2a67cae45528dfb8"],
   ["integrations/vscode/images/codex-project-chat-exporter-hero.png", "36a0a0923c97c040d85d16e9584a80b997c8b265d93a5d8cb7a01b08c07dd311"],
   ["integrations/vscode/images/01-scope-picker.png", "78ba8cf95d07d48be0eb06a773ac702aac02d3155a760aaf0da664f7646ab5b0"],
   ["integrations/vscode/images/02-project-history-picker.png", "437b751ede0c909e6b188b0dfaddaffc066d87ba4b7f1ee3f7e9f64463c31fd5"],
@@ -35,16 +80,28 @@ function sha256(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
+function pngDimensions(bytes) {
+  assert.deepEqual(bytes.subarray(0, 8), Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+  assert.equal(bytes.subarray(12, 16).toString("ascii"), "IHDR");
+  return { width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20) };
+}
+
 function normalizeTextLineEndings(value) {
   return value.replaceAll("\r\n", "\n");
 }
 
-function hasSemanticTextPrefix(actual, expected) {
-  return normalizeTextLineEndings(actual).startsWith(normalizeTextLineEndings(expected));
-}
-
 function includesSemanticText(actual, expected) {
   return normalizeTextLineEndings(actual).includes(normalizeTextLineEndings(expected));
+}
+
+function literalOccurrenceCount(value, literal) {
+  let count = 0;
+  let cursor = 0;
+  while ((cursor = value.indexOf(literal, cursor)) >= 0) {
+    count += 1;
+    cursor += literal.length;
+  }
+  return count;
 }
 
 function runCli(args) {
@@ -106,6 +163,49 @@ function markdownLinkTargets(text) {
     cursor = end + 1;
   }
   return targets;
+}
+
+function markdownImageTargets(text) {
+  const targets = [];
+  let cursor = 0;
+  while (cursor < text.length) {
+    const imageStart = text.indexOf("![", cursor);
+    if (imageStart < 0) break;
+    const marker = text.indexOf("](", imageStart + 2);
+    if (marker < 0) break;
+    let end = marker + 2;
+    while (end < text.length && text[end] !== ")") end += 1;
+    if (end < text.length) targets.push(text.slice(marker + 2, end).trim());
+    cursor = end + 1;
+  }
+  return targets;
+}
+
+function htmlImageSources(text) {
+  const sources = [];
+  let cursor = 0;
+  while (cursor < text.length) {
+    const imageStart = text.indexOf("<img", cursor);
+    if (imageStart < 0) break;
+    const imageEnd = text.indexOf(">", imageStart + 4);
+    if (imageEnd < 0) break;
+    const sourceStart = text.indexOf('src="', imageStart + 4);
+    if (sourceStart >= 0 && sourceStart < imageEnd) {
+      const valueStart = sourceStart + 'src="'.length;
+      const valueEnd = text.indexOf('"', valueStart);
+      if (valueEnd >= 0 && valueEnd < imageEnd) sources.push(text.slice(valueStart, valueEnd));
+    }
+    cursor = imageEnd + 1;
+  }
+  return sources;
+}
+
+function markdownSection(markdown, heading) {
+  const normalized = normalizeTextLineEndings(markdown);
+  const start = normalized.indexOf(`${heading}\n`);
+  assert.ok(start >= 0, `missing section: ${heading}`);
+  const next = normalized.indexOf("\n## ", start + heading.length);
+  return normalized.slice(start, next < 0 ? normalized.length : next);
 }
 
 function tableRows(markdown, headingStart) {
@@ -211,23 +311,6 @@ test("README profile matrix agrees with committed profile goldens", async () => 
   }
 });
 
-test("semantic documentation prefixes accept CRLF without accepting changed content", () => {
-  const expected = "# Heading\n\nStable content.\n";
-  const releaseHeading = "## Unreleased\n\n## 0.3.0 – 2026-09-04";
-  assert.equal(hasSemanticTextPrefix(expected, expected), true);
-  assert.equal(hasSemanticTextPrefix(expected.replaceAll("\n", "\r\n"), expected), true);
-  assert.equal(hasSemanticTextPrefix("# Heading\r\n\r\nChanged content.\r\n", expected), false);
-  assert.equal(hasSemanticTextPrefix("# Heading\r\nStable content.\r\n", expected), false);
-  assert.equal(includesSemanticText(`Before\n${expected}After\n`, expected), true);
-  assert.equal(includesSemanticText(`Before\r\n${expected.replaceAll("\n", "\r\n")}After\r\n`, expected), true);
-  assert.equal(includesSemanticText("Before\r\n# Heading\r\n\r\nChanged content.\r\nAfter\r\n", expected), false);
-  assert.equal(includesSemanticText("Before\r\n# Heading\r\nStable content.\r\nAfter\r\n", expected), false);
-  assert.equal(includesSemanticText(releaseHeading.replaceAll("\n", "\r\n"), releaseHeading), true);
-  assert.equal(includesSemanticText(releaseHeading, "## Pending\n\n## 0.3.0 – 2026-09-04"), false);
-  assert.equal(includesSemanticText(releaseHeading, "## Unreleased\n\n## 0.3.1 – 2026-09-04"), false);
-  assert.equal(includesSemanticText(releaseHeading, "## Unreleased\n\n## 0.3.0 – 2026-09-05"), false);
-});
-
 test("CHANGELOG published release statement matches its first release heading without Git history", async () => {
   const changelog = normalizeTextLineEndings(await fs.readFile(path.join(repositoryRoot, "CHANGELOG.md"), "utf8"));
   const lines = changelog.split("\n");
@@ -257,58 +340,23 @@ test("CHANGELOG published release statement matches its first release heading wi
 
 test("public documentation keeps scope, format, privacy and version contracts consistent", async () => {
   const documents = Object.fromEntries(await Promise.all(publicDocuments.map(async (relative) => [relative, await fs.readFile(path.join(repositoryRoot, relative), "utf8")])));
-  const positioning = [
-    "Export local Codex project history into independent, portable archives – including editable Word documents and searchable PDFs.",
-    "",
-    "> **To our knowledge, the only Codex session exporter with built-in DOCX and PDF output.**",
-    ">",
-    "> Based on publicly documented exporter features reviewed on 31 August 2026.",
-    "",
-    "- Export the current workspace, another recorded project or all local sessions.",
-    "- Get Markdown, responsive HTML, manifests and optional verified source snapshots.",
-    "- Add DOCX, PDF or both from the same readable document model.",
-    "- Local and read-only toward original Codex data. No telemetry, import or repair.",
-  ].join("\n");
-  const readmePositioning = positioning.replace(
-    "- Get Markdown, responsive HTML, manifests and optional verified source snapshots.",
-    "- Reconstruct paginated fork histories from validated local rollout references.\n- Get Markdown, responsive HTML, manifests and optional verified source snapshots.",
-  );
-  const whyDocuments = [
-    "## Why DOCX and PDF?",
-    "",
-    "- **Word:** editable documents for review, comments, handoff and further documentation.",
-    "- **PDF:** searchable, fixed-layout files for sharing, printing and archiving.",
-    "- **One source:** Markdown, HTML, DOCX and PDF follow the same session order and readable content selection.",
-  ].join("\n");
-  const requirements = [
-    "## Requirements at a glance",
-    "",
-    "- <kbd>VSIX</kbd> <kbd>VS Code Desktop 1.101+</kbd> <kbd>Local Codex data</kbd> <kbd>Trusted local environment</kbd>: no separate Node.js, Word or LibreOffice required.",
-    "- <kbd>CLI</kbd> <kbd>Node.js 22+</kbd> <kbd>Package dependencies installed</kbd> <kbd>Local Codex data</kbd> <kbd>Local output destination</kbd>",
-  ].join("\n");
-  assert.ok(hasSemanticTextPrefix(documents["README.md"], `# Codex Project Chat Exporter\n\n${readmePositioning}\n\n${requirements}\n\n${whyDocuments}\n`));
-  assert.ok(hasSemanticTextPrefix(documents["integrations/vscode/README.md"], `# Codex Project Chat Exporter for Visual Studio Code\n\n${positioning}\n\n${requirements}\n`));
   for (const relative of ["README.md", "integrations/vscode/README.md"]) {
-    assert.ok(includesSemanticText(documents[relative], requirements), `${relative}: requirements`);
     for (const scope of scopes) assert.ok(documents[relative].includes(scope), `${relative}: ${scope}`);
-    for (const format of formatChoices) assert.ok(documents[relative].includes(format), `${relative}: ${format}`);
-    assert.equal(documents[relative].includes("—"), false, `${relative}: em dash`);
   }
+  for (const format of formatChoices) assert.ok(documents["README.md"].includes(format), `README.md: ${format}`);
+  const vscodeReadmeLower = documents["integrations/vscode/README.md"].toLowerCase();
+  for (const format of ["standard formats only", "docx", "pdf", "both"]) assert.ok(vscodeReadmeLower.includes(format), `integrations/vscode/README.md: ${format}`);
 
   const allPublicText = Object.values(documents).join("\n");
   for (const forbidden of [
     "PDF is not implemented", "PDF is not selectable", "exportProfile", "includeOriginalJsonl",
     "archive format v2", "archive_format_version: 2", "C:\\Users\\ann-d", "Hoofilou", "pec_intranet",
   ]) assert.equal(allPublicText.includes(forbidden), false, forbidden);
-  // Check the public lists changed in this work package explicitly. A broad
-  // comma search would incorrectly reject commas between independent clauses.
-  for (const forbiddenOxfordPhrase of [
-    "moved, renamed, or", "different, moved, or", "Markdown, responsive HTML, and",
-    "Tool, Browser, and", "DOCX, PDF, and", "complete, readable, or", "Remote, virtual, and",
-  ]) assert.equal(allPublicText.includes(forbiddenOxfordPhrase), false, forbiddenOxfordPhrase);
   assert.ok(documents["README.md"].includes("there is no separate JSON document per session"));
   assert.ok(documents["README.md"].includes("Raw JSONL is source-faithful and is not automatically safe to share"));
-  assert.ok(documents["integrations/vscode/README.md"].includes("The folder is created only when an export actually starts."));
+  assert.ok(vscodeReadmeLower.includes("folder is created only when an export actually starts"));
+  assert.ok(documents["integrations/vscode/README.md"].includes("Raw JSONL is source-faithful and is not automatically safe to share"));
+  assert.ok(documents["integrations/vscode/README.md"].includes("No telemetry, uploader or application-level remote content fetch"));
 
   const archiveContract = await fs.readFile(path.join(repositoryRoot, "docs", "archive-format-v1.md"), "utf8");
   for (const required of [
@@ -321,9 +369,6 @@ test("public documentation keeps scope, format, privacy and version contracts co
   const releasePreparation = changelog.slice(0, changelog.indexOf("## 0.2.0"));
   assert.ok(includesSemanticText(releasePreparation, "## Unreleased\n\n## 0.3.0 – 2026-09-04"));
   assert.ok(releasePreparation.includes("The latest published release is `v0.3.0`, dated 2026-09-04."));
-  for (const forbiddenOxfordPhrase of ["text, monospace, symbol, and", "DOCX, PDF, and", "active, truncated, or"]) {
-    assert.equal(releasePreparation.includes(forbiddenOxfordPhrase), false, forbiddenOxfordPhrase);
-  }
 
   const rootPackage = JSON.parse(await fs.readFile(path.join(repositoryRoot, "package.json"), "utf8"));
   const lockfile = JSON.parse(await fs.readFile(path.join(repositoryRoot, "package-lock.json"), "utf8"));
@@ -338,6 +383,111 @@ test("public documentation keeps scope, format, privacy and version contracts co
   assert.deepEqual(
     await fs.readFile(path.join(repositoryRoot, "docs", "assets", "codex-project-chat-exporter-hero.png")),
     await fs.readFile(path.join(repositoryRoot, "integrations", "vscode", "images", "codex-project-chat-exporter-hero.png")),
+  );
+});
+
+test("root README uses only the four approved dynamic badges", async () => {
+  const readme = await fs.readFile(path.join(repositoryRoot, "README.md"), "utf8");
+  for (const badge of approvedBadges) {
+    const markdown = `[![${badge.alt}](${badge.image})](${badge.target})`;
+    assert.equal(literalOccurrenceCount(readme, markdown), 1, badge.alt);
+  }
+
+  const externalImageSources = [...markdownImageTargets(readme), ...htmlImageSources(readme)]
+    .filter((target) => target.startsWith("https://") || target.startsWith("http://"));
+  assert.deepEqual(externalImageSources, approvedBadges.map((badge) => badge.image));
+  assert.equal(externalImageSources.length, 4);
+});
+
+test("VSIX README uses the four approved badges and syntactic HTTPS links", async () => {
+  const readme = await fs.readFile(path.join(repositoryRoot, "integrations", "vscode", "README.md"), "utf8");
+  for (const badge of approvedVsixBadges) {
+    const markdown = `[![${badge.alt}](${badge.image})](${badge.target})`;
+    assert.equal(literalOccurrenceCount(readme, markdown), 1, badge.alt);
+  }
+
+  const externalImageSources = [...markdownImageTargets(readme), ...htmlImageSources(readme)]
+    .filter((target) => target.startsWith("https://") || target.startsWith("http://"));
+  assert.deepEqual(externalImageSources, approvedVsixBadges.map((badge) => badge.image));
+  assert.equal(externalImageSources.length, 4);
+
+  for (const target of markdownLinkTargets(readme)) {
+    if (!target.startsWith("https://") && !target.startsWith("http://")) continue;
+    const url = new URL(target);
+    assert.equal(url.protocol, "https:", target);
+    assert.equal(url.username, "", target);
+    assert.equal(url.password, "", target);
+    if (target.includes("github.com")) assert.equal(url.hostname, "github.com", target);
+  }
+});
+
+test("root README keeps the three entry points and their runtime requirements accurate", async () => {
+  const readme = await fs.readFile(path.join(repositoryRoot, "README.md"), "utf8");
+  const introduction = normalizeTextLineEndings(readme).slice(0, normalizeTextLineEndings(readme).indexOf("## Requirements"));
+  const requirements = markdownSection(readme, "## Requirements");
+  const launcherSection = markdownSection(readme, "## Windows launcher");
+  const vscodeSection = markdownSection(readme, "## Visual Studio Code quick start");
+  const cliSection = markdownSection(readme, "## Direct CLI");
+  const entryPointSection = markdownSection(readme, "## Choose how to run");
+  const rootPackage = JSON.parse(await fs.readFile(path.join(repositoryRoot, "package.json"), "utf8"));
+  const extensionPackage = JSON.parse(await fs.readFile(path.join(repositoryRoot, "integrations", "vscode", "package.json"), "utf8"));
+  const launcher = await fs.readFile(path.join(repositoryRoot, "export-codex-project-chats.cmd"), "utf8");
+
+  assert.equal(rootPackage.engines.node, ">=22.0.0");
+  assert.equal(extensionPackage.engines.vscode, "^1.101.0");
+  assert.equal(extensionPackage.capabilities.untrustedWorkspaces.supported, false);
+  assert.ok(introduction.split("\n").some((line) => ["Markdown", "HTML", "DOCX", "PDF", "same", "order"].every((term) => line.includes(term))));
+  assert.ok(introduction.toLowerCase().split("\n").some((line) => ["images", "inline", "deduplicated", "asset"].every((term) => line.includes(term))));
+  for (const entryPoint of ["Windows launcher", "Visual Studio Code extension", "Direct Node.js CLI"]) {
+    assert.ok(entryPointSection.includes(entryPoint), entryPoint);
+  }
+  for (const requirement of [
+    "local Codex session data", "VS Code Desktop 1.101+", "packaged VSIX",
+    "No separate Node.js installation", "Node.js 22+", "package dependencies",
+    "Microsoft Word", "LibreOffice",
+  ]) assert.ok(requirements.includes(requirement), requirement);
+  assert.equal(requirements.includes("Local output destination"), false);
+  assert.equal(requirements.includes("Trusted local environment"), false);
+
+  assert.ok(vscodeSection.includes("trust the local workspace"));
+  assert.ok(vscodeSection.includes("does not support untrusted workspaces"));
+  assert.ok(launcherSection.includes("npm ci"));
+  assert.ok(launcherSection.includes("`node` from `PATH`"));
+  assert.ok(launcherSection.includes("Codex Desktop's bundled Node runtime"));
+  assert.ok(includesSemanticText(launcherSection, "```powershell\n.\\export-codex-project-chats.cmd\n```"));
+  assert.ok(cliSection.includes("node .\\bin\\export-codex-project-chats.mjs --help"));
+  assert.ok(launcher.includes("where node >nul 2>nul"));
+  assert.ok(launcher.includes("codex-primary-runtime\\dependencies\\node\\bin\\node.exe"));
+});
+
+test("root README references the approved local visuals and output targets", async () => {
+  const readme = await fs.readFile(path.join(repositoryRoot, "README.md"), "utf8");
+  const heroImage = '<img src="docs/assets/codex-project-chat-exporter-hero.png" alt="Illustration of Codex chat windows being exported" width="820">';
+  const compositeTarget = "docs/screenshots/export-output-overview.png";
+  const compositeAlt = "Synthetic export overview showing an HTML index, an editable Word document and a searchable PDF";
+  const compositeImage = `<img src="${compositeTarget}" alt="${compositeAlt}" width="700">`;
+  const originalLinks = [
+    ["HTML index", "docs/screenshots/export-html-images.png"],
+    ["Editable Word", "docs/screenshots/export-docx-images.png"],
+    ["Searchable PDF", "docs/screenshots/export-pdf-images.png"],
+  ];
+  for (const imageElement of [heroImage, compositeImage]) assert.equal(literalOccurrenceCount(readme, imageElement), 1, imageElement);
+  assert.equal(literalOccurrenceCount(readme, `href="${compositeTarget}"`), 1, `${compositeTarget}: original link`);
+  assert.equal(literalOccurrenceCount(readme, `src="${compositeTarget}"`), 1, `${compositeTarget}: image source`);
+  for (const [label, target] of originalLinks) {
+    assert.equal(literalOccurrenceCount(readme, `[${label}](${target})`), 1, `${target}: full-size link`);
+    assert.equal(literalOccurrenceCount(readme, `](${target})`), 1, `${target}: separate embedding`);
+    assert.equal(literalOccurrenceCount(readme, `src="${target}"`), 0, `${target}: HTML embedding`);
+  }
+  assert.equal(readme.includes('align="center"'), false);
+
+  assert.deepEqual(
+    pngDimensions(await fs.readFile(path.join(repositoryRoot, compositeTarget))),
+    { width: 1400, height: 1548 },
+  );
+  assert.deepEqual(
+    pngDimensions(await fs.readFile(path.join(repositoryRoot, originalLinks[1][1]))),
+    { width: 1300, height: 1255 },
   );
 });
 

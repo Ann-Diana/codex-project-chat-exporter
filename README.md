@@ -2,36 +2,77 @@
 
 Export local Codex project history into independent, portable archives – including editable Word documents and searchable PDFs.
 
-> **To our knowledge, the only Codex session exporter with built-in DOCX and PDF output.**
->
-> Based on publicly documented exporter features reviewed on 31 August 2026.
+[![Latest release](https://img.shields.io/github/v/release/Ann-Diana/codex-project-chat-exporter?style=flat-square&label=release)](https://github.com/Ann-Diana/codex-project-chat-exporter/releases/latest)
+[![CLI platforms](https://img.shields.io/badge/CLI-Windows%20%7C%20macOS%20%7C%20Linux-555?style=flat-square)](#choose-how-to-run)
+[![License](https://img.shields.io/github/license/Ann-Diana/codex-project-chat-exporter?style=flat-square)](LICENSE)
+[![Tests](https://img.shields.io/github/actions/workflow/status/Ann-Diana/codex-project-chat-exporter/test.yml?branch=main&style=flat-square&label=tests)](https://github.com/Ann-Diana/codex-project-chat-exporter/actions/workflows/test.yml)
+
+<p>
+  <img src="docs/assets/codex-project-chat-exporter-hero.png" alt="Illustration of Codex chat windows being exported" width="820">
+</p>
+
+> **Direct DOCX and PDF generation – locally, from the same readable document model, without Word, LibreOffice or cloud conversion.**
+
+Markdown, HTML, DOCX and PDF follow the same selected session content in the same order. Selected images appear inline and also remain in the deduplicated asset folder.
 
 - Export the current workspace, another recorded project or all local sessions.
 - Reconstruct paginated fork histories from validated local rollout references.
 - Get Markdown, responsive HTML, manifests and optional verified source snapshots.
-- Add DOCX, PDF or both from the same readable document model.
 - Local and read-only toward original Codex data. No telemetry, import or repair.
 
-## Requirements at a glance
-
-- <kbd>VSIX</kbd> <kbd>VS Code Desktop 1.101+</kbd> <kbd>Local Codex data</kbd> <kbd>Trusted local environment</kbd>: no separate Node.js, Word or LibreOffice required.
-- <kbd>CLI</kbd> <kbd>Node.js 22+</kbd> <kbd>Package dependencies installed</kbd> <kbd>Local Codex data</kbd> <kbd>Local output destination</kbd>
-
-## Why DOCX and PDF?
-
-- **Word:** editable documents for review, comments, handoff and further documentation.
-- **PDF:** searchable, fixed-layout files for sharing, printing and archiving.
-- **One source:** Markdown, HTML, DOCX and PDF follow the same session order and readable content selection.
-
-Exported images stay with the archive – displayed inline in HTML, DOCX and PDF and preserved in the dedicated asset folder.
-
-![Illustration of Codex chat windows being exported](docs/assets/codex-project-chat-exporter-hero.png)
-
 > Unofficial project. Not affiliated with, endorsed by or supported by OpenAI.
+
+## Requirements
+
+All entry points require local Codex session data.
+
+- **VS Code extension:** VS Code Desktop 1.101+ and the packaged VSIX. No separate Node.js installation is required.
+- **Windows launcher:** a prepared project checkout with package dependencies installed. At runtime, the launcher uses Node.js 22+ from `PATH` or the known Codex Desktop runtime.
+- **Direct CLI:** Node.js 22+ and installed package dependencies.
+
+DOCX and PDF generation does not require Microsoft Word or LibreOffice.
+
+## See the output
+
+The Windows launcher, VS Code extension and direct Node.js CLI use the same export core. The following outputs use synthetic demo data and can be created through any of these entry points.
+
+<p>
+  <a href="docs/screenshots/export-output-overview.png"><img src="docs/screenshots/export-output-overview.png" alt="Synthetic export overview showing an HTML index, an editable Word document and a searchable PDF" width="700"></a>
+</p>
+
+Full-size originals: [HTML index](docs/screenshots/export-html-images.png) · [Editable Word](docs/screenshots/export-docx-images.png) · [Searchable PDF](docs/screenshots/export-pdf-images.png)
+
+## Choose how to run
+
+| Entry point | Best for | Start |
+| --- | --- | --- |
+| Windows launcher | Interactive export outside VS Code | Double-click or run `export-codex-project-chats.cmd` |
+| Visual Studio Code extension | Guided export inside VS Code | Install the VSIX and run `Codex Export: Export…` |
+| Direct Node.js CLI | Cross-platform use and automation | Run `node .\bin\export-codex-project-chats.mjs` with explicit options |
+
+## Windows launcher
+
+The Windows launcher is the interactive Windows menu for the same export core. From a prepared project folder, double-click `export-codex-project-chats.cmd` or start it in a terminal.
+
+Before using the Windows launcher or Direct CLI from a fresh Git checkout, prepare it with Node.js 22+ and the project dependencies:
+
+```powershell
+npm ci
+```
+
+The launcher first uses `node` from `PATH`, then falls back to Codex Desktop's bundled Node runtime at its known local path. The project dependencies must still be installed. The launcher is a `.cmd` menu, not a standalone portable EXE, and requires no administrator rights.
+
+Its menu exports all detected sessions or one project, lists projects and sessions, runs session diagnostics and lets you select the export profile, optional DOCX/PDF output and destination folder.
+
+```powershell
+.\export-codex-project-chats.cmd
+```
 
 ## Visual Studio Code quick start
 
 Install the VSIX described in the [extension README](integrations/vscode/README.md), then run **Codex Export: Export…**.
+
+VS Code must trust the local workspace before the extension can run; the packaged extension does not support untrusted workspaces.
 
 The command asks in this order:
 
@@ -46,7 +87,7 @@ The command asks in this order:
 
 ## Direct CLI
 
-The MJS entry point is the non-interactive CLI. The Windows `.cmd` wrapper is an interactive menu around the same core.
+The MJS entry point is the non-interactive CLI for the same export core.
 
 Show the complete option and exit-code contract:
 
@@ -174,17 +215,6 @@ The direct CLI routes the first SIGINT through the shared abort signal and exits
 - Raw JSONL is source-faithful and is not automatically safe to share. Review every output file before sharing.
 
 See [SECURITY.md](SECURITY.md) for the full boundary.
-
-## Screenshots
-
-The following outputs use synthetic demo data and the same embedded image.
-
-![Synthetic local HTML export index with an embedded image](docs/screenshots/export-html-images.png)
-
-<p>
-  <img src="docs/screenshots/export-docx-images.png" alt="Synthetic DOCX export with the same embedded image" width="49%">
-  <img src="docs/screenshots/export-pdf-images.png" alt="Synthetic PDF export with the same embedded image" width="49%">
-</p>
 
 ## Limits
 

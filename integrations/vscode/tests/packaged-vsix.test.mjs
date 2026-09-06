@@ -32,6 +32,61 @@ function sha256(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
+function markdownLinkTargets(text) {
+  const targets = [];
+  let cursor = 0;
+  while (cursor < text.length) {
+    const marker = text.indexOf("](", cursor);
+    if (marker < 0) break;
+    const end = text.indexOf(")", marker + 2);
+    if (end < 0) break;
+    targets.push(text.slice(marker + 2, end).trim());
+    cursor = end + 1;
+  }
+  return targets;
+}
+
+function htmlImageSources(text) {
+  const sources = [];
+  let cursor = 0;
+  while (cursor < text.length) {
+    const imageStart = text.indexOf("<img", cursor);
+    if (imageStart < 0) break;
+    const imageEnd = text.indexOf(">", imageStart + 4);
+    if (imageEnd < 0) break;
+    const sourceStart = text.indexOf('src="', imageStart + 4);
+    if (sourceStart >= 0 && sourceStart < imageEnd) {
+      const valueStart = sourceStart + 'src="'.length;
+      const valueEnd = text.indexOf('"', valueStart);
+      if (valueEnd >= 0 && valueEnd < imageEnd) sources.push(text.slice(valueStart, valueEnd));
+    }
+    cursor = imageEnd + 1;
+  }
+  return sources;
+}
+
+function assertPackagedReadmeTargets(zip, readme) {
+  const targets = [...markdownLinkTargets(readme), ...htmlImageSources(readme)];
+  for (const rawTarget of targets) {
+    const target = rawTarget.startsWith("<") && rawTarget.endsWith(">") ? rawTarget.slice(1, -1) : rawTarget;
+    if (!target || target.startsWith("#")) continue;
+    if (target.startsWith("https://") || target.startsWith("http://")) {
+      const url = new URL(target);
+      assert.equal(url.protocol, "https:", target);
+      if (target.includes("github.com")) assert.equal(url.hostname, "github.com", target);
+      continue;
+    }
+
+    const filePart = decodeURIComponent(target.split("#", 1)[0]);
+    assert.equal(filePart.includes("\\"), false, `packaged README uses a backslash path: ${target}`);
+    const segments = filePart.split("/");
+    assert.ok(segments.every((segment) => segment && segment !== "." && segment !== ".."), `packaged README leaves its package folder: ${target}`);
+    const packagedPath = path.posix.join("extension", ...segments);
+    assert.ok(packagedPath.startsWith("extension/"), `packaged README leaves its package folder: ${target}`);
+    assert.ok(zip.file(packagedPath), `packaged README target is missing: ${target}`);
+  }
+}
+
 function collectElements(value, name, result = []) {
   if (!value || typeof value !== "object") return result;
   if (value.type === "element" && value.name === name) result.push(value);
@@ -142,6 +197,20 @@ test("regular VSIX builds are byte-identical and their packaged runtime exports 
     const zip = await JSZip.loadAsync(firstBytes, { checkCRC32: true, createFolders: false });
     const files = Object.values(zip.files).filter((entry) => !entry.dir);
     assert.ok(files.every((entry) => entry.date.toISOString() === FIXED_DATE));
+    const packagedReadmeBytes = await zip.file("extension/README.md")?.async("nodebuffer");
+    assert.ok(packagedReadmeBytes, "packaged README is missing");
+    assert.deepEqual(packagedReadmeBytes, await fs.readFile(path.join(extensionRoot, "README.md")));
+    const packagedReadme = packagedReadmeBytes.toString("utf8");
+    assertPackagedReadmeTargets(zip, packagedReadme);
+    for (const requiredTarget of [
+      "extension/LICENSE",
+      "extension/PACKAGED_TEST_PLAN.md",
+      "extension/images/codex-project-chat-exporter-hero.png",
+      "extension/images/01-scope-picker.png",
+      "extension/images/02-project-history-picker.png",
+      "extension/images/03-document-format-picker.png",
+      "extension/images/04-export-success.png",
+    ]) assert.ok(zip.file(requiredTarget), requiredTarget);
     const contentTypes = xml2js(await zip.file("[Content_Types].xml").async("string"), { compact: false, alwaysChildren: true });
     const defaults = new Set(collectElements(contentTypes, "Default").map((element) => String(element.attributes?.Extension || "").toLowerCase()));
     const overrides = new Set(collectElements(contentTypes, "Override").map((element) => String(element.attributes?.PartName || "")));
