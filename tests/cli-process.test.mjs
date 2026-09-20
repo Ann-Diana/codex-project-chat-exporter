@@ -57,12 +57,12 @@ async function createFixture() {
 test("direct CLI help and version remain non-interactive with locked stdin", async () => {
   const help = await runCli(["--help"]);
   assert.equal(help.code, 0);
-  assert.match(help.stdout, /Codex Project Chat Exporter 0\.3\.1/);
+  assert.match(help.stdout, /Codex Project Chat Exporter 0\.4\.0/);
   assert.equal(help.stderr, "");
   const version = await runCli(["--version", "--report-format", "json"]);
   assert.equal(version.code, 0);
   assert.equal(version.stderr, "");
-  assert.deepEqual(JSON.parse(version.stdout), { schema_version: 1, kind: "version", message: "0.3.1", exit_code: 0, version: "0.3.1" });
+  assert.deepEqual(JSON.parse(version.stdout), { schema_version: 1, kind: "version", message: "0.4.0", exit_code: 0, version: "0.4.0" });
 });
 
 test("mixed information and action flags retain their historical priority", async () => {
@@ -193,6 +193,9 @@ test("CLI renders deterministic DOCX and PDF together while repeated format valu
     assert.equal(firstManifest.archive_format_version, 1);
     assert.equal(firstManifest.formats.docx, true);
     assert.equal(firstManifest.formats.pdf, true);
+    assert.equal(firstManifest.coverage.formats.markdown.status, "VERIFIED_AT_EXPORT");
+    assert.equal(firstManifest.coverage.formats.docx.status, "VERIFIED_AT_EXPORT");
+    assert.equal(firstManifest.coverage.formats.pdf.status, "VERIFIED_AT_EXPORT");
     for (let index = 0; index < firstManifest.sessions.length; index += 1) {
       const firstSession = firstManifest.sessions[index];
       const secondSession = secondManifest.sessions[index];
@@ -205,6 +208,8 @@ test("CLI renders deterministic DOCX and PDF together while repeated format valu
     const lastWinsManifest = JSON.parse(await fs.readFile(path.join(lastWinsOutput, "manifest.json"), "utf8"));
     assert.equal(lastWinsManifest.formats.docx, false);
     assert.equal(lastWinsManifest.formats.pdf, true);
+    assert.equal(lastWinsManifest.coverage.formats.docx.status, "NOT_GENERATED");
+    assert.equal(lastWinsManifest.coverage.formats.pdf.status, "VERIFIED_AT_EXPORT");
   } finally { await fs.rm(fixture.temp, { recursive: true, force: true }); }
 });
 
@@ -218,6 +223,34 @@ test("operational errors remain exit code 1 with one JSON error object", async (
   assert.equal(error.kind, "error");
   assert.equal(error.code, "NO_SELECTION");
   assert.equal(error.exit_code, 1);
+});
+
+test("unresolved physical-source relations expose a stable JSON relation status", async () => {
+  const temp = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "cli-relation-status-")));
+  try {
+    const codexHome = path.join(temp, "source");
+    const sessions = path.join(codexHome, "sessions");
+    await fs.mkdir(sessions, { recursive: true });
+    const threadId = "11111111-1111-7111-8111-111111111111";
+    const rolloutIds = ["aaaaaaaa-aaaa-7aaa-8aaa-aaaaaaaaaaaa", "bbbbbbbb-bbbb-7bbb-8bbb-bbbbbbbbbbbb"];
+    for (let index = 0; index < rolloutIds.length; index += 1) {
+      const timestamp = `2026-09-18T1${index}:00:00.000Z`;
+      const records = [
+        { ordinal: 0, type: "session_meta", timestamp, payload: { id: threadId, cwd: process.platform === "win32" ? "C:\\Synthetic\\Relation" : "/synthetic/relation", timestamp } },
+        { ordinal: 1, type: "response_item", timestamp, payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: `source-${index}` }] } },
+      ];
+      await fs.writeFile(path.join(sessions, `rollout-${timestamp.replaceAll(":", "-").replace(".000Z", "")}-${threadId}_${rolloutIds[index]}.jsonl`), `${records.map((record) => JSON.stringify(record)).join("\n")}\n`);
+    }
+    const result = await runCli(["--codex-home", codexHome, "--all", "--profile", "readable", "--out", path.join(temp, "output"), "--report-format", "json"]);
+    assert.equal(result.code, 1);
+    assert.equal(result.stdout, "");
+    const error = JSON.parse(result.stderr);
+    assert.equal(error.code, "PHYSICAL_SOURCE_RELATION_UNRESOLVED");
+    assert.equal(error.relation_status, "PRESENT_BUT_UNLINKED");
+    assert.equal(error.exit_code, 1);
+  } finally {
+    await fs.rm(temp, { recursive: true, force: true });
+  }
 });
 
 test("direct MJS CLI converts SIGINT across discovery, streaming, rendering and publication into exit code 130 after cleanup", async () => {

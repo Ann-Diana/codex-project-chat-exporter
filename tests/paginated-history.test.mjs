@@ -245,6 +245,10 @@ test("Source snapshots preserve Child Raw plus the exact bounded Parent closure"
     const manifest = JSON.parse(await fs.readFile(path.join(output, "manifest.json"), "utf8"));
     const segment = manifest.history_reference_closure[0].segments[0];
     assert.equal(manifest.sessions[0].markdown_file, "");
+    assert.equal(manifest.coverage.status_axes.reading_view_coverage.status, "NOT_GENERATED");
+    assert.equal(manifest.coverage.formats.html.role, "METADATA_INDEX");
+    assert.equal(manifest.coverage.formats.markdown.status, "NOT_GENERATED");
+    assert.equal(manifest.coverage.formats.raw_jsonl.status, "HASH_VERIFIED_AT_EXPORT");
     assert.equal(segment.snapshot_kind, "DERIVED_EXACT_PREFIX");
     assert.deepEqual(await fs.readFile(path.join(output, segment.snapshot_file)), fixture.boundary.bytes);
     assert.deepEqual(await fs.readFile(path.join(output, manifest.sessions[0].raw_export_file)), await fs.readFile(fixture.childFile));
@@ -330,20 +334,110 @@ test("duplicate rollout ordinals never truncate later valid records or alter Raw
   }
 });
 
+test("byte-identical active and archived sources remain visible but produce one logical conversation", async () => {
+  const temp = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "paginated-history-identical-sources-")));
+  try {
+    const root = path.join(temp, "codex-home");
+    const parentTime = "2026-09-01T10:00:00.000Z";
+    const childTime = "2026-09-01T11:00:00.000Z";
+    const parent = [sessionMeta(PARENT_ID, PROJECT_PARENT, parentTime), assistant(1, "IDENTICAL_PARENT_ONCE", parentTime)];
+    const boundary = prefixBoundary(parent).historyBase;
+    await writeRollout(root, "active", parentTime, PARENT_ID, parent);
+    await writeRollout(root, "archived", parentTime, PARENT_ID, parent);
+    await writeRollout(root, "active", childTime, CHILD_ID, [
+      sessionMeta(CHILD_ID, PROJECT_CHILD, childTime, { forked_from_id: PARENT_ID, history_base: boundary }, 2),
+      assistant(3, "IDENTICAL_CHILD", childTime),
+    ]);
+    const output = path.join(temp, "output");
+    await exportArchive({ codexHome: root, scope: "recorded-project", recordedProjectPath: PROJECT_CHILD, outputDirectory: output, exportProfile: "complete" });
+    const manifest = JSON.parse(await fs.readFile(path.join(output, "manifest.json"), "utf8"));
+    const parentSources = manifest.coverage.physical_sources.filter((source) => source.thread_id === PARENT_ID);
+    assert.equal(parentSources.length, 2);
+    assert.equal(parentSources.filter((source) => source.usages.some((usage) => usage.relation_status === "IDENTICAL_DUPLICATE_SOURCE")).length, 1);
+    const duplicateUse = parentSources.flatMap((source) => source.usages).find((usage) => usage.relation_status === "IDENTICAL_DUPLICATE_SOURCE");
+    assert.equal(duplicateUse.identity_evidence.scope, "FULL_FILE");
+    assert.ok(duplicateUse.canonical_source_id);
+    assert.equal((await transcriptText(output)).markdown.split("IDENTICAL_PARENT_ONCE").length - 1, 1);
+  } finally {
+    await fs.rm(temp, { recursive: true, force: true });
+  }
+});
+
+test("a history reference can target a noncanonical rollout alias after full-byte duplicate proof", async () => {
+  const temp = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "paginated-history-identical-alias-")));
+  try {
+    const root = path.join(temp, "codex-home");
+    const stableThreadId = "55555555-5555-7555-8555-555555555555";
+    const parentTime = "2026-09-01T10:00:00.000Z";
+    const childTime = "2026-09-01T11:00:00.000Z";
+    const parent = [sessionMeta(stableThreadId, PROJECT_PARENT, parentTime), assistant(1, "NONCANONICAL_ALIAS_PARENT", parentTime)];
+    const boundary = prefixBoundary(parent).historyBase;
+    boundary.thread_id = GRANDCHILD_ID;
+    await writeRollout(root, "active", parentTime, stableThreadId, parent, PARENT_ID);
+    await writeRollout(root, "archived", parentTime, stableThreadId, parent, GRANDCHILD_ID);
+    await writeRollout(root, "active", childTime, CHILD_ID, [
+      sessionMeta(CHILD_ID, PROJECT_CHILD, childTime, { history_base: boundary }, 2),
+      assistant(3, "NONCANONICAL_ALIAS_CHILD", childTime),
+    ]);
+    const output = path.join(temp, "output");
+    await exportArchive({ codexHome: root, scope: "recorded-project", recordedProjectPath: PROJECT_CHILD, outputDirectory: output, exportProfile: "complete" });
+    const manifest = JSON.parse(await fs.readFile(path.join(output, "manifest.json"), "utf8"));
+    assert.equal(manifest.history_reference_closure[0].segments[0].rollout_id, GRANDCHILD_ID);
+    const markdown = (await transcriptText(output)).markdown;
+    assert.match(markdown, /NONCANONICAL_ALIAS_PARENT/);
+    assert.match(markdown, /NONCANONICAL_ALIAS_CHILD/);
+  } finally {
+    await fs.rm(temp, { recursive: true, force: true });
+  }
+});
+
+test("duplicate, regressive and skipped inner ordinals remain visible in parent prefixes and Child deltas", async () => {
+  const temp = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "paginated-history-ordinal-anomalies-")));
+  try {
+    const root = path.join(temp, "codex-home");
+    const parentTime = "2026-09-01T10:00:00.000Z";
+    const childTime = "2026-09-01T11:00:00.000Z";
+    const parent = [
+      sessionMeta(PARENT_ID, PROJECT_PARENT, parentTime),
+      assistant(2, "PREFIX_SKIPPED", parentTime),
+      user(2, "PREFIX_DUPLICATE", parentTime),
+      assistant(1, "PREFIX_REGRESSIVE", parentTime),
+      user(4, "PREFIX_LATER_USER", parentTime),
+      assistant(5, "PREFIX_LATER_ASSISTANT", parentTime),
+    ];
+    const boundary = prefixBoundary(parent).historyBase;
+    await writeRollout(root, "active", parentTime, PARENT_ID, parent);
+    const child = [
+      sessionMeta(CHILD_ID, PROJECT_CHILD, childTime, { forked_from_id: PARENT_ID, history_base: boundary }, 6),
+      turn(8, "gpt-5.6-sol", childTime, PROJECT_CHILD),
+      user(8, "CHILD_DUPLICATE", childTime),
+      assistant(7, "CHILD_REGRESSIVE", childTime),
+      user(10, "CHILD_LATER_USER", childTime),
+      assistant(11, "CHILD_LATER_ASSISTANT", childTime),
+    ];
+    const childFile = await writeRollout(root, "active", childTime, CHILD_ID, child);
+    const output = path.join(temp, "output");
+    await exportArchive({ codexHome: root, scope: "recorded-project", recordedProjectPath: PROJECT_CHILD, outputDirectory: output, exportProfile: "complete" });
+    const manifest = JSON.parse(await fs.readFile(path.join(output, "manifest.json"), "utf8"));
+    const markdown = (await transcriptText(output)).markdown;
+    for (const marker of ["PREFIX_LATER_USER", "PREFIX_LATER_ASSISTANT", "CHILD_LATER_USER", "CHILD_LATER_ASSISTANT"]) assert.match(markdown, new RegExp(marker));
+    const anomalies = manifest.coverage.logical_threads[0].anomalies;
+    assert.equal(anomalies.duplicate_ordinal, 2);
+    assert.equal(anomalies.regressive_ordinal, 2);
+    assert.equal(anomalies.skipped_ordinal, 4);
+    assert.deepEqual(await fs.readFile(path.join(output, manifest.sessions[0].raw_export_file)), await fs.readFile(childFile));
+  } finally {
+    await fs.rm(temp, { recursive: true, force: true });
+  }
+});
+
 test("history references fail closed for missing, ambiguous, cyclic and invalid boundaries", async (t) => {
   const cases = [
-    ["missing parent", "HISTORY_PARENT_MISSING", async (root) => {
+    ["missing parent", "HISTORY_PARENT_MISSING", "REFERENCED_SOURCE_MISSING", async (root) => {
       const timestamp = "2026-09-01T13:00:00.000Z";
       await writeRollout(root, "active", timestamp, CHILD_ID, [sessionMeta(CHILD_ID, PROJECT_CHILD, timestamp, { forked_from_id: PARENT_ID, history_base: { thread_id: PARENT_ID, end_ordinal_exclusive: 2, end_byte_offset: 10 } })]);
     }],
-    ["ambiguous parent", "HISTORY_PARENT_AMBIGUOUS", async (root) => {
-      const parent = [sessionMeta(PARENT_ID, PROJECT_PARENT, "2026-09-01T10:00:00.000Z"), turn(1, "gpt-5.5", "2026-09-01T10:00:01.000Z")];
-      const boundary = prefixBoundary(parent).historyBase;
-      await writeRollout(root, "active", "2026-09-01T10:00:00.000Z", PARENT_ID, parent);
-      await writeRollout(root, "archived", "2026-09-01T10:00:00.000Z", PARENT_ID, parent);
-      await writeRollout(root, "active", "2026-09-01T11:00:00.000Z", CHILD_ID, [sessionMeta(CHILD_ID, PROJECT_CHILD, "2026-09-01T11:00:00.000Z", { forked_from_id: PARENT_ID, history_base: boundary })]);
-    }],
-    ["cycle", "HISTORY_REFERENCE_CYCLE", async (root) => {
+    ["cycle", "HISTORY_REFERENCE_CYCLE", "REFERENCE_CYCLE", async (root) => {
       const parentTime = "2026-09-01T10:00:00.000Z";
       const childTime = "2026-09-01T11:00:00.000Z";
       const parent = [sessionMeta(PARENT_ID, PROJECT_PARENT, parentTime, { history_base: { thread_id: CHILD_ID, end_ordinal_exclusive: 1, end_byte_offset: 1 } }, 1)];
@@ -351,26 +445,60 @@ test("history references fail closed for missing, ambiguous, cyclic and invalid 
       await writeRollout(root, "active", parentTime, PARENT_ID, parent);
       await writeRollout(root, "active", childTime, CHILD_ID, [sessionMeta(CHILD_ID, PROJECT_CHILD, childTime, { forked_from_id: PARENT_ID, history_base: parentBoundary })]);
     }],
-    ["unsafe identifier", "HISTORY_INVALID_BOUNDARY", async (root) => {
+    ["unsafe identifier", "HISTORY_INVALID_BOUNDARY", "", async (root) => {
       const timestamp = "2026-09-01T13:00:00.000Z";
       await writeRollout(root, "active", timestamp, CHILD_ID, [sessionMeta(CHILD_ID, PROJECT_CHILD, timestamp, { forked_from_id: PARENT_ID, history_base: { thread_id: "..\\outside", end_ordinal_exclusive: 2, end_byte_offset: 10 } })]);
     }],
-    ["non-paginated child", "HISTORY_MODE_INVALID", async (root) => {
+    ["non-paginated child", "HISTORY_MODE_INVALID", "", async (root) => {
       const timestamp = "2026-09-01T13:00:00.000Z";
       await writeRollout(root, "active", timestamp, CHILD_ID, [sessionMeta(CHILD_ID, PROJECT_CHILD, timestamp, { forked_from_id: PARENT_ID, history_mode: "legacy", history_base: { thread_id: PARENT_ID, end_ordinal_exclusive: 2, end_byte_offset: 10 } })]);
     }],
   ];
-  for (const [name, expected, arrange] of cases) {
+  for (const [name, expected, relationStatus, arrange] of cases) {
     await t.test(name, async () => {
       const temp = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "paginated-history-invalid-")));
       try {
         const root = path.join(temp, "codex-home");
         await arrange(root);
-        await assert.rejects(() => exportArchive({ codexHome: root, scope: "recorded-project", recordedProjectPath: PROJECT_CHILD, outputDirectory: path.join(temp, "output"), exportProfile: "readable" }), errorCode(expected));
+        await assert.rejects(
+          () => exportArchive({ codexHome: root, scope: "recorded-project", recordedProjectPath: PROJECT_CHILD, outputDirectory: path.join(temp, "output"), exportProfile: "readable" }),
+          (error) => errorCode(expected)(error) && (!relationStatus || error.relationStatus === relationStatus),
+        );
       } finally {
         await fs.rm(temp, { recursive: true, force: true });
       }
     });
+  }
+});
+
+test("multiple parent files may alias one validated prefix without claiming full-file identity", async () => {
+  const temp = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "paginated-history-prefix-alias-")));
+  try {
+    const root = path.join(temp, "codex-home");
+    const stableOne = "55555555-5555-7555-8555-555555555555";
+    const stableTwo = "66666666-6666-7666-8666-666666666666";
+    const parentTime = "2026-09-01T10:00:00.000Z";
+    const commonPrefix = [sessionMeta(PARENT_ID, PROJECT_PARENT, parentTime), assistant(1, "PREFIX_ALIAS_COMMON", parentTime)];
+    const boundary = prefixBoundary(commonPrefix).historyBase;
+    await writeRollout(root, "active", parentTime, stableOne, [...commonPrefix, assistant(2, "SUFFIX_ONE", parentTime)], PARENT_ID);
+    await writeRollout(root, "archived", parentTime, stableTwo, [...commonPrefix, assistant(2, "SUFFIX_TWO", parentTime)], PARENT_ID);
+    const childTime = "2026-09-01T11:00:00.000Z";
+    await writeRollout(root, "active", childTime, CHILD_ID, [
+      sessionMeta(CHILD_ID, PROJECT_CHILD, childTime, { forked_from_id: PARENT_ID, history_base: boundary }, 2),
+      assistant(3, "PREFIX_ALIAS_CHILD", childTime),
+    ]);
+    const output = path.join(temp, "output");
+    await exportArchive({ codexHome: root, scope: "recorded-project", recordedProjectPath: PROJECT_CHILD, outputDirectory: output, exportProfile: "complete" });
+    const manifest = JSON.parse(await fs.readFile(path.join(output, "manifest.json"), "utf8"));
+    const aliases = manifest.coverage.physical_sources.filter((source) => source.rollout_id === PARENT_ID);
+    assert.equal(aliases.length, 2);
+    assert.ok(aliases.every((source) => source.full_file_record_count === null));
+    assert.ok(aliases.every((source) => source.usages[0].identity_evidence.scope === "REFERENCED_PREFIX"));
+    assert.notEqual(aliases[0].full_size_bytes, null);
+    assert.equal((await transcriptText(output)).markdown.includes("SUFFIX_ONE"), false);
+    assert.equal((await transcriptText(output)).markdown.includes("SUFFIX_TWO"), false);
+  } finally {
+    await fs.rm(temp, { recursive: true, force: true });
   }
 });
 

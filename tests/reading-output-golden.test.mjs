@@ -107,7 +107,7 @@ function assertOrdered(text, fragments) {
   }
 }
 
-test("version 0.3.0 reference and streaming readers preserve all profile golden outputs", async () => {
+test("version 0.4.0 reference and streaming readers preserve all profile golden outputs", async () => {
   const temp = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "codex-reading-golden-")));
   try {
     const codexHome = path.join(temp, ".codex");

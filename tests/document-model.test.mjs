@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { extractReadingText, normalizeReadableMessageText, omitInternalMemoryCitations } from "../lib/reading-content.mjs";
+import { collectProjectableMessageAttachments } from "../lib/reading-asset-selection.mjs";
 
 import {
   DOCUMENT_BLOCK_KIND,
@@ -10,6 +11,44 @@ import {
   createDocumentMessage,
   createSessionDocumentHeader,
 } from "../lib/document-model.mjs";
+
+test("reading text extraction never coerces invalid fields of known text content types", () => {
+  const invalidValues = [42, true, false, null, { private_marker: "OBJECT_MUST_NOT_RENDER" }, {}, ["ARRAY_MUST_NOT_RENDER"], []];
+  for (const type of ["input_text", "output_text", "text"]) {
+    assert.equal(extractReadingText([{ type, text: "VISIBLE" }]), "VISIBLE");
+    assert.equal(extractReadingText([{ type, text: "" }]), "");
+    assert.equal(extractReadingText([{ type }]), "");
+    for (const value of invalidValues) {
+      assert.equal(extractReadingText([{ type, text: value, input_text: "ALTERNATE_MUST_NOT_RENDER", output_text: "ALTERNATE_MUST_NOT_RENDER" }]), "");
+    }
+  }
+});
+
+test("reading projection treats Raw-only immediate content as opaque subtrees", () => {
+  const descriptor = (id) => ({ kind: "bounded-embedded-attachment", sourceSha256: id });
+  const image = (id) => ({ type: "input_image", image_url: descriptor(id) });
+  const rawOnlyParts = [
+    { name: "invalid object with nested image", part: { type: "output_text", text: { nested: image("invalid-object") } } },
+    { name: "invalid object with nested text", part: { type: "output_text", text: { nested: { type: "output_text", text: "RAW_ONLY_TEXT" } } } },
+    { name: "invalid object with image and text", part: { type: "output_text", text: { image: image("invalid-mixed"), text: "RAW_ONLY_TEXT" } } },
+    { name: "invalid object with deep image", part: { type: "output_text", text: { one: { two: { three: image("invalid-deep") } } } } },
+    { name: "invalid array with image", part: { type: "output_text", text: [image("invalid-array")] } },
+    { name: "unknown content with image", part: { type: "future_content", nested: image("unknown") } },
+    { name: "known Raw-only content with image", part: { type: "refusal", nested: image("known-raw") } },
+  ];
+  for (const fixture of rawOnlyParts) {
+    assert.deepEqual(collectProjectableMessageAttachments([fixture.part]), [], fixture.name);
+    assert.equal(extractReadingText([fixture.part]), "", fixture.name);
+  }
+
+  const validText = { type: "output_text", text: "VISIBLE_TEXT" };
+  const validImage = image("visible-image");
+  const invalid = rawOnlyParts[0].part;
+  assert.equal(extractReadingText([invalid, validText]), "VISIBLE_TEXT");
+  assert.deepEqual(collectProjectableMessageAttachments([invalid, validText]), []);
+  assert.deepEqual(collectProjectableMessageAttachments([invalid, validImage]), [validImage.image_url]);
+  assert.deepEqual(collectProjectableMessageAttachments([invalid, validText, validImage]), [validImage.image_url]);
+});
 
 test("document model preserves roles, block structure, links, and stable origins", () => {
   const sessionId = "11111111-1111-7111-8111-111111111111";
