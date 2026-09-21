@@ -8,7 +8,7 @@ import { exportArchive } from "../bin/export-codex-project-chats.mjs";
 import { CoverageLedger, assertCoverageInvariants } from "../lib/coverage-ledger.mjs";
 import { ReadingProjection } from "../lib/reading-projection.mjs";
 
-const PROJECT = process.platform === "win32" ? "C:\\Synthetic\\Coverage" : "/synthetic/Coverage";
+const PROJECT = path.join(path.parse(process.cwd()).root, "Synthetic", "Coverage");
 const THREAD = "11111111-1111-7111-8111-111111111111";
 const ROLLOUT_A = "aaaaaaaa-aaaa-7aaa-8aaa-aaaaaaaaaaaa";
 const ROLLOUT_B = "bbbbbbbb-bbbb-7bbb-8bbb-bbbbbbbbbbbb";

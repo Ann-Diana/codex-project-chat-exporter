@@ -22,8 +22,10 @@ const ROLLOUT_B = "bbbbbbbb-bbbb-7bbb-8bbb-bbbbbbbbbbbb";
 const ROLLOUT_C = "cccccccc-cccc-7ccc-8ccc-cccccccccccc";
 const ROLLOUT_D = "dddddddd-dddd-7ddd-8ddd-dddddddddddd";
 const AT = "2026-09-01T10:00:00.000Z";
-const PROJECT = "C:\\Synthetic\\AuditRemediation";
-const PARENT_PROJECT = "C:\\Synthetic\\AuditRemediationParent";
+const SYNTHETIC_ROOT = path.join(path.parse(process.cwd()).root, "Synthetic");
+const PROJECT = path.join(SYNTHETIC_ROOT, "AuditRemediation");
+const PARENT_PROJECT = path.join(SYNTHETIC_ROOT, "AuditRemediationParent");
+const MIDDLE_PROJECT = path.join(SYNTHETIC_ROOT, "Middle");
 const PNG_DATA_URL = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 
 function count(text, token) {
@@ -933,7 +935,7 @@ test("history-only parents contribute every shadowed compressed partner from the
     const oldest = await writeRollout(root, { records: oldestRecords, stable: THREAD_ID, storage: "archived" });
     await writeShadow(oldest);
     const middleRecords = [
-      sessionMeta(OTHER_ID, "C:\\Synthetic\\Middle", { history_base: { thread_id: THREAD_ID, end_ordinal_exclusive: 2, end_byte_offset: jsonl(oldestRecords).length } }, 2),
+      sessionMeta(OTHER_ID, MIDDLE_PROJECT, { history_base: { thread_id: THREAD_ID, end_ordinal_exclusive: 2, end_byte_offset: jsonl(oldestRecords).length } }, 2),
       message(3, "MIDDLE"),
     ];
     const middle = await writeRollout(root, { records: middleRecords, stable: OTHER_ID });

@@ -17,7 +17,7 @@ import {
 
 const THREAD_ID = "11111111-1111-7111-8111-111111111111";
 const AT = "2026-09-20T10:00:00.000Z";
-const PROJECT = "C:\\Synthetic\\ReadingProjectionBoundary";
+const PROJECT = path.join(path.parse(process.cwd()).root, "Synthetic", "ReadingProjectionBoundary");
 const PNG_DATA_URL = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 
 function source(recordNumber) {
