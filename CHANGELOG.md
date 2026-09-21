@@ -6,6 +6,23 @@ The latest published release is `v0.3.1`, dated 2026-09-06.
 
 ## Unreleased
 
+### Added
+
+- Added additive root coverage schema 1 with separate physical-record, inner-unit, reconstruction, source-integrity, reading-view, anomaly, and format status reporting.
+- Added complete physical-source inventory for selected logical threads, including full-byte alias equivalence classes, prefix-only alias evidence, and explicitly shadowed `.jsonl.zst` paths.
+
+### Changed
+
+- Reconstruct same-thread continuation files only through explicit `history_base` chains; unlinked, ambiguous, conflicting, missing, or cyclic relations now fail closed with a machine-readable relation status.
+- Preserve physical order and all later valid turns across duplicate, regressive, or skipped inner ordinals while retaining strict metadata anchors, byte boundaries, hashes, and source identities.
+- Preserve orphan tool outputs as independent events, report missing, empty, unknown, and ambiguous `call_id` states, and render structured tool values deterministically.
+- Count repeated continuation records without dropping later metadata, keep unknown message-content parts distinct from rendered parts, and use reconstructed logical record numbers for inherited assets.
+- Keep coverage payload-free after each record is classified so Source-snapshot peak memory remains close to the 0.3.1 baseline.
+
+### Limits
+
+- Destination-space preflight, a general multi-GB guarantee, and bounded-memory DOCX/PDF rendering remain deferred. Raw copying and hashing are chunked, but ordinary large JSON strings can still be materialized by the record projector.
+
 ## 0.3.1 – 2026-09-06
 
 ### Fixed

@@ -112,7 +112,7 @@ await fs.writeFile(path.join(codexHome, "session_index.jsonl"), [
 ].join("\n") + "\n");
 
 const version = await execFileAsync(process.execPath, [script, "--version"], { cwd: temp });
-assert.equal(version.stdout.trim(), "0.3.1");
+assert.equal(version.stdout.trim(), "0.4.0");
 
 const projectList = await execFileAsync(process.execPath, [script, "--codex-home", codexHome, "--list"], { cwd: temp });
 assert.ok(projectList.stdout.includes(`${primaryProjectPath} (4: 3 active, 1 archived)`));
@@ -708,19 +708,18 @@ await fs.writeFile(fallbackSource, '{"type":"event_msg","type":"session_meta","p
 const fallbackMeta = await readSessionRoutingMeta(fallbackSource);
 assert.equal(fallbackMeta.id, "fallback-session", "an uncertain structured scan must fall back to full JSON parsing");
 assert.equal(fallbackMeta.cwd, "C:\\Projects\\fallback");
-const routerOutput = path.join(temp, "router-output");
 const streamingInvalidOutput = path.join(temp, "router-streaming-invalid-output");
 await assert.rejects(
   () => exportArchive({ codexHome: routerHome, scope: "all", outputDirectory: streamingInvalidOutput, exportProfile: "complete" }),
   (error) => error?.code === "SOURCE_SNAPSHOT_FAILED" && error.message.includes("JSON validation failed in session record 1"),
 );
 assert.equal(await pathExists(path.join(streamingInvalidOutput, "manifest.json")), false, "the streaming reader must reject invalid JSONL before publishing visible output");
-const routerResult = await exportArchive({ codexHome: routerHome, scope: "all", outputDirectory: routerOutput, exportProfile: "complete", _readerImplementation: SESSION_READER_IMPLEMENTATION.LEGACY_REFERENCE });
-const routerManifest = JSON.parse(await fs.readFile(routerResult.manifestPath, "utf8"));
-assert.equal(routerManifest.sessions[0].session_id, routedMeta.id, "structured routing and full selected-session parsing must agree on session identity");
-assert.equal(routerManifest.sessions[0].project, routedMeta.cwd, "structured routing and full selected-session parsing must agree on project routing");
-assert.equal(routerManifest.sessions[0].invalid_jsonl_line_count, 1);
-assert.deepEqual(await fs.readFile(path.join(routerOutput, routerManifest.sessions[0].raw_export_file)), await fs.readFile(routerSource), "invalid JSONL lines must remain byte-identical in canonical Raw output");
+const legacyInvalidOutput = path.join(temp, "router-legacy-invalid-output");
+await assert.rejects(
+  () => exportArchive({ codexHome: routerHome, scope: "all", outputDirectory: legacyInvalidOutput, exportProfile: "complete", _readerImplementation: SESSION_READER_IMPLEMENTATION.LEGACY_REFERENCE }),
+  (error) => error?.code === "SESSION_JSONL_INVALID" && error?.recordNumber === 1,
+);
+assert.equal(await pathExists(path.join(legacyInvalidOutput, "manifest.json")), false, "the reference reader must also fail closed before a coverage manifest is published");
 
 const timestampHome = path.join(temp, "timestamp-codex-home");
 const timestampSessions = path.join(timestampHome, "sessions", "2026", "08", "18");

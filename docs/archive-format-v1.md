@@ -21,17 +21,21 @@ When raw export is disabled, the export contains no new canonical session bytes.
 
 The exporter treats each selected rollout JSONL file as an append-ordered source and streams it through the physical end of the file. A historical `task_started` record without a matching terminal event does not bound the session, invent a terminal event or hide later complete turns. This preserves the local records implicated by [Codex issue #41591](https://github.com/openai/codex/issues/41591) without attempting to repair Codex state.
 
-Codex 0.153.0 can store a paginated rollout reference in `session_meta.payload.history_base` when `session_meta.payload.history_mode` is `paginated`. Its `thread_id` names the immutable source rollout ID. `end_ordinal_exclusive` is the first excluded source ordinal and `end_byte_offset` is the byte immediately after the last included JSONL record. The byte offset addresses the uncompressed JSONL representation. The exporter resolves that ID only through its already inventoried active and archived session roots, validates both boundaries against the same exact prefix and reconstructs the logical stream as oldest Parent prefix through Child delta. Duplicate earlier ordinals do not terminate streaming; the ordinal at the validated boundary must still equal `end_ordinal_exclusive - 1`.
+Codex 0.153.0 can store a paginated rollout reference in `session_meta.payload.history_base` when `session_meta.payload.history_mode` is `paginated`. Its `thread_id` names the immutable source rollout ID. `end_ordinal_exclusive` is the first excluded source ordinal and `end_byte_offset` is the byte immediately after the last included JSONL record. The byte offset addresses the uncompressed JSONL representation. The exporter resolves that ID only through its already inventoried active and archived session roots, validates both boundaries against the same exact prefix and reconstructs the logical stream as oldest Parent prefix through Child delta.
 
-Canonical filenames use their sole UUID as both stable thread ID and rollout ID. A replaced or reverted filename has the form `rollout-<timestamp>-<stable-thread-id>_<rollout-id>.jsonl`; references resolve by the trailing rollout ID while export identity remains the stable thread ID. Multi-stage chains are followed recursively. Missing, ambiguous, cyclic, malformed, out-of-range, record-splitting or ordinal-mismatched references fail the generation before it can be reported as complete.
+Physical record order is authoritative. Where an ordinal field is present, it must be a nonnegative safe integer; missing ordinals in older non-paginated records are not invented. Duplicate, regressive, and skipped present ordinals are recorded as anomalies and do not sort, deduplicate, overwrite, or truncate later valid records. In a paginated chain, the first metadata ordinal of every segment remains anchored to its predecessor boundary; every Parent-prefix ordinal must be below `end_ordinal_exclusive`; and the final record in that prefix must still equal `end_ordinal_exclusive - 1`. Byte offsets, prefix hashes, source identity, and change detection remain strict.
+
+Canonical filenames use their sole UUID as both stable thread ID and rollout ID. A replaced or reverted filename has the form `rollout-<timestamp>-<stable-thread-id>_<rollout-id>.jsonl`; references resolve by the trailing rollout ID while export identity remains the stable thread ID. Multi-stage chains are followed recursively. Equal stable thread IDs, timestamps, storage classes, or similar filenames are not relationship evidence by themselves.
+
+All present candidate sources are inventoried before selection. Full-file aliases enter one equivalence class only after equal byte length and SHA-256 have been verified over each complete file. Every path and rollout ID remains individually visible with `IDENTICAL_DUPLICATE_SOURCE`, and an explicit reference may resolve through any ID in that class. Graph reconstruction operates on those proven classes, so a byte-identical active or archived alias cannot create a false conflict; equal size or equal prefixes alone never collapse full sources. A unique terminal source may also be selected from one explicit, acyclic `history_base` chain. Otherwise the export fails closed with a machine-readable relation status: `REFERENCED_SOURCE_MISSING`, `PRESENT_BUT_UNLINKED`, `AMBIGUOUS_ORDER`, `CONFLICTING_REFERENCE`, or `REFERENCE_CYCLE`. Multiple candidates for one reference may be accepted when the exact referenced prefixes validate to the same bytes, but that proves only prefix identity—not equality of their unread suffixes. A physically absent file that no present source references cannot be detected from the local inventory.
 
 Discovery reads only a bounded first metadata record. A selected record that exceeds that bound fails with `SESSION_METADATA_LIMIT_EXCEEDED` rather than proceeding without potentially late history fields.
 
-Codex can opt in to Zstandard-compressed `.jsonl.zst` rollouts. A plain `.jsonl` file shadows its compressed sibling. Discovery recognises the compressed name and uses Node's built-in streaming decoder when the runtime provides it, so the source cannot disappear silently. Full compressed export is currently refused with `COMPRESSED_ROLLOUT_UNSUPPORTED`: the package supports Node.js from 22.0.0, while the required built-in Zstandard stream is absent from earlier supported Node 22 releases. No external executable, native module, network retrieval or unreviewed dependency is used. Invalid compressed metadata fails as `COMPRESSED_ROLLOUT_INVALID`.
+Codex can opt in to Zstandard-compressed `.jsonl.zst` rollouts. A plain `.jsonl` file shadows its same-path compressed sibling. The paired compressed path remains in `coverage.physical_sources` with `SHADOWED_BY_UNCOMPRESSED`, whether the plain source was selected directly or entered the closure only through `history_base`. It records its compressed byte size, no hash, no record count, no read range, and no content-identity evidence. This reports presence only: the shadow is not parsed, decompressed, included in the logical view, or claimed as an archive-format-v1 Raw source. A compressed source without an uncompressed partner still fails with `COMPRESSED_ROLLOUT_UNSUPPORTED`; a malformed compressed stream encountered during bounded metadata inspection is reported as `COMPRESSED_ROLLOUT_INVALID`. No external executable, native module, network retrieval or unreviewed dependency is used.
 
 `session_index.jsonl` may supply a title only through the documented title-validation path. Its timestamp does not determine last activity, turn count or export extent. Those values come from the selected rollout itself, including records later than a stale index entry. This is the exporter boundary relevant to [Codex issue #41707](https://github.com/openai/codex/issues/41707).
 
-Persisted `function_call`, `function_call_output`, `custom_tool_call` and `custom_tool_call_output` records remain tool records. `include_tools` controls their derived Markdown, DOCX, PDF and asset representation without reclassifying them as direct conversation messages. A subagent rollout remains an independent session, while its explicit source `parent_thread_id` stays preserved in Raw JSONL. This covers the persisted collaboration and Unified Exec forms relevant to [Codex issue #41590](https://github.com/openai/codex/issues/41590); it does not promise import, resume or repair behavior.
+Persisted `function_call`, `function_call_output`, `custom_tool_call` and `custom_tool_call_output` records remain independent tool records. `include_tools` controls their derived Markdown, DOCX, PDF and asset representation without reclassifying them as direct conversation messages. String, array, and object values are rendered deterministically; structured values never fall through JavaScript's `[object Object]` conversion. Output linkage distinguishes `NO_CALL_ID_PRESENT`, `EMPTY_CALL_ID`, `UNMATCHED`, `AMBIGUOUS_CALL_ID`, and `SCHEMA_INVALID_CALL_ID`. Missing IDs are not assumed invalid unless a format contract proves that requirement, and no output is paired by proximity, empty ID, or position. Empty strings and whitespace-only strings are never matching keys. A nonempty ID is otherwise opaque: boundary characters are neither trimmed nor normalized. A technical mirror is collapsed only for one unique nonempty ID plus proven content identity. A subagent rollout remains an independent session, while its explicit source `parent_thread_id` stays preserved in Raw JSONL. This covers the persisted collaboration and Unified Exec forms relevant to [Codex issue #41590](https://github.com/openai/codex/issues/41590); it does not promise import, resume or repair behavior.
 
 ## Generation completion marker
 
@@ -50,6 +54,8 @@ The manifest describes archive membership and source mapping. It is not an authe
 ```json
 {
   "archive_format_version": 1,
+  "coverage_schema_version": 1,
+  "coverage": { "scope": "REQUESTED_GENERATION" },
   "canonical_representation": "raw_jsonl",
   "canonical_representation_included": true,
   "export_profile": "complete",
@@ -67,6 +73,8 @@ The manifest describes archive membership and source mapping. It is not an authe
 Relevant top-level fields include:
 
 - `archive_format_version`: currently `1`.
+- `coverage_schema_version`: currently `1`; it versions only the additive root coverage object.
+- `coverage`: physical-source inventory, reconstruction evidence, disjoint counts, anomaly counters, format roles, and three separate status axes.
 - `canonical_representation`: currently `raw_jsonl`.
 - `canonical_representation_included`: whether this export contains the canonical Raw JSONL snapshots.
 - `export_profile`: `complete`, `readable`, or `source-snapshots`.
@@ -91,6 +99,38 @@ This rule applies only to additive fields in the root `manifest.json`. It does n
 `session_model_histories` is additive root metadata. It contains one entry per exported session with the session ID, the chronological sequence of models confirmed by `turn_context.payload.model` after consecutive duplicates are collapsed, and a status. `thread_settings.model` is corroborating configuration only and cannot add a model to this sequence. The legacy `sessions[].model` field remains the last confirmed value for version-1 consumers; reading views and the HTML index use the complete root history. A fork whose copied records cannot be separated reliably from fork-local turns has status `WITHHELD_FORK_INHERITANCE` and an empty sequence rather than an inferred history.
 
 `history_reference_closure` is also additive root metadata. It does not change the meaning, byte identity or path of any selected `sessions[]` Raw snapshot. An older version-1 consumer may ignore this field and any unreferenced derived prefix file, but it must not interpret an unknown field as permission to read, overwrite or delete that file. The current exporter validates the field before it treats a derived prefix path as part of a replaceable generation. Because the canonical selected-session mapping and every pre-existing required field retain their version-1 meaning, paginated exports remain archive format version 1. A future change that replaces selected-session Raw semantics or makes closure mandatory for all consumers would require a new archive-format version.
+
+### Coverage schema 1
+
+`coverage` is optional additive root metadata for archive-format-v1 consumers and mandatory in exports produced by the 0.4 core. It never authorizes a path; replacement validation continues to use only the existing version-1 path-bearing fields and the strict history-closure schema.
+
+Coverage keeps three levels separate:
+
+1. every syntactically valid physical outer JSONL record in the byte range that was actually read receives exactly one of `KNOWN_CONTENT_RECORD`, `KNOWN_CONTROL_RECORD`, `UNKNOWN_RECORD_TYPE`, or `SCHEMA_INVALID_RECORD`;
+2. every discovered inner payload, supported direct-message content group, relevant immediate `replacement_history` content part, unsupported or unknown immediate message-content part, and tool unit receives exactly one of `RENDERED`, `SUPPRESSED_BY_PROFILE`, `MIRRORED_OR_DEDUPLICATED`, `KNOWN_CONTENT_RAW_ONLY`, `UNKNOWN_RAW_ONLY`, or `SCHEMA_INVALID_RAW_ONLY`; non-empty known `replacement_history` text and each known attachment part are classified separately, so an attachment disposition cannot cover sibling text; a known text part whose `text` field is not a string receives its own `SCHEMA_INVALID_RAW_ONLY` unit in direct messages and `replacement_history`, is not rendered or coerced, and cannot be covered by a sibling content part; a valid empty `replacement_history` text string retains the existing no-content behavior and does not create an artificial unit; a known `replacement_history` container does not classify its children implicitly, and an unknown outer record contributes one conservative unknown-body unit regardless of where or whether a payload field appears;
+3. format status reports whether Raw JSONL, the JSON manifest, the HTML metadata index, and the shared Markdown/DOCX/PDF reading view were generated and verified. HTML is an index, not a transcript; JSON is structured metadata; JSONL is canonical source; Markdown, DOCX, and PDF are derived views.
+
+For every logical thread, each level states its own total and disjoint counts; the counts at one level are never added to another. Ordinal, unknown-type, tool-linkage, and segment anomalies are orthogonal counters and do not replace a primary classification or disposition. Expected test values are handwritten independently of the production counter.
+
+When unknown units or schema-invalid known text units exist, `logical_threads[].semantic_gaps` groups them by disposition, stable reason code, schema type labels, and an abstract structure path such as `payload.replacement_history[*].content[*]`. Its positive `UNKNOWN_RAW_ONLY` counts equal the thread's `UNKNOWN_RAW_ONLY` count. A known text part with an invalid `text` field uses `SCHEMA_INVALID_KNOWN_TEXT_EXPECTED_STRING_ACTUAL_<ACTUAL_TYPE>` and is counted once; the actual type is `NUMBER`, `BOOLEAN`, `NULL`, `OBJECT`, `ARRAY`, or `MISSING`. The evidence contains no unknown or invalid message text, object values, array values, or other raw content. Immediate unknown content elements are counted once; nested fields inside one unknown element are not recursively multiplied.
+
+The same immediate-content classification is the reading-view projection boundary. Only content represented by a `RENDERED` unit may contribute text, attachments, or descendants to Markdown, the HTML index, DOCX, or PDF. `SCHEMA_INVALID_RAW_ONLY`, `UNKNOWN_RAW_ONLY`, `KNOWN_CONTENT_RAW_ONLY`, and `SUPPRESSED_BY_PROFILE` subtrees are opaque to reading-view traversal. `MIRRORED_OR_DEDUPLICATED` contributes no second output; only its canonical `RENDERED` origin may appear. A valid sibling remains independently projectable, but an invalid or Raw-only object cannot make a nested image, URL, text, or attachment visible.
+
+The parent message container is validated before any immediate child. A direct or `replacement_history` message is schema-valid here only when it is an object with `type: "message"`, an exact role of `user`, `assistant`, `developer`, or `tool`, and an array-valued `content`. A missing, empty, whitespace-only, unknown, or non-string role and a missing or non-array `content` value produce one opaque `SCHEMA_INVALID_RAW_ONLY` container unit; nested values are not rediscovered as text or assets. For a valid container, every immediate child receives its own internal projection identity and disposition, so invalid or unknown children do not suppress valid siblings.
+
+Coverage, asset authorization, Markdown, the HTML asset index, and the shared DOCX/PDF document input consume the same internal projection records. Each projected unit has a stable internal ID, physical occurrence, abstract path, semantic kind, validity, one primary disposition, and an optional canonical mirror reference. Render data is materialized only for `RENDERED` units during the verified second read and is not retained in the projection plan. The internal projection is not an additional archive member and does not change coverage schema 1 or archive format 1.
+
+`logical_threads[].outer_records` aggregates the physical read ranges attributed to that thread, including records inferred for a full-byte-identical alias. `logical_threads[].inner_units` instead counts the reconstructed logical reading model: a byte-identical physical alias is not repeated as a second conversation. The two totals therefore have different scopes and are not expected to match.
+
+`physical_sources` distinguishes full-file metadata from `read_ranges`. A Parent used only through a verified prefix has a prefix record count while `full_file_record_count` remains `null`. `full_sha256` is `null` unless the complete physical file was actually hashed. Prefix identity is recorded with `scope: REFERENCED_PREFIX`; full duplicates use `scope: FULL_FILE`. A `SHADOWED_BY_UNCOMPRESSED` usage has no read range or identity evidence and therefore contributes no outer-record count.
+
+The status axes make limited claims:
+
+- source integrity `VERIFIED_READ_RANGES` proves export-time stability of the byte ranges used, not unread suffixes, future file state, or absent unreferenced files;
+- reconstruction is `SINGLE_SOURCE` or `CHAIN_VALID` per logical thread and proves only the explicit local evidence described above;
+- reading-view coverage is `ACCOUNTED_FOR`, `PARTIAL`, `INDETERMINATE`, or `NOT_GENERATED`. Unknown valid semantics make the view `INDETERMINATE`; known content retained only in Raw makes it `PARTIAL`. A known control record with no conversation content does neither.
+
+Syntactically invalid JSON remains a fatal parser error. The exporter leaves an incomplete generation marker and does not publish a completed manifest containing speculative counts for unread records.
 
 Each closure entry identifies one selected Child session and contains its ordered inherited segments. A segment records:
 
@@ -182,13 +222,13 @@ Per-session counts are:
 - `parsed_event_count`: non-empty lines successfully parsed as JSON;
 - `invalid_jsonl_line_count`: non-empty lines that failed JSON parsing.
 
-Invalid lines remain present in raw JSONL even though derived views cannot render them as parsed events.
+Syntactically invalid JSON remains present in the original source, but parsing fails closed. No completed manifest claims counts for the unread remainder.
 
 ## Session identity and deduplication
 
 The exporter uses `session_meta.payload.id` when available and can recover a standard session ID from a `rollout-...-<id>.jsonl` filename when metadata is incomplete.
 
-If active and archived files have the same session ID, one logical session is exported and the active file takes precedence. Different IDs are not merged merely because titles or contents match.
+Files with the same stable session ID are not merged or preferred merely because one is active, newer, or similarly named. Byte-identical full files may share one deterministic canonical source after length and SHA-256 proof; the current selection rule then prefers active storage followed by timestamp and path. Nonidentical files require one explicit `history_base` chain with a unique terminal source. Unlinked, forked, conflicting, or cyclic groups fail closed. Different IDs are not merged merely because titles or contents match.
 
 The manifest preserves the session ID, active/archived source classification, source mapping, original filename, raw hash, and physical raw line order required for later tooling.
 
@@ -251,7 +291,7 @@ Markdown includes:
 - labelled subagent inputs, runtime contexts, and unclassified user-role records;
 - tool calls and tool outputs only when explicitly enabled.
 
-Attachments follow the same record selection. Verified user-event and browser/tool-result mirrors render once. Readable suppresses every `replacement_history` occurrence from Markdown, HTML, DOCX, and PDF, including history-only assets. Complete retains unmatched history images once in a labelled `Additional stored context` section rather than as ordinary turns. Source snapshots preserve their existing forensic stored-context behavior. Source and Raw JSONL bytes are never changed by this policy.
+Attachments follow the same record selection. Verified user-event and browser/tool-result mirrors render once. Readable suppresses every `replacement_history` occurrence from Markdown, HTML, DOCX, and PDF, including history-only assets. Complete retains unmatched history images once in a labelled `Additional stored context` section rather than as ordinary turns; non-empty sibling history text is not represented by that image section and remains `KNOWN_CONTENT_RAW_ONLY` unless the complete message is verified as a mirror. Source snapshots preserve their existing forensic stored-context behavior. Source and Raw JSONL bytes are never changed by this policy.
 
 Reasoning, internal events, invalid JSON lines, and other event types remain available only in raw JSONL unless separately rendered. Markdown masking is best effort and does not make the view safe to share.
 

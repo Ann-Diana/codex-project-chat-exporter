@@ -14,6 +14,8 @@ node scripts/diagnostics/large-jsonl-line.mjs --size-mib 115
 
 The diagnostic exercises the productive session-record bridge and the active deduplicated asset store in a separate Node.js process. It creates and removes its input and export below the operating-system temporary directory, performs the target-filesystem hard-link probe, publishes exactly one decoded asset only after record commit, verifies decoded, written, and Raw SHA-256 plus unchanged source bytes, checks one complete usage entry and no staging residue, and enforces a 192 MiB Peak RSS ceiling. It is not part of `npm test` or the CI matrix.
 
+This is evidence for the streamed embedded-attachment path only. Ordinary large JSON strings are still materialized by the record projector, DOCX/PDF retain derived state, no destination-space preflight is implemented, and the diagnostic does not establish general multi-GB exporter support.
+
 `real-session-reader-corpus.mjs` is a local, read-only differential diagnostic. It processes sessions sequentially and emits aggregates only: no titles, prompts, paths, attachment payloads, raw data, or hash lists. The legacy implementation runs in an isolated child with a fixed heap ceiling and remains a test reference, not a product option.
 
 `real-asset-corpus.mjs --selection largest` and `--selection all` run the active asset store against the largest real session or the complete local corpus. The temporary export is removed after the run. Output is aggregate-only: session/record/occurrence counts, unique file and byte counts, saved bytes and ratio, allowlisted extension counts, runtime, memory, and residue count. It emits no paths, content, titles, source or asset hashes, payloads, or lists.

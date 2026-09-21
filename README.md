@@ -158,7 +158,7 @@ Optional DOCX and PDF files can be added to any profile. The matrix describes th
 | `readable` | Yes, plus `index.md` | Full metadata index | No new Raw snapshots | Suppressed from all derived views; source data is not changed | Controls Tool, Browser and `view_image` records plus selected assets | Browsing and review with a smaller output |
 | `source-snapshots` | No | Reduced metadata index | Yes, byte-identical and verified at export | Preserved in Raw; explicit DOCX or PDF uses the labelled stored-context policy | Controls selected derived assets and any explicit document view | Forensic source snapshots with minimal indexing |
 
-Every profile contains both JSON manifests and the deduplicated asset store. The `include_tools` and replacement-history decisions are recorded in the manifests. The root manifest identifies Raw JSONL as the canonical source representation; a canonical snapshot copy is present in that generation only when `canonical_representation_included` is true.
+Every profile contains both JSON manifests and the deduplicated asset store. The `include_tools` and replacement-history decisions are recorded in the manifests. The root manifest identifies Raw JSONL as the canonical source representation; a canonical snapshot copy is present in that generation only when `canonical_representation_included` is true. Additive coverage schema 1 separately reports physical source integrity, logical reconstruction, and reading-view coverage. Unknown valid record semantics remain visible as Raw-only and make the derived-view status indeterminate instead of being silently omitted. A paired `.jsonl.zst` shadow is inventoried as present but unparsed; it is not claimed as a supported Raw source or as content-identical to the uncompressed file.
 
 ## Format comparison
 
@@ -166,7 +166,7 @@ Every profile contains both JSON manifests and the deduplicated asset store. The
 | --- | --- | --- | --- |
 | Markdown | Profile-controlled | Classified session reading view | Best-effort secret masking is not complete redaction |
 | Responsive HTML | Profile-controlled | Local metadata navigation | Not transcript full-text search |
-| Root and asset manifests | Every profile | Machine-readable archive and asset metadata | No separate per-session JSON output |
+| Root and asset manifests | Every profile | Machine-readable archive, coverage, and asset metadata | No separate per-session JSON output |
 | Raw JSONL | Complete or Source snapshots | Byte-identical source preservation | Private source data; hash is verified only at export time |
 | DOCX | `--format docx` | Editable Word reading view | One document per session; PNG/JPEG embedded |
 | PDF | `--format pdf` | Standalone A4 reading view | Direct renderer with bundled fonts; no DOCX conversion |
@@ -219,6 +219,8 @@ See [SECURITY.md](SECURITY.md) for the full boundary.
 ## Limits
 
 The exporter does not import sessions, rebuild Codex UI state, export cloud-only tasks without local files or export ordinary ChatGPT web conversations. It cannot guarantee complete redaction, future internal JSONL compatibility, immediate interruption inside every synchronous dependency or a real glyph for every Unicode grapheme. Unsupported valid PDF graphemes receive a visible marker that lists their code points; malformed UTF-16 fails closed.
+
+Raw snapshot copying and SHA-256 hashing are chunked, and embedded attachment payloads use the streamed asset path. This does not establish general multi-GB support: ordinary large JSON strings are still materialized while a record is projected, and DOCX/PDF construction retains substantial derived state in memory. Version 0.4 performs no destination free-space preflight; a write can still fail because space becomes insufficient. No multi-GB, huge ordinary-string, or bounded-memory DOCX/PDF claim is made.
 
 Manual extension acceptance currently covers local VS Code Desktop on Windows. Other local desktop platforms are not explicitly blocked, but no Linux or macOS manual acceptance is claimed.
 
