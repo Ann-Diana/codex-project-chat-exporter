@@ -28,6 +28,8 @@ const PACKAGED_PARENT_PROJECT = process.platform === "win32" ? "C:\\Synthetic\\p
 const PACKAGED_CHILD_PROJECT = process.platform === "win32" ? "C:\\Synthetic\\link-check" : "/synthetic/link-check";
 const PACKAGED_MISSING_PROJECT = process.platform === "win32" ? "C:\\Synthetic\\renamed" : "/synthetic/renamed";
 const PACKAGED_README_REPOSITORY_URL = "https://github.com/Ann-Diana/codex-project-chat-exporter";
+const SUPPORT_ISSUES_URL = "https://github.com/Ann-Diana/codex-project-chat-exporter/issues";
+const SUPPORT_ISSUES_LINK_PREFIX = "- [Support and bug reports: GitHub Issues](";
 const PACKAGED_README_TRANSFORMATIONS = [
   {
     source: 'src="images/codex-project-chat-exporter-hero.png"',
@@ -72,6 +74,17 @@ function markdownLinkTargets(text) {
     cursor = end + 1;
   }
   return targets;
+}
+
+function assertSupportIssuesLink(readme) {
+  const lines = readme.split(/\r?\n/).filter((line) => line.startsWith(SUPPORT_ISSUES_LINK_PREFIX));
+  assert.equal(lines.length, 1, "support link must appear exactly once");
+  const targets = markdownLinkTargets(lines[0]);
+  assert.equal(targets.length, 1, "support line must contain exactly one Markdown link");
+  assert.equal(lines[0], `${SUPPORT_ISSUES_LINK_PREFIX}${targets[0]})`);
+  const parsed = new URL(targets[0]);
+  assert.equal(parsed.href, SUPPORT_ISSUES_URL);
+  assert.equal(targets[0], SUPPORT_ISSUES_URL);
 }
 
 function htmlImageSources(text) {
@@ -160,6 +173,26 @@ test("packaged README GitHub URL validation uses an exact HTTPS hostname and fai
   }
   assert.equal(isAllowedAbsoluteHttpsUrl("https://marketplace.visualstudio.com/items?itemName=ann-diana.codex-project-chat-exporter-vscode", "marketplace.visualstudio.com"), true);
   assert.equal(isAllowedAbsoluteHttpsUrl("https://marketplace.visualstudio.com.evil.example/items", "marketplace.visualstudio.com"), false);
+});
+
+test("packaged README support link rejects host, path, query and fragment lookalikes", async () => {
+  const sourceReadme = await fs.readFile(path.join(extensionRoot, "README.md"), "utf8");
+  const packagedReadme = transformPackagedReadme(sourceReadme);
+  assertSupportIssuesLink(packagedReadme);
+  const expectedLink = `${SUPPORT_ISSUES_LINK_PREFIX}${SUPPORT_ISSUES_URL})`;
+  for (const [kind, foreignUrl] of [
+    ["host", "https://github.com.evil.example/Ann-Diana/codex-project-chat-exporter/issues"],
+    ["path", `https://evil.example/path/${SUPPORT_ISSUES_URL}`],
+    ["query", `https://evil.example/?next=${SUPPORT_ISSUES_URL}`],
+    ["fragment", `https://evil.example/#${SUPPORT_ISSUES_URL}`],
+    ["same-host path", `https://github.com/other/${SUPPORT_ISSUES_URL}`],
+    ["same-host query", `${SUPPORT_ISSUES_URL}?next=${SUPPORT_ISSUES_URL}`],
+    ["same-host fragment", `${SUPPORT_ISSUES_URL}#${SUPPORT_ISSUES_URL}`],
+  ]) {
+    const altered = packagedReadme.replace(expectedLink, `${SUPPORT_ISSUES_LINK_PREFIX}${foreignUrl})`);
+    assert.notEqual(altered, packagedReadme, kind);
+    assert.throws(() => assertSupportIssuesLink(altered), (error) => error?.code === "ERR_ASSERTION" && error.expected === SUPPORT_ISSUES_URL, kind);
+  }
 });
 
 test("packaged README transformation is exact, pinned and fails closed", async () => {
@@ -327,7 +360,7 @@ test("regular VSIX builds are byte-identical and their packaged runtime exports 
     assert.equal(packagedReadme.includes("../../"), false);
     assert.ok(packagedReadme.includes("before the first publication, that link may not resolve."));
     assert.equal(packagedReadme.includes("is not published in the Visual Studio Code Marketplace"), false);
-    assert.ok(packagedReadme.includes("https://github.com/Ann-Diana/codex-project-chat-exporter/issues"));
+    assertSupportIssuesLink(packagedReadme);
     const packagedChangelog = await zip.file("extension/CHANGELOG.md")?.async("string");
     assert.ok(packagedChangelog, "packaged extension CHANGELOG is missing");
     assert.equal(packagedChangelog, await fs.readFile(path.join(extensionRoot, "CHANGELOG.md"), "utf8"));

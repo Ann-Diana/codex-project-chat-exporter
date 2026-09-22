@@ -17,6 +17,8 @@ const publicDocuments = [
   "integrations/vscode/README.md",
   "docs/recorded-project-selection.md",
 ];
+const SUPPORT_ISSUES_URL = "https://github.com/Ann-Diana/codex-project-chat-exporter/issues";
+const SUPPORT_ISSUES_LINK_PREFIX = "- [Support and bug reports: GitHub Issues](";
 const scopes = ["Current Workspace", "Project from Codex history…", "All Sessions"];
 const formatChoices = ["Standard formats only", "Add DOCX", "Add PDF", "Add DOCX and PDF"];
 const approvedBadges = [
@@ -163,6 +165,17 @@ function markdownLinkTargets(text) {
     cursor = end + 1;
   }
   return targets;
+}
+
+function assertSupportIssuesLink(readme) {
+  const lines = readme.split(/\r?\n/).filter((line) => line.startsWith(SUPPORT_ISSUES_LINK_PREFIX));
+  assert.equal(lines.length, 1, "support link must appear exactly once");
+  const targets = markdownLinkTargets(lines[0]);
+  assert.equal(targets.length, 1, "support line must contain exactly one Markdown link");
+  assert.equal(lines[0], `${SUPPORT_ISSUES_LINK_PREFIX}${targets[0]})`);
+  const parsed = new URL(targets[0]);
+  assert.equal(parsed.href, SUPPORT_ISSUES_URL);
+  assert.equal(targets[0], SUPPORT_ISSUES_URL);
 }
 
 function markdownImageTargets(text) {
@@ -375,7 +388,7 @@ test("public documentation keeps scope, format, privacy and version contracts co
   assert.ok(documents["integrations/vscode/README.md"].includes("before the first publication, that link may not resolve."));
   assert.ok(documents["integrations/vscode/README.md"].includes("a version that is also available as a VSIX on GitHub Releases"));
   assert.equal(documents["integrations/vscode/README.md"].includes("is not published in the Visual Studio Code Marketplace"), false);
-  assert.ok(documents["integrations/vscode/README.md"].includes("https://github.com/Ann-Diana/codex-project-chat-exporter/issues"));
+  assertSupportIssuesLink(documents["integrations/vscode/README.md"]);
   assert.ok(documents["README.md"].includes("After Marketplace publication, install `ann-diana.codex-project-chat-exporter-vscode`"));
 
   const extensionChangelog = await fs.readFile(path.join(repositoryRoot, "integrations", "vscode", "CHANGELOG.md"), "utf8");
@@ -441,6 +454,25 @@ test("GitHub URL validation uses an exact HTTPS hostname and fails closed", () =
   ];
   for (const [target, expected] of cases) {
     assert.equal(isAllowedAbsoluteHttpsUrl(target, "github.com"), expected, target);
+  }
+});
+
+test("extension README support link rejects host, path, query and fragment lookalikes", async () => {
+  const readme = await fs.readFile(path.join(repositoryRoot, "integrations", "vscode", "README.md"), "utf8");
+  assertSupportIssuesLink(readme);
+  const expectedLink = `${SUPPORT_ISSUES_LINK_PREFIX}${SUPPORT_ISSUES_URL})`;
+  for (const [kind, foreignUrl] of [
+    ["host", "https://github.com.evil.example/Ann-Diana/codex-project-chat-exporter/issues"],
+    ["path", `https://evil.example/path/${SUPPORT_ISSUES_URL}`],
+    ["query", `https://evil.example/?next=${SUPPORT_ISSUES_URL}`],
+    ["fragment", `https://evil.example/#${SUPPORT_ISSUES_URL}`],
+    ["same-host path", `https://github.com/other/${SUPPORT_ISSUES_URL}`],
+    ["same-host query", `${SUPPORT_ISSUES_URL}?next=${SUPPORT_ISSUES_URL}`],
+    ["same-host fragment", `${SUPPORT_ISSUES_URL}#${SUPPORT_ISSUES_URL}`],
+  ]) {
+    const altered = readme.replace(expectedLink, `${SUPPORT_ISSUES_LINK_PREFIX}${foreignUrl})`);
+    assert.notEqual(altered, readme, kind);
+    assert.throws(() => assertSupportIssuesLink(altered), (error) => error?.code === "ERR_ASSERTION" && error.expected === SUPPORT_ISSUES_URL, kind);
   }
 });
 
