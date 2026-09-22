@@ -372,6 +372,15 @@ test("public documentation keeps scope, format, privacy and version contracts co
   assert.ok(vscodeReadmeLower.includes("folder is created only when an export actually starts"));
   assert.ok(documents["integrations/vscode/README.md"].includes("Raw JSONL is source-faithful and is not automatically safe to share"));
   assert.ok(documents["integrations/vscode/README.md"].includes("No telemetry, uploader or application-level remote content fetch"));
+  assert.ok(documents["integrations/vscode/README.md"].includes("before the first publication, that link may not resolve."));
+  assert.ok(documents["integrations/vscode/README.md"].includes("a version that is also available as a VSIX on GitHub Releases"));
+  assert.equal(documents["integrations/vscode/README.md"].includes("is not published in the Visual Studio Code Marketplace"), false);
+  assert.ok(documents["integrations/vscode/README.md"].includes("https://github.com/Ann-Diana/codex-project-chat-exporter/issues"));
+  assert.ok(documents["README.md"].includes("After Marketplace publication, install `ann-diana.codex-project-chat-exporter-vscode`"));
+
+  const extensionChangelog = await fs.readFile(path.join(repositoryRoot, "integrations", "vscode", "CHANGELOG.md"), "utf8");
+  assert.ok(extensionChangelog.includes("## 0.2.0 – First Marketplace release"));
+  assert.ok(extensionChangelog.includes("archive format 1, coverage schema 1 and asset schema 2 unchanged"));
 
   const archiveContract = await fs.readFile(path.join(repositoryRoot, "docs", "archive-format-v1.md"), "utf8");
   for (const required of [
@@ -391,7 +400,11 @@ test("public documentation keeps scope, format, privacy and version contracts co
   assert.equal(lockfile.version, rootPackage.version);
   assert.equal(lockfile.packages[""].version, rootPackage.version);
   const extensionPackage = JSON.parse(await fs.readFile(path.join(repositoryRoot, "integrations", "vscode", "package.json"), "utf8"));
-  assert.equal(extensionPackage.version, "0.1.5");
+  assert.equal(extensionPackage.version, "0.2.0");
+  assert.equal(extensionPackage.publisher, "ann-diana");
+  assert.equal(extensionPackage.name, "codex-project-chat-exporter-vscode");
+  assert.equal(extensionPackage.pricing, "Free");
+  assert.ok(extensionPackage.description.includes("DOCX") && extensionPackage.description.includes("PDF"));
   for (const [relative, expected] of publicImages) {
     assert.equal(sha256(await fs.readFile(path.join(repositoryRoot, relative))), expected, relative);
   }
@@ -446,7 +459,8 @@ test("VSIX README uses the four approved badges and syntactic HTTPS links", asyn
   for (const target of markdownLinkTargets(readme)) {
     if (!target.startsWith("https://") && !target.startsWith("http://")) continue;
     assert.equal(
-      isAllowedAbsoluteHttpsUrl(target, "github.com") || isAllowedAbsoluteHttpsUrl(target, "img.shields.io"),
+      isAllowedAbsoluteHttpsUrl(target, "github.com") || isAllowedAbsoluteHttpsUrl(target, "img.shields.io")
+        || isAllowedAbsoluteHttpsUrl(target, "marketplace.visualstudio.com"),
       true,
       `VSIX README absolute URL is not allowed: ${target}`,
     );

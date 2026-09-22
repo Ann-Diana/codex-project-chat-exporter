@@ -114,7 +114,8 @@ function assertPackagedReadmeTargets(readme) {
     const target = rawTarget.startsWith("<") && rawTarget.endsWith(">") ? rawTarget.slice(1, -1) : rawTarget;
     if (!target || target.startsWith("#")) continue;
     assert.equal(
-      isAllowedAbsoluteHttpsUrl(target, "github.com") || isAllowedAbsoluteHttpsUrl(target, "img.shields.io"),
+      isAllowedAbsoluteHttpsUrl(target, "github.com") || isAllowedAbsoluteHttpsUrl(target, "img.shields.io")
+        || isAllowedAbsoluteHttpsUrl(target, "marketplace.visualstudio.com"),
       true,
       `packaged README target is not a permitted absolute HTTPS URL: ${target}`,
     );
@@ -157,6 +158,8 @@ test("packaged README GitHub URL validation uses an exact HTTPS hostname and fai
   for (const [target, expected] of cases) {
     assert.equal(isAllowedAbsoluteHttpsUrl(target, "github.com"), expected, target);
   }
+  assert.equal(isAllowedAbsoluteHttpsUrl("https://marketplace.visualstudio.com/items?itemName=ann-diana.codex-project-chat-exporter-vscode", "marketplace.visualstudio.com"), true);
+  assert.equal(isAllowedAbsoluteHttpsUrl("https://marketplace.visualstudio.com.evil.example/items", "marketplace.visualstudio.com"), false);
 });
 
 test("packaged README transformation is exact, pinned and fails closed", async () => {
@@ -196,6 +199,25 @@ function elementText(value) {
   if (!value || typeof value !== "object") return "";
   if (value.type === "text") return String(value.text || "");
   return (value.elements || []).map(elementText).join("");
+}
+
+function assertMarketplaceLinkProperties(vsixManifest, extensionPackage) {
+  const properties = collectElements(vsixManifest, "Properties");
+  assert.equal(properties.length, 1);
+  const directProperties = (properties[0].elements || [])
+    .filter((element) => element.type === "element" && element.name === "Property");
+  assert.equal(directProperties.length, 6, "the four existing and two new marketplace properties must be retained");
+  assert.equal(collectElements(vsixManifest, "Property").length, directProperties.length);
+  for (const [id, expected] of [
+    ["Microsoft.VisualStudio.Services.Links.Source", extensionPackage.repository.url],
+    ["Microsoft.VisualStudio.Services.Links.Learn", extensionPackage.homepage],
+  ]) {
+    const matches = directProperties.filter((element) => element.attributes?.Id === id);
+    assert.equal(matches.length, 1, `${id} must occur exactly once`);
+    assert.equal(matches[0].attributes.Value, expected, `${id} must match extension/package.json`);
+  }
+  assert.equal(collectElements(vsixManifest, "Repository").length, 0);
+  assert.equal(collectElements(vsixManifest, "ProjectUrl").length, 0);
 }
 
 function inflatedPdfStreams(bytes) {
@@ -248,7 +270,7 @@ async function extractExtension(zip, installedRoot) {
 
 async function copyExtensionFixture(destination) {
   await fs.mkdir(destination, { recursive: true });
-  for (const name of ["package.json", "README.md", "PACKAGED_TEST_PLAN.md", "LICENSE"]) {
+  for (const name of ["package.json", "README.md", "CHANGELOG.md", "PACKAGED_TEST_PLAN.md", "LICENSE"]) {
     await fs.copyFile(path.join(extensionRoot, name), path.join(destination, name));
   }
   await fs.cp(path.join(extensionRoot, "images"), path.join(destination, "images"), { recursive: true });
@@ -303,6 +325,13 @@ test("regular VSIX builds are byte-identical and their packaged runtime exports 
     assert.equal(packagedReadme, expectedPackagedReadme(sourceReadme));
     assertPackagedReadmeTargets(packagedReadme);
     assert.equal(packagedReadme.includes("../../"), false);
+    assert.ok(packagedReadme.includes("before the first publication, that link may not resolve."));
+    assert.equal(packagedReadme.includes("is not published in the Visual Studio Code Marketplace"), false);
+    assert.ok(packagedReadme.includes("https://github.com/Ann-Diana/codex-project-chat-exporter/issues"));
+    const packagedChangelog = await zip.file("extension/CHANGELOG.md")?.async("string");
+    assert.ok(packagedChangelog, "packaged extension CHANGELOG is missing");
+    assert.equal(packagedChangelog, await fs.readFile(path.join(extensionRoot, "CHANGELOG.md"), "utf8"));
+    assert.ok(packagedChangelog.includes("## 0.2.0 – First Marketplace release"));
     for (const { source, packaged, expectedOccurrences } of PACKAGED_README_TRANSFORMATIONS) {
       assert.equal(literalOccurrenceCount(packagedReadme, source), 0, source);
       assert.equal(literalOccurrenceCount(packagedReadme, packaged), expectedOccurrences, packaged);
@@ -317,6 +346,28 @@ test("regular VSIX builds are byte-identical and their packaged runtime exports 
       "extension/images/04-export-success.png",
     ]) assert.ok(zip.file(requiredTarget), requiredTarget);
     const contentTypes = xml2js(await zip.file("[Content_Types].xml").async("string"), { compact: false, alwaysChildren: true });
+    const vsixManifest = xml2js(await zip.file("extension.vsixmanifest").async("string"), { compact: false, alwaysChildren: true });
+    const packagedExtensionManifest = JSON.parse(await zip.file("extension/package.json").async("string"));
+    assertMarketplaceLinkProperties(vsixManifest, packagedExtensionManifest);
+    const identities = collectElements(vsixManifest, "Identity");
+    assert.equal(identities.length, 1);
+    assert.deepEqual(
+      { id: identities[0].attributes.Id, publisher: identities[0].attributes.Publisher, version: identities[0].attributes.Version },
+      { id: "codex-project-chat-exporter-vscode", publisher: "ann-diana", version: "0.2.0" },
+    );
+    const changelogAssets = collectElements(vsixManifest, "Asset")
+      .filter((element) => element.attributes?.Type === "Microsoft.VisualStudio.Services.Content.Changelog");
+    assert.deepEqual(changelogAssets.map((element) => element.attributes), [{
+      Type: "Microsoft.VisualStudio.Services.Content.Changelog",
+      Path: "extension/CHANGELOG.md",
+      Addressable: "true",
+    }]);
+    const marketplaceProperties = new Map(collectElements(vsixManifest, "Property")
+      .map((element) => [element.attributes.Id, element.attributes.Value]));
+    assert.equal(marketplaceProperties.get("Microsoft.VisualStudio.Code.Engine"), packagedExtensionManifest.engines.vscode);
+    assert.equal(marketplaceProperties.get("Microsoft.VisualStudio.Code.ExtensionKind"), "ui");
+    assert.equal(marketplaceProperties.get("Microsoft.VisualStudio.Services.Content.Pricing"), "Free");
+    assert.equal(marketplaceProperties.get("Microsoft.VisualStudio.Services.Links.Support"), packagedExtensionManifest.bugs.url);
     const defaults = new Set(collectElements(contentTypes, "Default").map((element) => String(element.attributes?.Extension || "").toLowerCase()));
     const overrides = new Set(collectElements(contentTypes, "Override").map((element) => String(element.attributes?.PartName || "")));
     for (const file of files) {
@@ -327,7 +378,13 @@ test("regular VSIX builds are byte-identical and their packaged runtime exports 
     const rootPackage = JSON.parse(await fs.readFile("package.json", "utf8"));
     const lock = JSON.parse(await fs.readFile("package-lock.json", "utf8"));
     const extensionPackage = JSON.parse(await fs.readFile(path.join("integrations", "vscode", "package.json"), "utf8"));
-    assert.equal(extensionPackage.version, "0.1.5");
+    assert.deepEqual(packagedExtensionManifest, extensionPackage);
+    assert.equal(extensionPackage.version, "0.2.0");
+    assert.equal(extensionPackage.name, "codex-project-chat-exporter-vscode");
+    assert.equal(extensionPackage.publisher, "ann-diana");
+    assert.equal(extensionPackage.pricing, "Free");
+    assert.ok(extensionPackage.description.includes("DOCX") && extensionPackage.description.includes("PDF"));
+    assert.equal(rootPackage.version, "0.4.0");
     const publicImages = new Map([
       ["codex-project-chat-exporter-hero.png", "36a0a0923c97c040d85d16e9584a80b997c8b265d93a5d8cb7a01b08c07dd311"],
       ["01-scope-picker.png", "78ba8cf95d07d48be0eb06a773ac702aac02d3155a760aaf0da664f7646ab5b0"],
@@ -446,6 +503,34 @@ test("regular VSIX builds are byte-identical and their packaged runtime exports 
     assert.ok(unicodeMaps.includes("D83DDE04"), "the packaged offline PDF must retain U+1F604 in ToUnicode");
     assert.ok(unicodeMaps.includes("26A0FE0F"), "the packaged offline PDF must retain the warning variation sequence");
     assert.ok(unicodeMaps.includes("D83DDC69200DD83DDCBB"), "the packaged offline PDF must retain the supported ZWJ grapheme");
+  } finally {
+    await fs.rm(temp, { recursive: true, force: true });
+  }
+});
+
+test("VSIX marketplace links round-trip XML-significant URL characters exactly once", async () => {
+  const temp = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "packaged-vsix-links-")));
+  try {
+    const fixtureRoot = path.join(temp, "extension");
+    await copyExtensionFixture(fixtureRoot);
+    const packagePath = path.join(fixtureRoot, "package.json");
+    const fixturePackage = JSON.parse(await fs.readFile(packagePath, "utf8"));
+    fixturePackage.repository.url = 'https://example.test/source?one=1&two="A<B>"';
+    fixturePackage.homepage = 'https://example.test/learn?first=1&second="C<D>"';
+    await fs.writeFile(packagePath, `${JSON.stringify(fixturePackage, null, 2)}\n`);
+
+    const { vsixPath } = await buildVsix({ extensionRoot: fixtureRoot, distDir: path.join(temp, "dist") });
+    const zip = await JSZip.loadAsync(await fs.readFile(vsixPath), { checkCRC32: true, createFolders: false });
+    const manifestXml = await zip.file("extension.vsixmanifest").async("string");
+    const vsixManifest = xml2js(manifestXml, { compact: false, alwaysChildren: true });
+    const packagedExtensionManifest = JSON.parse(await zip.file("extension/package.json").async("string"));
+    assert.deepEqual(packagedExtensionManifest, fixturePackage);
+    assertMarketplaceLinkProperties(vsixManifest, packagedExtensionManifest);
+    assert.ok(manifestXml.includes('Id="Microsoft.VisualStudio.Services.Links.Source" Value="https://example.test/source?one=1&amp;two=&quot;A&lt;B&gt;&quot;"'));
+    assert.ok(manifestXml.includes('Id="Microsoft.VisualStudio.Services.Links.Learn" Value="https://example.test/learn?first=1&amp;second=&quot;C&lt;D&gt;&quot;"'));
+    assert.equal(manifestXml.includes("&amp;amp;"), false);
+    assert.equal(manifestXml.includes("<Repository>"), false);
+    assert.equal(manifestXml.includes("<ProjectUrl>"), false);
   } finally {
     await fs.rm(temp, { recursive: true, force: true });
   }

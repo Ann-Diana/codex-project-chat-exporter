@@ -25,9 +25,11 @@ The packaged VSIX includes the exporter runtime. No separate Node.js installatio
 
 ## Installation
 
-The extension is distributed as a VSIX and is not published in the Visual Studio Code Marketplace.
+After the Marketplace release is published, open Extensions in VS Code Desktop, search for `ann-diana.codex-project-chat-exporter-vscode` and select **Install**. You can also open the [Marketplace listing](https://marketplace.visualstudio.com/items?itemName=ann-diana.codex-project-chat-exporter-vscode); before the first publication, that link may not resolve.
 
-1. Download the VSIX from a [published release](https://github.com/Ann-Diana/codex-project-chat-exporter/releases).
+For manual installation of a version that is also available as a VSIX on GitHub Releases:
+
+1. Download that version's VSIX from a [published release](https://github.com/Ann-Diana/codex-project-chat-exporter/releases).
 2. In VS Code Desktop, open Extensions with `Ctrl+Shift+X`.
 3. Select `…`, then **Install from VSIX…**.
 4. Choose the downloaded file and reload VS Code if prompted.
@@ -122,6 +124,7 @@ The extension does not import sessions, restore Codex UI state, export cloud-onl
 
 - [Project README](https://github.com/Ann-Diana/codex-project-chat-exporter#readme)
 - [FAQ](https://github.com/Ann-Diana/codex-project-chat-exporter/blob/main/FAQ.md)
+- [Support and bug reports: GitHub Issues](https://github.com/Ann-Diana/codex-project-chat-exporter/issues)
 - [Security policy](https://github.com/Ann-Diana/codex-project-chat-exporter/blob/main/SECURITY.md)
 - [Archive format v1](https://github.com/Ann-Diana/codex-project-chat-exporter/blob/main/docs/archive-format-v1.md)
 - [Packaged VSIX test plan](PACKAGED_TEST_PLAN.md)
