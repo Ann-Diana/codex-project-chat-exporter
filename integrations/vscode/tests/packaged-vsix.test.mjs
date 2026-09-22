@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import dns from "node:dns";
 import fs from "node:fs/promises";
@@ -16,12 +17,14 @@ import { inflateSync } from "node:zlib";
 import JSZip from "jszip";
 import xmlJs from "xml-js";
 
-import { buildVsix, PACKAGED_README_SOURCE_REF, transformPackagedReadme } from "../scripts/build-vsix.mjs";
+import { buildVsix, resolveCheckedOutCommit, transformPackagedReadme, validateSourceCommit } from "../scripts/build-vsix.mjs";
 
 const require = createRequire(import.meta.url);
 const { xml2js } = xmlJs;
 const FIXED_DATE = "2000-01-01T00:00:00.000Z";
 const extensionRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const repoRoot = path.resolve(extensionRoot, "..", "..");
+const EXPECTED_SOURCE_REF = execFileSync("git", ["rev-parse", "--verify", "HEAD^{commit}"], { cwd: repoRoot, encoding: "utf8", windowsHide: true }).trim();
 const ONE_PIXEL_PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
 const ONE_PIXEL_PNG_SHA256 = "431ced6916a2a21a156e38701afe55bbd7f88969fbbfc56d7fe099d47f265460";
 const PACKAGED_PARENT_PROJECT = process.platform === "win32" ? "C:\\Synthetic\\parent" : "/synthetic/parent";
@@ -33,7 +36,7 @@ const SUPPORT_ISSUES_LINK_PREFIX = "- [Support and bug reports: GitHub Issues]("
 const PACKAGED_README_TRANSFORMATIONS = [
   {
     source: 'src="images/codex-project-chat-exporter-hero.png"',
-    packaged: `src="${PACKAGED_README_REPOSITORY_URL}/raw/${PACKAGED_README_SOURCE_REF}/integrations/vscode/images/codex-project-chat-exporter-hero.png"`,
+    packaged: `src="${PACKAGED_README_REPOSITORY_URL}/raw/${EXPECTED_SOURCE_REF}/integrations/vscode/images/codex-project-chat-exporter-hero.png"`,
     expectedOccurrences: 1,
   },
   ...[
@@ -43,17 +46,17 @@ const PACKAGED_README_TRANSFORMATIONS = [
     "04-export-success.png",
   ].map((name) => ({
     source: `](images/${name})`,
-    packaged: `](${PACKAGED_README_REPOSITORY_URL}/raw/${PACKAGED_README_SOURCE_REF}/integrations/vscode/images/${name})`,
+    packaged: `](${PACKAGED_README_REPOSITORY_URL}/raw/${EXPECTED_SOURCE_REF}/integrations/vscode/images/${name})`,
     expectedOccurrences: 1,
   })),
   {
     source: "](LICENSE)",
-    packaged: `](${PACKAGED_README_REPOSITORY_URL}/blob/${PACKAGED_README_SOURCE_REF}/integrations/vscode/LICENSE)`,
+    packaged: `](${PACKAGED_README_REPOSITORY_URL}/blob/${EXPECTED_SOURCE_REF}/integrations/vscode/LICENSE)`,
     expectedOccurrences: 2,
   },
   {
     source: "](PACKAGED_TEST_PLAN.md)",
-    packaged: `](${PACKAGED_README_REPOSITORY_URL}/blob/${PACKAGED_README_SOURCE_REF}/integrations/vscode/PACKAGED_TEST_PLAN.md)`,
+    packaged: `](${PACKAGED_README_REPOSITORY_URL}/blob/${EXPECTED_SOURCE_REF}/integrations/vscode/PACKAGED_TEST_PLAN.md)`,
     expectedOccurrences: 1,
   },
 ];
@@ -156,6 +159,74 @@ function expectedPackagedReadme(sourceReadme) {
   return expected;
 }
 
+function pinnedReadmeLinks(readme) {
+  const pinned = [];
+  for (const target of [...htmlImageSources(readme), ...markdownLinkTargets(readme)]) {
+    if (!target || target.startsWith("#")) continue;
+    const url = new URL(target);
+    const parts = url.pathname.split("/").filter(Boolean);
+    if (url.hostname === "github.com" && parts[0] === "Ann-Diana" && parts[1] === "codex-project-chat-exporter"
+      && (parts[2] === "raw" || parts[2] === "blob") && parts[4] === "integrations" && parts[5] === "vscode") {
+      assert.equal(url.protocol, "https:");
+      assert.equal(url.username, "");
+      assert.equal(url.password, "");
+      assert.equal(url.port, "");
+      assert.equal(url.search, "");
+      assert.equal(url.hash, "");
+      pinned.push(url);
+    }
+  }
+  return pinned;
+}
+
+function assertEightPinnedReadmeLinks(readme) {
+  const pinned = pinnedReadmeLinks(readme);
+  const imageRoot = `${PACKAGED_README_REPOSITORY_URL}/raw/${EXPECTED_SOURCE_REF}/integrations/vscode/images/`;
+  const documentRoot = `${PACKAGED_README_REPOSITORY_URL}/blob/${EXPECTED_SOURCE_REF}/integrations/vscode/`;
+  const expected = [
+    `${imageRoot}codex-project-chat-exporter-hero.png`,
+    `${imageRoot}01-scope-picker.png`,
+    `${imageRoot}02-project-history-picker.png`,
+    `${imageRoot}03-document-format-picker.png`,
+    `${imageRoot}04-export-success.png`,
+    `${documentRoot}LICENSE`,
+    `${documentRoot}LICENSE`,
+    `${documentRoot}PACKAGED_TEST_PLAN.md`,
+  ];
+  assert.equal(pinned.length, 8);
+  assert.ok(pinned.every((url) => url.pathname.split("/")[4] === EXPECTED_SOURCE_REF), "no old, moving or alternate ref is permitted");
+  assert.deepEqual(pinned.map((url) => url.href).sort(), expected.sort());
+  assert.equal(pinned.some((url) => url.pathname.split("/")[4] === "c0d31b9712edfa577ea3276254e941651e7badfd"), false);
+}
+
+test("source commit resolution rejects missing Git context and malformed SHA output", async () => {
+  const valid = "a".repeat(40);
+  assert.equal(validateSourceCommit(` \r\n${valid}\n `), valid);
+  for (const invalid of [undefined, "", "main", "a".repeat(39), "a".repeat(41), "A".repeat(40), "g".repeat(40), `${valid}\n${valid}`, `refs/heads/${valid}`]) {
+    assert.throws(() => validateSourceCommit(invalid), /full lowercase 40-character SHA-1/);
+  }
+  assert.equal(await resolveCheckedOutCommit(repoRoot), EXPECTED_SOURCE_REF);
+  await assert.rejects(() => resolveCheckedOutCommit(extensionRoot), /Cannot determine the VSIX source commit/);
+  const temp = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "packaged-vsix-git-context-")));
+  try {
+    await assert.rejects(() => resolveCheckedOutCommit(temp), /Cannot determine the VSIX source commit/);
+    execFileSync("git", ["init", "--quiet"], { cwd: temp, windowsHide: true });
+    await assert.rejects(() => resolveCheckedOutCommit(temp), /Cannot determine the VSIX source commit/);
+    commitGitFixture(temp, "first");
+    const first = await resolveCheckedOutCommit(temp);
+    commitGitFixture(temp, "second");
+    const second = await resolveCheckedOutCommit(temp);
+    assert.notEqual(first, second, "the source ref must follow the actual checkout HEAD");
+    const readme = await fs.readFile(path.join(extensionRoot, "README.md"), "utf8");
+    const links = pinnedReadmeLinks(transformPackagedReadme(readme, second));
+    assert.equal(links.length, 8);
+    assert.ok(links.every((url) => url.pathname.split("/")[4] === second));
+    assert.ok(links.every((url) => url.pathname.split("/")[4] !== first));
+  } finally {
+    await fs.rm(temp, { recursive: true, force: true });
+  }
+});
+
 test("packaged README GitHub URL validation uses an exact HTTPS hostname and fails closed", () => {
   const cases = [
     ["https://github.com/Ann-Diana/codex-project-chat-exporter", true],
@@ -177,7 +248,7 @@ test("packaged README GitHub URL validation uses an exact HTTPS hostname and fai
 
 test("packaged README support link rejects host, path, query and fragment lookalikes", async () => {
   const sourceReadme = await fs.readFile(path.join(extensionRoot, "README.md"), "utf8");
-  const packagedReadme = transformPackagedReadme(sourceReadme);
+  const packagedReadme = transformPackagedReadme(sourceReadme, EXPECTED_SOURCE_REF);
   assertSupportIssuesLink(packagedReadme);
   const expectedLink = `${SUPPORT_ISSUES_LINK_PREFIX}${SUPPORT_ISSUES_URL})`;
   for (const [kind, foreignUrl] of [
@@ -195,28 +266,27 @@ test("packaged README support link rejects host, path, query and fragment lookal
   }
 });
 
-test("packaged README transformation is exact, pinned and fails closed", async () => {
+test("packaged README transformation is exact, HEAD-bound and fails closed", async () => {
   const sourceReadme = await fs.readFile(path.join(extensionRoot, "README.md"), "utf8");
-  assert.equal(PACKAGED_README_SOURCE_REF, "c0d31b9712edfa577ea3276254e941651e7badfd");
-  assert.equal(PACKAGED_README_SOURCE_REF.length, 40);
-  assert.ok([...PACKAGED_README_SOURCE_REF].every((character) => "0123456789abcdef".includes(character)));
+  assert.match(EXPECTED_SOURCE_REF, /^[0-9a-f]{40}$/);
   assert.equal(
     sourceReadme.includes('code --install-extension "C:\\path\\to\\codex-project-chat-exporter-vscode-<version>.vsix" --force'),
     false,
   );
-  assert.equal(transformPackagedReadme(sourceReadme), expectedPackagedReadme(sourceReadme));
+  assert.equal(transformPackagedReadme(sourceReadme, EXPECTED_SOURCE_REF), expectedPackagedReadme(sourceReadme));
+  assertEightPinnedReadmeLinks(transformPackagedReadme(sourceReadme, EXPECTED_SOURCE_REF));
 
   const missingHero = sourceReadme.replace(
     'src="images/codex-project-chat-exporter-hero.png"',
     'src="https://example.invalid/missing-hero.png"',
   );
-  assert.throws(() => transformPackagedReadme(missingHero), /Expected 1 VSIX README occurrence/);
+  assert.throws(() => transformPackagedReadme(missingHero, EXPECTED_SOURCE_REF), /Expected 1 VSIX README occurrence/);
   assert.throws(
-    () => transformPackagedReadme(`${sourceReadme}\n![duplicate](images/01-scope-picker.png)\n`),
+    () => transformPackagedReadme(`${sourceReadme}\n![duplicate](images/01-scope-picker.png)\n`, EXPECTED_SOURCE_REF),
     /Expected 1 VSIX README occurrence/,
   );
   assert.throws(
-    () => transformPackagedReadme(`${sourceReadme}\n[unexpected](EXTRA.md)\n`),
+    () => transformPackagedReadme(`${sourceReadme}\n[unexpected](EXTRA.md)\n`, EXPECTED_SOURCE_REF),
     /Unmapped relative VSIX README target/,
   );
 });
@@ -310,6 +380,15 @@ async function copyExtensionFixture(destination) {
   await fs.cp(path.join(extensionRoot, "src"), path.join(destination, "src"), { recursive: true });
 }
 
+function initializeGitFixture(repoRoot) {
+  execFileSync("git", ["init", "--quiet"], { cwd: repoRoot, windowsHide: true });
+  commitGitFixture(repoRoot, "fixture");
+}
+
+function commitGitFixture(repoRoot, message) {
+  execFileSync("git", ["-c", "user.name=VSIX Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false", "commit", "--quiet", "--allow-empty", "-m", message], { cwd: repoRoot, windowsHide: true });
+}
+
 async function writeSyntheticSession(codexHome) {
   const sessionId = "aaaaaaaa-aaaa-7aaa-8aaa-aaaaaaaaaaaa";
   const parentId = "bbbbbbbb-bbbb-7bbb-8bbb-bbbbbbbbbbbb";
@@ -357,6 +436,7 @@ test("regular VSIX builds are byte-identical and their packaged runtime exports 
     assert.notEqual(packagedReadme, sourceReadme);
     assert.equal(packagedReadme, expectedPackagedReadme(sourceReadme));
     assertPackagedReadmeTargets(packagedReadme);
+    assertEightPinnedReadmeLinks(packagedReadme);
     assert.equal(packagedReadme.includes("../../"), false);
     assert.ok(packagedReadme.includes("before the first publication, that link may not resolve."));
     assert.equal(packagedReadme.includes("is not published in the Visual Studio Code Marketplace"), false);
@@ -608,6 +688,7 @@ test("regular builder fails before archive creation when a packaged runtime impo
     await fs.writeFile(path.join(repoRoot, "package-lock.json"), `${JSON.stringify({ name: "fixture", version: "1.0.0", lockfileVersion: 3, packages: { "": { name: "fixture", version: "1.0.0", dependencies: {} } } }, null, 2)}\n`);
     await fs.writeFile(path.join(repoRoot, "LICENSE"), "MIT\n");
     await fs.writeFile(path.join(repoRoot, "bin", "export-codex-project-chats.mjs"), 'import "../lib/missing.mjs";\nexport function exportArchive() {}\n');
+    initializeGitFixture(repoRoot);
     let archiveCalls = 0;
     await assert.rejects(() => buildVsix({ repoRoot, distDir: path.join(temp, "dist"), archiveWriter: async () => { archiveCalls += 1; } }), /complete import tree/);
     assert.equal(archiveCalls, 0);
@@ -632,6 +713,7 @@ test("regular builder fails before archive creation when the locked production t
     await fs.writeFile(path.join(repoRoot, "package-lock.json"), `${JSON.stringify({ name: "fixture", version: "1.0.0", lockfileVersion: 3, packages: { "": { name: "fixture", version: "1.0.0", dependencies }, "node_modules/missing-dependency": { version: "1.0.0", resolved: "https://registry.npmjs.org/missing-dependency/-/missing-dependency-1.0.0.tgz", integrity: "sha512-fixture" } } }, null, 2)}\n`);
     await fs.writeFile(path.join(repoRoot, "LICENSE"), "MIT\n");
     await fs.writeFile(path.join(repoRoot, "bin", "export-codex-project-chats.mjs"), "export function exportArchive() {}\n");
+    initializeGitFixture(repoRoot);
     let archiveCalls = 0;
     await assert.rejects(() => buildVsix({ repoRoot, distDir: path.join(temp, "dist"), archiveWriter: async () => { archiveCalls += 1; } }), (error) => error?.code === "ENOENT");
     assert.equal(archiveCalls, 0);
@@ -653,6 +735,7 @@ test("regular builder rejects a missing upstream symbol-font license before arch
     await fs.writeFile(path.join(repoRoot, "package-lock.json"), `${JSON.stringify({ name: "fixture", version: "1.0.0", lockfileVersion: 3, packages: { "": { name: "fixture", version: "1.0.0", dependencies: {} } } }, null, 2)}\n`);
     await fs.writeFile(path.join(repoRoot, "LICENSE"), "MIT\n");
     await fs.writeFile(path.join(repoRoot, "bin", "export-codex-project-chats.mjs"), "export function exportArchive() {}\n");
+    initializeGitFixture(repoRoot);
     let archiveCalls = 0;
     await assert.rejects(
       () => buildVsix({ repoRoot, distDir: path.join(temp, "dist"), archiveWriter: async () => { archiveCalls += 1; } }),
@@ -678,6 +761,7 @@ test("regular builder rejects a missing upstream emoji-font license before archi
     await fs.writeFile(path.join(repoRoot, "package-lock.json"), `${JSON.stringify({ name: "fixture", version: "1.0.0", lockfileVersion: 3, packages: { "": { name: "fixture", version: "1.0.0", dependencies: {} } } }, null, 2)}\n`);
     await fs.writeFile(path.join(repoRoot, "LICENSE"), "MIT\n");
     await fs.writeFile(path.join(repoRoot, "bin", "export-codex-project-chats.mjs"), "export function exportArchive() {}\n");
+    initializeGitFixture(repoRoot);
     let archiveCalls = 0;
     await assert.rejects(
       () => buildVsix({ repoRoot, distDir: path.join(temp, "dist"), archiveWriter: async () => { archiveCalls += 1; } }),
