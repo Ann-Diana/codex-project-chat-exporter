@@ -94,6 +94,7 @@ export async function buildVsix(options = {}) {
     await copyVerifiedFile(path.join(extensionRoot, "package.json"), path.join(stage, "extension", "package.json"), stageOwned, stage);
     const sourceReadme = await fs.readFile(path.join(extensionRoot, "README.md"), "utf8");
     await writeOwnedStageFile(stageOwned, stage, path.join(stage, "extension", "README.md"), transformPackagedReadme(sourceReadme));
+    await copyVerifiedFile(path.join(extensionRoot, "CHANGELOG.md"), path.join(stage, "extension", "CHANGELOG.md"), stageOwned, stage);
     await copyVerifiedFile(path.join(extensionRoot, "PACKAGED_TEST_PLAN.md"), path.join(stage, "extension", "PACKAGED_TEST_PLAN.md"), stageOwned, stage);
     await copyVerifiedFile(path.join(extensionRoot, "LICENSE"), path.join(stage, "extension", "LICENSE"), stageOwned, stage);
     for (const name of [
@@ -124,10 +125,12 @@ export async function buildVsix(options = {}) {
     <Properties>
       <Property Id="Microsoft.VisualStudio.Code.Engine" Value="${escapeXml(packageJson.engines.vscode)}"/>
       <Property Id="Microsoft.VisualStudio.Code.ExtensionKind" Value="ui"/>
+      <Property Id="Microsoft.VisualStudio.Services.Content.Pricing" Value="${escapeXml(packageJson.pricing)}"/>
+      <Property Id="Microsoft.VisualStudio.Services.Links.Support" Value="${escapeXml(packageJson.bugs.url)}"/>
+      <Property Id="Microsoft.VisualStudio.Services.Links.Source" Value="${escapeXml(packageJson.repository.url)}"/>
+      <Property Id="Microsoft.VisualStudio.Services.Links.Learn" Value="${escapeXml(packageJson.homepage)}"/>
     </Properties>
     <License>extension/LICENSE</License>
-    <ProjectUrl>${escapeXml(packageJson.homepage)}</ProjectUrl>
-    <Repository>${escapeXml(packageJson.repository.url)}</Repository>
   </Metadata>
   <Installation>
     <InstallationTarget Id="Microsoft.VisualStudio.Code"/>
@@ -136,6 +139,7 @@ export async function buildVsix(options = {}) {
   <Assets>
     <Asset Type="Microsoft.VisualStudio.Code.Manifest" Path="extension/package.json" Addressable="true"/>
     <Asset Type="Microsoft.VisualStudio.Services.Content.Details" Path="extension/README.md" Addressable="true"/>
+    <Asset Type="Microsoft.VisualStudio.Services.Content.Changelog" Path="extension/CHANGELOG.md" Addressable="true"/>
     <Asset Type="Microsoft.VisualStudio.Services.Content.License" Path="extension/LICENSE" Addressable="true"/>
     <Asset Type="Microsoft.VisualStudio.Services.Icons.Default" Path="extension/images/icon.png" Addressable="true"/>
   </Assets>

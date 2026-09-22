@@ -1,10 +1,11 @@
 {
   "name": "codex-project-chat-exporter-vscode",
   "displayName": "Codex Project Chat Exporter",
-  "description": "Experimental local Visual Studio Code interface for project-aware export of active and archived Codex sessions.",
-  "version": "0.1.5",
+  "description": "Export local Codex project sessions to Markdown, HTML, editable DOCX and searchable PDF, with optional verified source snapshots.",
+  "version": "0.2.0",
   "publisher": "ann-diana",
   "license": "MIT",
+  "pricing": "Free",
   "repository": {
     "type": "git",
     "url": "https://github.com/Ann-Diana/codex-project-chat-exporter.git"
