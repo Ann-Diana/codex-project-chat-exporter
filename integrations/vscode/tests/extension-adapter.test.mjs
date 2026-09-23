@@ -61,8 +61,8 @@ function createFakeVscode(overrides = {}) {
     window: {
       createOutputChannel: () => ({ appendLine: (line) => output.push(line), show: () => {}, dispose: () => {} }),
       showWarningMessage: async (message, ...actions) => { messages.push({ type: "warning", message, actions }); return overrides.warningSelector?.(message, actions); },
-      showErrorMessage: async (message) => { messages.push({ type: "error", message }); return undefined; },
-      showInformationMessage: async (message, ...actions) => { messages.push({ type: "info", message, actions }); return overrides.infoAction; },
+      showErrorMessage: async (message) => { messages.push({ type: "error", message }); return overrides.errorMessageHandler?.(message); },
+      showInformationMessage: async (message, ...actions) => { messages.push({ type: "info", message, actions }); return overrides.infoMessageHandler ? overrides.infoMessageHandler(message, actions) : overrides.infoAction; },
       showQuickPick: async (items, options) => {
         quickPicks.push({ items, options });
         if (overrides.quickPickSelector) return overrides.quickPickSelector(items, options);
@@ -73,7 +73,7 @@ function createFakeVscode(overrides = {}) {
       withProgress: async (options, task) => {
         progressCalls.push(options);
         const callbacks = [];
-        const result = task({ report: (event) => progressReports.push(event) }, { onCancellationRequested(callback) { callbacks.push(callback); return { dispose() {} }; } });
+        const result = task({ report: (event) => { overrides.progressReportHandler?.(event); progressReports.push(event); } }, { onCancellationRequested(callback) { callbacks.push(callback); return { dispose() {} }; } });
         if (overrides.cancelProgressImmediately) callbacks.forEach(callback => callback());
         return result;
       },
@@ -451,6 +451,200 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
   assert.equal(rejectedRun.at(-1).event, "command_end");
   assert.equal(context.globalState.get(STATE_OUTPUT_DIR), outputDirectory, "only a completed export may update the remembered output folder");
   assert.equal(context.globalState.get(STATE_LATEST_HTML), path.join(outputDirectory, "index.html"), "only a completed export may update the latest index");
+}
+
+{
+  let releaseSuccessMessage;
+  let successMessageShown;
+  const pendingSuccessMessage = new Promise((resolve) => { releaseSuccessMessage = resolve; });
+  const firstSuccessMessageShown = new Promise((resolve) => { successMessageShown = resolve; });
+  const fake = createFakeVscode({ config: { outputDirectory }, infoMessageHandler: (message) => {
+    if (!message.startsWith("Exported ")) return undefined;
+    successMessageShown();
+    return pendingSuccessMessage;
+  } });
+  const context = createContext(temp);
+  const adapter = createExtensionAdapter(fake.vscode, { loadExporter: async () => exporter });
+  await adapter.activate(context);
+  const first = fake.registered.get(COMMANDS.exportAllSessions)();
+  let timeout;
+  try {
+    await firstSuccessMessageShown;
+    const settled = await Promise.race([first.then(() => true), new Promise((resolve) => { timeout = setTimeout(() => resolve(false), 500); })]);
+    assert.equal(settled, true, "a pending success notification must not retain the export lock or command");
+    await fake.registered.get(COMMANDS.exportAllSessions)();
+    assert.equal(fake.messages.filter((message) => message.message.startsWith("Exported ")).length, 2, "a second completed export must be accepted without dismissing the first success notification");
+  } finally {
+    clearTimeout(timeout);
+    releaseSuccessMessage();
+    await first;
+  }
+}
+
+{
+  let releaseOpen;
+  const pendingOpen = new Promise((resolve) => { releaseOpen = resolve; });
+  const fake = createFakeVscode({ config: { outputDirectory }, infoAction: "Open HTML Index" });
+  fake.vscode.env.openExternal = async (uri) => { fake.opened.push(uri.fsPath); await pendingOpen; return true; };
+  const context = createContext(temp);
+  const adapter = createExtensionAdapter(fake.vscode, { loadExporter: async () => exporter });
+  await adapter.activate(context);
+  try {
+    await fake.registered.get(COMMANDS.exportAllSessions)();
+    await fake.registered.get(COMMANDS.exportAllSessions)();
+    assert.equal(fake.messages.filter((message) => message.message.startsWith("Exported ")).length, 2, "an unresolved post-export Open action must not retain the export lock");
+  } finally {
+    releaseOpen();
+  }
+}
+
+{
+  let releasePublication;
+  let publicationStarted;
+  let calls = 0;
+  const publicationGate = new Promise((resolve) => { releasePublication = resolve; });
+  const publicationStartedPromise = new Promise((resolve) => { publicationStarted = resolve; });
+  const fake = createFakeVscode({ config: { outputDirectory } });
+  const context = createContext(temp);
+  const update = context.globalState.update;
+  let firstUpdate = true;
+  context.globalState.update = async (...args) => {
+    if (firstUpdate) {
+      firstUpdate = false;
+      publicationStarted();
+      await publicationGate;
+    }
+    return update(...args);
+  };
+  const adapter = createExtensionAdapter(fake.vscode, { loadExporter: async () => ({
+    async exportArchive(options) { calls += 1; return exporter.exportArchive(options); },
+  }) });
+  await adapter.activate(context);
+  const first = fake.registered.get(COMMANDS.exportAllSessions)();
+  try {
+    await publicationStartedPromise;
+    assert.equal(await fake.registered.get(COMMANDS.exportAllSessions)(), undefined, "a second start must remain blocked until the successful export state is published");
+    assert.equal(calls, 1);
+    assert.equal(context.globalState.values.size, 0);
+  } finally {
+    releasePublication();
+    await first;
+  }
+  await fake.registered.get(COMMANDS.exportAllSessions)();
+  assert.equal(calls, 2);
+}
+
+{
+  let calls = 0;
+  const previousOutput = path.join(temp, "remembered-before-upgrade");
+  const fake = createFakeVscode({ config: { outputDirectory } });
+  const context = createContext(temp);
+  await context.globalState.update(STATE_OUTPUT_DIR, previousOutput);
+  await context.globalState.update(STATE_LATEST_HTML, path.join(previousOutput, "index.html"));
+  const adapter = createExtensionAdapter(fake.vscode, { loadExporter: async () => ({
+    async exportArchive(options) {
+      calls += 1;
+      if (calls === 1) throw new Error("Synthetic export failure");
+      return exporter.exportArchive(options);
+    },
+  }) });
+  await adapter.activate(context);
+  await assert.rejects(() => fake.registered.get(COMMANDS.exportAllSessions)(), /Synthetic export failure/);
+  assert.equal(context.globalState.get(STATE_OUTPUT_DIR), previousOutput, "a failed export must preserve the previously remembered destination");
+  assert.equal(context.globalState.get(STATE_LATEST_HTML), path.join(previousOutput, "index.html"));
+  await fake.registered.get(COMMANDS.exportAllSessions)();
+  assert.equal(calls, 2, "an export failure must release the lock for the next attempt");
+  assert.equal(context.globalState.get(STATE_OUTPUT_DIR), outputDirectory);
+  assert.ok(fake.output.some((line) => line === "Export failed: Synthetic export failure"));
+  assert.ok(fake.output.some((line) => line.startsWith("Exported ")));
+}
+
+{
+  let calls = 0;
+  let releaseCancellationMessage;
+  const pendingCancellationMessage = new Promise((resolve) => { releaseCancellationMessage = resolve; });
+  const fake = createFakeVscode({ config: { outputDirectory }, infoMessageHandler: (message) => message === "Export cancelled." ? pendingCancellationMessage : undefined });
+  const context = createContext(temp);
+  const adapter = createExtensionAdapter(fake.vscode, { loadExporter: async () => ({
+    async exportArchive(options) {
+      calls += 1;
+      if (calls === 1) throw Object.assign(new Error("Synthetic cancellation"), { code: "EXPORT_CANCELLED" });
+      return exporter.exportArchive(options);
+    },
+  }) });
+  await adapter.activate(context);
+  try {
+    assert.equal(await fake.registered.get(COMMANDS.exportAllSessions)(), undefined);
+    assert.equal(context.globalState.values.size, 0, "a cancelled export must not update the last-successful-export state");
+    await fake.registered.get(COMMANDS.exportAllSessions)();
+    assert.equal(calls, 2, "an unresolved cancellation message must not retain the export lock");
+  } finally {
+    releaseCancellationMessage();
+  }
+}
+
+{
+  let calls = 0;
+  const fake = createFakeVscode({ config: { outputDirectory } });
+  const context = createContext(temp);
+  const adapter = createExtensionAdapter(fake.vscode, { loadExporter: async () => ({
+    async exportArchive(options) {
+      calls += 1;
+      return calls === 1 ? null : exporter.exportArchive(options);
+    },
+  }) });
+  await adapter.activate(context);
+  await assert.rejects(() => fake.registered.get(COMMANDS.exportAllSessions)(), "an invalid exporter result must fail before publication");
+  assert.equal(context.globalState.values.size, 0);
+  await fake.registered.get(COMMANDS.exportAllSessions)();
+  assert.equal(calls, 2, "an invalid exporter result must release the lock");
+}
+
+{
+  let loads = 0;
+  const fake = createFakeVscode({ config: { outputDirectory } });
+  const context = createContext(temp);
+  const adapter = createExtensionAdapter(fake.vscode, { loadExporter: async () => {
+    loads += 1;
+    if (loads === 1) throw new Error("Synthetic exporter load failure");
+    return exporter;
+  } });
+  await adapter.activate(context);
+  await assert.rejects(() => adapter.exportAllSessions(context), /Synthetic exporter load failure/);
+  assert.equal(context.globalState.values.size, 0);
+  await adapter.exportAllSessions(context);
+  assert.equal(loads, 2, "a failed exporter load must release the lock without a reload");
+}
+
+{
+  let failReport = true;
+  const fake = createFakeVscode({ config: { outputDirectory }, progressReportHandler: () => { if (failReport) { failReport = false; throw new Error("Synthetic progress failure"); } } });
+  const context = createContext(temp);
+  const adapter = createExtensionAdapter(fake.vscode, { loadExporter: async () => exporter });
+  await adapter.activate(context);
+  await assert.rejects(() => fake.registered.get(COMMANDS.exportAllSessions)(), /Synthetic progress failure/);
+  assert.equal(context.globalState.values.size, 0, "a progress UI error must not publish a last-successful-export state");
+  await fake.registered.get(COMMANDS.exportAllSessions)();
+  assert.equal(context.globalState.get(STATE_OUTPUT_DIR), outputDirectory, "a progress UI error must release the lock");
+}
+
+{
+  let failUpdate = true;
+  const fake = createFakeVscode({ config: { outputDirectory }, infoMessageHandler: () => { throw new Error("Synthetic success notification failure"); } });
+  const context = createContext(temp);
+  const update = context.globalState.update;
+  context.globalState.update = async (...args) => {
+    if (failUpdate) { failUpdate = false; throw new Error("Synthetic status failure"); }
+    return update(...args);
+  };
+  const adapter = createExtensionAdapter(fake.vscode, { loadExporter: async () => exporter });
+  await adapter.activate(context);
+  await assert.rejects(() => fake.registered.get(COMMANDS.exportAllSessions)(), /Synthetic status failure/);
+  assert.equal(context.globalState.values.size, 0, "a failed state update must not claim a successful export");
+  await fake.registered.get(COMMANDS.exportAllSessions)();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(context.globalState.get(STATE_OUTPUT_DIR), outputDirectory, "a status or notification error must not retain the lock");
+  assert.ok(fake.output.some((line) => line.startsWith("Export notification or follow-up action failed")));
 }
 
 {

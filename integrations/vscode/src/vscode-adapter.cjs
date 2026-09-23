@@ -304,6 +304,18 @@ function createExtensionAdapter(vscode, injected = {}) {
     }
   }
 
+  function showExportNotification(show, onAction) {
+    // A notification can remain unresolved until the user acts on it. It must
+    // never extend the export's exclusive lifetime or create an unhandled error.
+    void Promise.resolve().then(show).then(onAction).catch(() => {
+      try {
+        outputChannel?.appendLine("Export notification or follow-up action failed; see the export status above.");
+      } catch {
+        // A broken output channel must not affect the completed export.
+      }
+    });
+  }
+
   async function exportCurrentWorkspace(context, explicitProfile, documentFormats = []) {
     const workspacePath = await getLocalWorkspacePath();
     if (!workspacePath) return undefined;
@@ -397,20 +409,24 @@ function createExtensionAdapter(vscode, injected = {}) {
         outputChannel.appendLine(`Manifest: ${result.manifestPath}`);
         if (result.runtimeTimings) outputChannel.appendLine(formatRuntimeSummary(result.runtimeTimings));
         writeDiagnostic("success_message_show", { duration_ms: roundDiagnosticMs(performance.now() - adapterExportStartedAt) });
-        const action = await vscode.window.showInformationMessage(`Exported ${summary} to ${result.outputDirectory}.`, "Open HTML Index", "Open Export Folder");
-        writeDiagnostic("success_message_resolved", { action: action === "Open HTML Index" ? "OPEN_INDEX" : action === "Open Export Folder" ? "OPEN_FOLDER" : "DISMISSED", duration_ms: roundDiagnosticMs(performance.now() - adapterExportStartedAt) });
-        if (action === "Open HTML Index") await openVerifiedTarget(openTargets.index, openTargets.output);
-        if (action === "Open Export Folder") await openVerifiedTarget(openTargets.output);
+        showExportNotification(
+          () => vscode.window.showInformationMessage(`Exported ${summary} to ${result.outputDirectory}.`, "Open HTML Index", "Open Export Folder"),
+          async (action) => {
+            writeDiagnostic("success_message_resolved", { action: action === "Open HTML Index" ? "OPEN_INDEX" : action === "Open Export Folder" ? "OPEN_FOLDER" : "DISMISSED", duration_ms: roundDiagnosticMs(performance.now() - adapterExportStartedAt) });
+            if (action === "Open HTML Index") await openVerifiedTarget(openTargets.index, openTargets.output);
+            if (action === "Open Export Folder") await openVerifiedTarget(openTargets.output);
+          },
+        );
         return result;
       } catch (error) {
         if (error?.code === "EXPORT_CANCELLED") {
           outputChannel.appendLine("Export cancelled.");
-          await vscode.window.showInformationMessage("Export cancelled.");
+          showExportNotification(() => vscode.window.showInformationMessage("Export cancelled."));
           return undefined;
         }
         const message = safeErrorMessage(error);
         outputChannel.appendLine(`Export failed: ${message}`);
-        vscode.window.showErrorMessage(`Codex export failed: ${message}`);
+        showExportNotification(() => vscode.window.showErrorMessage(`Codex export failed: ${message}`));
         throw error;
     }
   }
