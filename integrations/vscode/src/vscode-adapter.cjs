@@ -7,7 +7,7 @@ const { performance } = require("node:perf_hooks");
 const { pathToFileURL } = require("node:url");
 
 const CONFIG_SECTION = "codexProjectChatExporter";
-const DIAGNOSTIC_BUILD_ID = "0.1.5-pre-release";
+const DIAGNOSTIC_BUILD_ID = "0.2.1";
 const STATE_OUTPUT_DIR = "codexProjectChatExporter.outputDirectory";
 const STATE_LATEST_HTML = "codexProjectChatExporter.latestHtmlIndexPath";
 const STATE_OUTPUT_TARGET = "codexProjectChatExporter.outputDirectoryTarget";
@@ -19,7 +19,15 @@ const COMMANDS = {
   exportAllSessions: "codexArchive.exportAllSessions",
   openLatestArchive: "codexArchive.openLatestArchive",
   openExportFolder: "codexArchive.openExportFolder",
+  openSettings: "codexArchive.openSettings",
 };
+const SIDEBAR_VIEW = "codexArchive.actions";
+const SIDEBAR_ACTIONS = Object.freeze([
+  { label: "Export…", command: COMMANDS.exportMenu },
+  { label: "Open Latest Export", command: COMMANDS.openLatestArchive },
+  { label: "Open Export Folder", command: COMMANDS.openExportFolder },
+  { label: "Extension Settings", command: COMMANDS.openSettings },
+]);
 const EXPORT_PROFILES = Object.freeze([
   { label: "Complete export", description: "Raw JSONL checked at export time plus Markdown reading views and HTML index", profile: "complete" },
   { label: "Readable export", description: "Markdown reading views and HTML index without Raw JSONL", profile: "readable" },
@@ -60,6 +68,16 @@ function createExtensionAdapter(vscode, injected = {}) {
       vscode.commands.registerCommand(COMMANDS.exportAllSessions, () => runRegisteredCommand(COMMANDS.exportAllSessions, () => exportInteractiveScope(context, "all"))),
       vscode.commands.registerCommand(COMMANDS.openLatestArchive, () => openLatestArchive(context)),
       vscode.commands.registerCommand(COMMANDS.openExportFolder, () => openExportFolder(context)),
+      vscode.commands.registerCommand(COMMANDS.openSettings, () => vscode.commands.executeCommand("workbench.action.openSettings", "@ext:ann-diana.codex-project-chat-exporter-vscode")),
+      vscode.window.registerTreeDataProvider(SIDEBAR_VIEW, {
+        getChildren: (element) => element ? [] : SIDEBAR_ACTIONS,
+        getTreeItem: (action) => ({
+          id: action.command,
+          label: action.label,
+          collapsibleState: vscode.TreeItemCollapsibleState.None,
+          command: { command: action.command, title: action.label },
+        }),
+      }),
     ];
     context.subscriptions.push(outputChannel, ...registrations);
     return {
@@ -330,105 +348,151 @@ function createExtensionAdapter(vscode, injected = {}) {
   async function runExport(context, scopeOptions, explicitProfile, documentFormats, prepared = {}) {
     ensureDesktopLocalExtensionHost();
     if (!prepared.lockHeld) return withExclusiveExport(() => runExport(context, scopeOptions, explicitProfile, documentFormats, { ...prepared, lockHeld: true }));
-    const adapterExportStartedAt = performance.now();
-      writeDiagnostic("adapter_export_start", { selected_scope: scopeOptions.scope, profile: explicitProfile || "complete" });
-      const outputDirectory = await resolveOutputDirectory(context);
-      if (outputDirectory === null) return undefined;
-      if (!outputDirectory) return undefined;
+    writeDiagnostic("adapter_export_start", { selected_scope: scopeOptions.scope, profile: explicitProfile || "complete" });
+    const outputDirectory = await resolveOutputDirectory();
+    if (outputDirectory === null) return undefined;
+    if (!outputDirectory) return undefined;
 
-      const config = getConfig();
-      const exporter = prepared.exporter || await deps.loadExporter(context);
-      const configuredProfile = resolveConfiguredProfile(explicitProfile);
-      const options = {
-        scope: scopeOptions.scope,
-        workspacePath: scopeOptions.workspacePath,
-        recordedProjectPath: scopeOptions.recordedProjectPath,
-        outputDirectory,
-        exportProfile: configuredProfile,
-        documentFormats: [...documentFormats],
-        pathStyle: config.get("pathStyle", "short"),
-        includeTools: getUserOnlyConfigValue("includeTools", false),
-      };
-      if (scopeOptions.selectedProject) {
-        const expectedProject = scopeOptions.selectedProject;
-        const sameIdentity = deps.sameRecordedPathIdentity || exporter.sameRecordedPathIdentity;
-        options.onSelectRecordedProject = ({ projects, reason }) => {
-          if (reason !== "requested") throw createAdapterError("RECORDED_PROJECT_INVENTORY_CHANGED", "The recorded-project selection changed before export started.");
-          const currentProject = projects.find((project) => sameIdentity(project.cwd, expectedProject.cwd));
-          if (!currentProject || !sameProjectInventory(currentProject, expectedProject)) {
-            throw createAdapterError("RECORDED_PROJECT_INVENTORY_CHANGED", "The recorded-project inventory changed before export started. Review the project selection again.");
-          }
-          return currentProject.cwd;
-        };
-      }
-      const codexHome = prepared.codexHome || getUserOnlyConfigValue("codexHome", "");
-      if (codexHome) {
-        const validatedCodexHome = validateLocalAbsolutePath(codexHome, "codexProjectChatExporter.codexHome");
-        if (!validatedCodexHome) return undefined;
-        options.codexHome = validatedCodexHome;
-      }
-
-      outputChannel.appendLine(`Starting ${scopeOptions.scope === "all" ? "all-session" : "workspace"} export.`);
-      outputChannel.appendLine(`Export profile: ${configuredProfile}`);
-      outputChannel.appendLine(`Output directory: ${outputDirectory}`);
-      if (scopeOptions.workspacePath) outputChannel.appendLine(`Workspace: ${scopeOptions.workspacePath}`);
-
-      try {
-        const withProgressStartedAt = performance.now();
-        writeDiagnostic("with_progress_start");
-        const abortController = new AbortController();
-        const result = await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: "Exporting Codex sessions", cancellable: true }, async (progress, token) => {
-          const coreCallStartedAt = performance.now();
-          writeDiagnostic("with_progress_enter");
-          options.onProgress = (event) => progress.report({ message: event.message });
-          options.abortSignal = abortController.signal;
-          const cancellation = token?.onCancellationRequested?.(() => abortController.abort());
-          if (diagnosticsEnabled()) options.onDiagnostic = (event) => recordDiagnostic(event);
-          writeDiagnostic("core_call_start");
-          try {
-            const coreResult = await exporter.exportArchive(options);
-            writeDiagnostic("core_call_end", { status: "COMPLETED", duration_ms: roundDiagnosticMs(performance.now() - coreCallStartedAt) });
-            return coreResult;
-          } catch (error) {
-            writeDiagnostic("core_call_end", { status: error?.code === "EXPORT_CANCELLED" ? "CANCELLED" : "FAILED", error_code: error?.code || "UNKNOWN", duration_ms: roundDiagnosticMs(performance.now() - coreCallStartedAt) });
-            throw error;
-          } finally {
-            cancellation?.dispose?.();
-          }
-        });
-        writeDiagnostic("with_progress_end", { duration_ms: roundDiagnosticMs(performance.now() - withProgressStartedAt) });
-        const openTargets = await captureCompletedExportTargets(result);
-        await context.globalState.update(STATE_OUTPUT_TARGET, openTargets.output);
-        await context.globalState.update(STATE_LATEST_HTML_TARGET, openTargets.index);
-        await context.globalState.update(STATE_OUTPUT_DIR, result.outputDirectory);
-        await context.globalState.update(STATE_LATEST_HTML, result.htmlIndexPath);
-        const summary = formatExportSummary(result.exportedSessionCount, result.exportedProjectCount);
-        outputChannel.appendLine(`Exported ${summary}.`);
-        outputChannel.appendLine(`Output directory: ${result.outputDirectory}`);
-        outputChannel.appendLine(`HTML index: ${result.htmlIndexPath}`);
-        outputChannel.appendLine(`Manifest: ${result.manifestPath}`);
-        if (result.runtimeTimings) outputChannel.appendLine(formatRuntimeSummary(result.runtimeTimings));
-        writeDiagnostic("success_message_show", { duration_ms: roundDiagnosticMs(performance.now() - adapterExportStartedAt) });
-        showExportNotification(
-          () => vscode.window.showInformationMessage(`Exported ${summary} to ${result.outputDirectory}.`, "Open HTML Index", "Open Export Folder"),
-          async (action) => {
-            writeDiagnostic("success_message_resolved", { action: action === "Open HTML Index" ? "OPEN_INDEX" : action === "Open Export Folder" ? "OPEN_FOLDER" : "DISMISSED", duration_ms: roundDiagnosticMs(performance.now() - adapterExportStartedAt) });
-            if (action === "Open HTML Index") await openVerifiedTarget(openTargets.index, openTargets.output);
-            if (action === "Open Export Folder") await openVerifiedTarget(openTargets.output);
-          },
-        );
-        return result;
-      } catch (error) {
-        if (error?.code === "EXPORT_CANCELLED") {
-          outputChannel.appendLine("Export cancelled.");
-          showExportNotification(() => vscode.window.showInformationMessage("Export cancelled."));
-          return undefined;
+    const config = getConfig();
+    const exporter = prepared.exporter || await deps.loadExporter(context);
+    const configuredProfile = resolveConfiguredProfile(explicitProfile);
+    const options = {
+      scope: scopeOptions.scope,
+      workspacePath: scopeOptions.workspacePath,
+      recordedProjectPath: scopeOptions.recordedProjectPath,
+      outputDirectory,
+      exportProfile: configuredProfile,
+      documentFormats: [...documentFormats],
+      pathStyle: config.get("pathStyle", "short"),
+      includeTools: getUserOnlyConfigValue("includeTools", false),
+    };
+    if (scopeOptions.selectedProject) {
+      const expectedProject = scopeOptions.selectedProject;
+      const sameIdentity = deps.sameRecordedPathIdentity || exporter.sameRecordedPathIdentity;
+      options.onSelectRecordedProject = ({ projects, reason }) => {
+        if (reason !== "requested") throw createAdapterError("RECORDED_PROJECT_INVENTORY_CHANGED", "The recorded-project selection changed before export started.");
+        const currentProject = projects.find((project) => sameIdentity(project.cwd, expectedProject.cwd));
+        if (!currentProject || !sameProjectInventory(currentProject, expectedProject)) {
+          throw createAdapterError("RECORDED_PROJECT_INVENTORY_CHANGED", "The recorded-project inventory changed before export started. Review the project selection again.");
         }
-        const message = safeErrorMessage(error);
-        outputChannel.appendLine(`Export failed: ${message}`);
-        showExportNotification(() => vscode.window.showErrorMessage(`Codex export failed: ${message}`));
-        throw error;
+        return currentProject.cwd;
+      };
     }
+    const codexHome = prepared.codexHome || getUserOnlyConfigValue("codexHome", "");
+    if (codexHome) {
+      const validatedCodexHome = validateLocalAbsolutePath(codexHome, "codexProjectChatExporter.codexHome");
+      if (!validatedCodexHome) return undefined;
+      options.codexHome = validatedCodexHome;
+    }
+
+    return executeExport(context, exporter, options);
+  }
+
+  // Each attempt gets fresh progress/cancellation hooks while keeping the user's
+  // configured selection. Only the destination changes for a collision retry.
+  async function executeExport(context, exporter, selection) {
+    ensureDesktopLocalExtensionHost();
+    const adapterExportStartedAt = performance.now();
+    const options = { ...selection, documentFormats: [...selection.documentFormats] };
+    const { outputDirectory, exportProfile: configuredProfile } = options;
+    outputChannel.appendLine(`Starting ${options.scope === "all" ? "all-session" : "workspace"} export.`);
+    outputChannel.appendLine(`Export profile: ${configuredProfile}`);
+    outputChannel.appendLine(`Output directory: ${outputDirectory}`);
+    if (options.workspacePath) outputChannel.appendLine(`Workspace: ${options.workspacePath}`);
+
+    try {
+      const withProgressStartedAt = performance.now();
+      writeDiagnostic("with_progress_start");
+      const abortController = new AbortController();
+      const result = await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: "Exporting Codex sessions", cancellable: true }, async (progress, token) => {
+        const coreCallStartedAt = performance.now();
+        writeDiagnostic("with_progress_enter");
+        options.onProgress = (event) => progress.report({ message: event.message });
+        options.abortSignal = abortController.signal;
+        const cancellation = token?.onCancellationRequested?.(() => abortController.abort());
+        if (diagnosticsEnabled()) options.onDiagnostic = (event) => recordDiagnostic(event);
+        writeDiagnostic("core_call_start");
+        try {
+          const coreResult = await exporter.exportArchive(options);
+          writeDiagnostic("core_call_end", { status: "COMPLETED", duration_ms: roundDiagnosticMs(performance.now() - coreCallStartedAt) });
+          return coreResult;
+        } catch (error) {
+          writeDiagnostic("core_call_end", { status: error?.code === "EXPORT_CANCELLED" ? "CANCELLED" : "FAILED", error_code: error?.code || "UNKNOWN", duration_ms: roundDiagnosticMs(performance.now() - coreCallStartedAt) });
+          throw error;
+        } finally {
+          cancellation?.dispose?.();
+        }
+      });
+      writeDiagnostic("with_progress_end", { duration_ms: roundDiagnosticMs(performance.now() - withProgressStartedAt) });
+      const openTargets = await captureCompletedExportTargets(result);
+      await context.globalState.update(STATE_OUTPUT_TARGET, openTargets.output);
+      await context.globalState.update(STATE_LATEST_HTML_TARGET, openTargets.index);
+      await context.globalState.update(STATE_OUTPUT_DIR, result.outputDirectory);
+      await context.globalState.update(STATE_LATEST_HTML, result.htmlIndexPath);
+      const summary = formatExportSummary(result.exportedSessionCount, result.exportedProjectCount);
+      outputChannel.appendLine(`Exported ${summary}.`);
+      outputChannel.appendLine(`Output directory: ${result.outputDirectory}`);
+      outputChannel.appendLine(`HTML index: ${result.htmlIndexPath}`);
+      outputChannel.appendLine(`Manifest: ${result.manifestPath}`);
+      if (result.runtimeTimings) outputChannel.appendLine(formatRuntimeSummary(result.runtimeTimings));
+      writeDiagnostic("success_message_show", { duration_ms: roundDiagnosticMs(performance.now() - adapterExportStartedAt) });
+      showExportNotification(
+        () => vscode.window.showInformationMessage(`Exported ${summary} to ${result.outputDirectory}.`, "Open HTML Index", "Open Export Folder"),
+        async (action) => {
+          writeDiagnostic("success_message_resolved", { action: action === "Open HTML Index" ? "OPEN_INDEX" : action === "Open Export Folder" ? "OPEN_FOLDER" : "DISMISSED", duration_ms: roundDiagnosticMs(performance.now() - adapterExportStartedAt) });
+          if (action === "Open HTML Index") await openVerifiedTarget(openTargets.index, openTargets.output);
+          if (action === "Open Export Folder") await openVerifiedTarget(openTargets.output);
+        },
+      );
+      return result;
+    } catch (error) {
+      if (error?.code === "EXPORT_CANCELLED") {
+        outputChannel.appendLine("Export cancelled.");
+        showExportNotification(() => vscode.window.showInformationMessage("Export cancelled."));
+        return undefined;
+      }
+      if (error?.code === "EXPORT_DESTINATION_COLLISION") {
+        await showDestinationCollision(context, exporter, selection);
+        return undefined;
+      }
+      const message = safeErrorMessage(error);
+      outputChannel.appendLine(`Export failed: ${message}`);
+      showExportNotification(() => vscode.window.showErrorMessage(`Codex export failed: ${message}`));
+      throw error;
+    }
+  }
+
+  async function showDestinationCollision(context, exporter, selection) {
+    const collisionTarget = await inspectOpenTarget(selection.outputDirectory, "directory").catch(() => null);
+    const message = "Export abgebrochen: Im Zielordner sind bereits Exportdateien mit abweichendem Inhalt vorhanden. Es wurde nichts überschrieben. Wählen Sie einen anderen, leeren Ordner für diesen Export.";
+    outputChannel.appendLine(`EXPORT_DESTINATION_COLLISION: ${message}`);
+    showExportNotification(
+      () => vscode.window.showErrorMessage(message, "Anderen Ordner wählen…", "Ordner öffnen"),
+      async (action) => {
+        ensureDesktopLocalExtensionHost();
+        if (action === "Ordner öffnen") {
+          try {
+            // The collided folder may be incomplete; opening it is for inspection.
+            // Revalidate its captured identity without treating it as a success.
+            const verified = await verifyOpenTarget(collisionTarget);
+            await openFile(verified.path);
+          } catch {
+            vscode.window.showWarningMessage("Der Zielordner kann nicht geöffnet werden, weil er nicht mehr sicher überprüfbar ist.");
+          }
+        }
+        if (action !== "Anderen Ordner wählen…") return;
+        const selected = await vscode.window.showOpenDialog({ canSelectFiles: false, canSelectFolders: true, canSelectMany: false, openLabel: "Use Export Folder", title: "Choose another Codex export output folder" });
+        if (!selected?.length) return;
+        if (selected[0].scheme !== "file") {
+          vscode.window.showWarningMessage("Choose an absolute local export folder.");
+          return;
+        }
+        const outputDirectory = validateAbsoluteOutputDirectory(selected[0].fsPath);
+        if (!outputDirectory) return;
+        await runRegisteredCommand(COMMANDS.exportMenu, () => withExclusiveExport(() =>
+          executeExport(context, exporter, { ...selection, outputDirectory })));
+      },
+    );
   }
 
   async function getLocalWorkspacePath() {
@@ -454,11 +518,10 @@ function createExtensionAdapter(vscode, injected = {}) {
     if (vscode.env.uiKind && vscode.env.uiKind !== vscode.UIKind.Desktop) throw new Error("vscode.dev and github.dev are not supported by this MVP.");
   }
 
-  async function resolveOutputDirectory(context) {
+  async function resolveOutputDirectory() {
     const configValue = getUserOnlyConfigValue("outputDirectory", "");
     if (configValue) return validateAbsoluteOutputDirectory(configValue);
-    const remembered = context.globalState.get(STATE_OUTPUT_DIR, "");
-    if (remembered) return validateAbsoluteOutputDirectory(remembered);
+    // Last-success records serve open actions only; picker targets are per-run.
     const selected = await vscode.window.showOpenDialog({ canSelectFiles: false, canSelectFolders: true, canSelectMany: false, openLabel: "Use Export Folder", title: "Choose Codex export output folder" });
     const folder = selected?.[0]?.fsPath || "";
     return folder ? validateAbsoluteOutputDirectory(folder) : "";
@@ -813,4 +876,4 @@ function isWindowsNetworkOrDevicePath(value) {
   return String(value || "").replaceAll("/", "\\").startsWith("\\\\");
 }
 
-module.exports = { COMMANDS, CONFIG_SECTION, DIAGNOSTIC_BUILD_ID, DOCUMENT_FORMATS, EXPORT_PROFILES, EXPORT_SCOPES, STATE_LATEST_HTML, STATE_LATEST_HTML_TARGET, STATE_OUTPUT_DIR, STATE_OUTPUT_TARGET, createExtensionAdapter, defaultLoadExporter, formatExportSummary, formatRuntimeSummary, isWindowsNetworkOrDevicePath, resolveConfiguredProfile, safeErrorMessage };
+module.exports = { SIDEBAR_VIEW, COMMANDS, CONFIG_SECTION, DIAGNOSTIC_BUILD_ID, DOCUMENT_FORMATS, EXPORT_PROFILES, EXPORT_SCOPES, STATE_LATEST_HTML, STATE_LATEST_HTML_TARGET, STATE_OUTPUT_DIR, STATE_OUTPUT_TARGET, createExtensionAdapter, defaultLoadExporter, formatExportSummary, formatRuntimeSummary, isWindowsNetworkOrDevicePath, resolveConfiguredProfile, safeErrorMessage };

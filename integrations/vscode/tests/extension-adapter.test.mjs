@@ -9,7 +9,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { buildVsix } from "../scripts/build-vsix.mjs";
 
 const require = createRequire(import.meta.url);
-const { COMMANDS, DIAGNOSTIC_BUILD_ID, DOCUMENT_FORMATS, EXPORT_PROFILES, EXPORT_SCOPES, STATE_LATEST_HTML, STATE_LATEST_HTML_TARGET, STATE_OUTPUT_DIR, STATE_OUTPUT_TARGET, createExtensionAdapter: createExtensionAdapterCore, defaultLoadExporter, formatExportSummary, isWindowsNetworkOrDevicePath, resolveConfiguredProfile } = require("../src/vscode-adapter.cjs");
+const { SIDEBAR_VIEW, COMMANDS, DIAGNOSTIC_BUILD_ID, DOCUMENT_FORMATS, EXPORT_PROFILES, EXPORT_SCOPES, STATE_LATEST_HTML, STATE_LATEST_HTML_TARGET, STATE_OUTPUT_DIR, STATE_OUTPUT_TARGET, createExtensionAdapter: createExtensionAdapterCore, defaultLoadExporter, formatExportSummary, isWindowsNetworkOrDevicePath, resolveConfiguredProfile } = require("../src/vscode-adapter.cjs");
 
 function createExtensionAdapter(vscode, injected = {}) {
   const recordedPathIdentity = (value) => String(value || "").replaceAll("/", "\\").replace(/[\\]+$/, "").toLowerCase();
@@ -32,6 +32,8 @@ function createState() {
 
 function createFakeVscode(overrides = {}) {
   const registered = new Map();
+  const treeProviders = new Map();
+  const executed = [];
   const messages = [];
   const opened = [];
   const output = [];
@@ -43,6 +45,7 @@ function createFakeVscode(overrides = {}) {
   const configScopes = overrides.configScopes || {};
   const vscode = {
     UIKind: { Desktop: 1, Web: 2 },
+    TreeItemCollapsibleState: { None: 0 },
     ProgressLocation: { Notification: 15 },
     env: {
       remoteName: overrides.remoteName,
@@ -59,9 +62,10 @@ function createFakeVscode(overrides = {}) {
       }),
     },
     window: {
+      registerTreeDataProvider: (id, provider) => { treeProviders.set(id, provider); return { dispose: () => treeProviders.delete(id) }; },
       createOutputChannel: () => ({ appendLine: (line) => output.push(line), show: () => {}, dispose: () => {} }),
       showWarningMessage: async (message, ...actions) => { messages.push({ type: "warning", message, actions }); return overrides.warningSelector?.(message, actions); },
-      showErrorMessage: async (message) => { messages.push({ type: "error", message }); return overrides.errorMessageHandler?.(message); },
+      showErrorMessage: async (message, ...actions) => { messages.push({ type: "error", message, actions }); return overrides.errorMessageHandler?.(message, actions); },
       showInformationMessage: async (message, ...actions) => { messages.push({ type: "info", message, actions }); return overrides.infoMessageHandler ? overrides.infoMessageHandler(message, actions) : overrides.infoAction; },
       showQuickPick: async (items, options) => {
         quickPicks.push({ items, options });
@@ -69,7 +73,7 @@ function createFakeVscode(overrides = {}) {
         if (Object.prototype.hasOwnProperty.call(overrides, "quickPickItem")) return overrides.quickPickItem;
         return items[0];
       },
-      showOpenDialog: async (options) => { openDialogs.push(options); return overrides.openDialogResult || []; },
+      showOpenDialog: async (options) => { openDialogs.push(options); return overrides.openDialogSelector ? overrides.openDialogSelector(options) : overrides.openDialogResult || []; },
       withProgress: async (options, task) => {
         progressCalls.push(options);
         const callbacks = [];
@@ -79,10 +83,11 @@ function createFakeVscode(overrides = {}) {
       },
     },
     commands: {
+      executeCommand: async (command, ...args) => { executed.push({ command, args }); return registered.get(command)?.(...args); },
       registerCommand: (name, callback) => { registered.set(name, callback); return { dispose: () => registered.delete(name) }; },
     },
   };
-  return { vscode, registered, messages, opened, output, quickPicks, openDialogs, progressCalls, progressReports, config };
+  return { vscode, registered, treeProviders, executed, messages, opened, output, quickPicks, openDialogs, progressCalls, progressReports, config };
 }
 
 function createContext(extensionPath = path.resolve(".")) {
@@ -178,13 +183,15 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
     exportAllSessions: "codexArchive.exportAllSessions",
     openLatestArchive: "codexArchive.openLatestArchive",
     openExportFolder: "codexArchive.openExportFolder",
+    openSettings: "codexArchive.openSettings",
   }, "existing internal command IDs must remain stable");
   assert.deepEqual(extensionPackage.contributes.commands.map(({ command, title }) => ({ command, title })), [
     { command: COMMANDS.exportMenu, title: "Codex Export: Export…" },
     { command: COMMANDS.openLatestArchive, title: "Codex Export: Open Latest Export" },
     { command: COMMANDS.openExportFolder, title: "Codex Export: Open Export Folder" },
-  ], "exactly three Codex Export commands should be visible in extension metadata");
-  assert.deepEqual(extensionPackage.activationEvents, Object.values(COMMANDS).map((command) => `onCommand:${command}`));
+    { command: COMMANDS.openSettings, title: "Codex Export: Extension Settings" },
+  ], "exactly four Codex Export commands should be visible in extension metadata");
+  assert.deepEqual(extensionPackage.activationEvents, [...Object.values(COMMANDS).map((command) => `onCommand:${command}`), `onView:${SIDEBAR_VIEW}`]);
   assert.deepEqual(EXPORT_PROFILES.map(({ label, profile }) => ({ label, profile })), [
     { label: "Complete export", profile: "complete" },
     { label: "Readable export", profile: "readable" },
@@ -192,7 +199,7 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
   ]);
   assert.equal("codexProjectChatExporter.includeOriginalJsonl" in extensionPackage.contributes.configuration.properties, false);
   assert.equal("codexProjectChatExporter.exportProfile" in extensionPackage.contributes.configuration.properties, false);
-  assert.equal(extensionPackage.version, "0.2.0", "the Marketplace candidate must install as a distinguishable extension version");
+  assert.equal(extensionPackage.version, "0.2.1", "the Marketplace candidate must install as a distinguishable extension version");
   assert.equal(extensionPackage.contributes.configuration.properties["codexProjectChatExporter.diagnosticOutput"].default, false);
   assert.equal(extensionPackage.contributes.configuration.properties["codexProjectChatExporter.outputDirectory"].scope, "machine");
   assert.equal(extensionPackage.contributes.configuration.properties["codexProjectChatExporter.codexHome"].scope, "machine");
@@ -225,14 +232,14 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
 {
   const buildTemp = await fsp.realpath(await fsp.mkdtemp(path.join(os.tmpdir(), "codex-vsix-build-success-")));
   const distDir = path.join(buildTemp, "dist");
-  const currentCandidate = path.join(distDir, "codex-project-chat-exporter-vscode-0.2.0.vsix");
+  const currentCandidate = path.join(distDir, "codex-project-chat-exporter-vscode-0.2.1.vsix");
   await fsp.mkdir(distDir, { recursive: true });
   await fsp.writeFile(currentCandidate, "previous candidate", "utf8");
   const result = await buildVsix({
     distDir,
     archiveWriter: async ({ archivePath }) => fsp.writeFile(archivePath, "synthetic VSIX", "utf8"),
   });
-  assert.equal(path.basename(result.vsixPath), "codex-project-chat-exporter-vscode-0.2.0.vsix");
+  assert.equal(path.basename(result.vsixPath), "codex-project-chat-exporter-vscode-0.2.1.vsix");
   assert.equal(await fsp.readFile(result.vsixPath, "utf8"), "synthetic VSIX", "the exact canonical candidate may be replaced in a controlled publication step");
   assert.equal((await fsp.stat(result.vsixPath)).isFile(), true);
   assert.equal(await fsp.stat(result.stage).then(() => true, () => false), false, "successful builds must remove their stage directory");
@@ -1478,6 +1485,426 @@ for (const mode of ["recover", "menu", "dismiss-recovery", "dismiss-picker", "di
   assert.equal(coreCalls, 0);
   assert.equal(fake.messages.some(message => message.type === "info" || message.type === "error" || message.message === "No export folder selected."), false);
 }
+
+// UX 0.2.1 regressions use public commands and asynchronous notification actions.
+function deferred() {
+  let resolve;
+  const promise = new Promise(done => { resolve = done; });
+  return { promise, resolve };
+}
+async function waitFor(predicate, label) {
+  const deadline = Date.now() + 5000;
+  while (!predicate()) {
+    assert.ok(Date.now() < deadline, `Timed out: ${label}`);
+    await new Promise(resolve => setTimeout(resolve, 5));
+  }
+}
+function collision() { return Object.assign(new Error("synthetic collision"), { code: "EXPORT_DESTINATION_COLLISION" }); }
+const chooseFolder = "Anderen Ordner wählen…";
+const inspectFolder = "Ordner öffnen";
+
+{
+  const fake = createFakeVscode({ config: { outputDirectory } });
+  const context = createContext(temp);
+  const adapter = createExtensionAdapter(fake.vscode, { loadExporter: async () => exporter });
+  await adapter.activate(context);
+  const provider = fake.treeProviders.get(SIDEBAR_VIEW);
+  assert.ok(provider, "the manifest view must register a native tree provider");
+  const rows = provider.getChildren().map(action => provider.getTreeItem(action));
+  assert.deepEqual(rows.map(row => row.label), ["Export…", "Open Latest Export", "Open Export Folder", "Extension Settings"]);
+  assert.deepEqual(rows.map(row => row.command.command), [COMMANDS.exportMenu, COMMANDS.openLatestArchive, COMMANDS.openExportFolder, COMMANDS.openSettings]);
+  for (const row of rows) {
+    assert.equal(row.collapsibleState, 0);
+    assert.deepEqual(provider.getChildren(row), []);
+    assert.ok(fake.registered.has(row.command.command));
+  }
+  // Choose all sessions for the shared export command, then open its saved result.
+  fake.vscode.window.showQuickPick = async items => items.find(item => item.scope === "all") || items[0];
+  for (const row of rows) await fake.vscode.commands.executeCommand(row.command.command);
+  assert.deepEqual(fake.opened, [path.join(outputDirectory, "index.html"), outputDirectory]);
+  assert.deepEqual(fake.executed.at(-1), { command: "workbench.action.openSettings", args: ["@ext:ann-diana.codex-project-chat-exporter-vscode"] });
+  for (const registration of context.subscriptions) registration.dispose();
+  assert.equal(fake.treeProviders.size, 0);
+  assert.equal(fake.registered.size, 0);
+}
+
+for (const outcome of ["dismiss", "cancel", "remote", "relative", "network", "dialog-error", "open", "replaced-open", "notification-error"]) {
+  const target = path.join(temp, `collision-${outcome}`);
+  await fsp.mkdir(target);
+  const action = deferred();
+  let attempts = 0;
+  const fake = createFakeVscode({ config: { outputDirectory: target }, errorMessageHandler: () => action.promise });
+  const context = createContext(temp);
+  const adapter = createExtensionAdapter(fake.vscode, { loadExporter: async () => ({ async exportArchive(options) {
+    attempts += 1;
+    if (attempts === 2) throw collision();
+    return exporter.exportArchive(options);
+  } }) });
+  await adapter.activate(context);
+  await adapter.exportAllSessions(context);
+  const saved = [...context.globalState.values];
+  assert.equal(await adapter.exportAllSessions(context), undefined);
+  const notification = fake.messages.find(message => message.type === "error");
+  assert.ok(notification.message.includes("Es wurde nichts überschrieben"));
+  assert.deepEqual(notification.actions, [chooseFolder, inspectFolder]);
+  assert.deepEqual([...context.globalState.values], saved);
+  if (outcome === "notification-error") {
+    action.resolve(Promise.reject(new Error("notification failure")));
+  } else if (outcome === "dismiss") {
+    action.resolve();
+  } else if (outcome === "open" || outcome === "replaced-open") {
+    if (outcome === "replaced-open") {
+      await fsp.rename(target, `${target}-old`);
+      await fsp.mkdir(target);
+    }
+    // Opening a collision is inspection, including when an incomplete marker exists.
+    await fsp.writeFile(path.join(target, "EXPORT_INCOMPLETE.txt"), "incomplete");
+    action.resolve(inspectFolder);
+    await waitFor(() => fake.opened.length || fake.messages.some(m => m.message.includes("nicht mehr sicher")), outcome);
+    assert.deepEqual(fake.opened, outcome === "open" ? [target] : []);
+    await fsp.unlink(path.join(target, "EXPORT_INCOMPLETE.txt"));
+  } else {
+    fake.vscode.window.showOpenDialog = async () => {
+      if (outcome === "dialog-error") throw new Error("dialog failure");
+      if (outcome === "cancel") return [];
+      return [{ scheme: outcome === "remote" ? "vscode-remote" : "file", fsPath: outcome === "relative" ? "relative" : outcome === "network" ? "\\\\server\\share" : target }];
+    };
+    action.resolve(chooseFolder);
+  }
+  await new Promise(resolve => setTimeout(resolve, 15));
+  assert.equal(attempts, 2, `${outcome}: no retry`);
+  assert.deepEqual([...context.globalState.values], saved, `${outcome}: last success unchanged`);
+  await adapter.exportAllSessions(context);
+  assert.equal(attempts, 3, `${outcome}: lock released`);
+}
+
+{
+  const firstTarget = path.join(temp, "retry-configured");
+  const freshTarget = path.join(temp, "retry-fresh");
+  const anotherTarget = path.join(temp, "retry-another");
+  await fsp.mkdir(firstTarget);
+  const action = deferred();
+  const picker = deferred();
+  const retryGate = deferred();
+  const calls = [];
+  const fake = createFakeVscode({ config: { outputDirectory: firstTarget, codexHome: temp, includeTools: true, pathStyle: "readable" }, errorMessageHandler: () => action.promise });
+  const context = createContext(temp);
+  let gateRetry = false;
+  const adapter = createExtensionAdapter(fake.vscode, { loadExporter: async () => ({ async exportArchive(options) {
+    calls.push(options);
+    if (calls.length === 1) throw collision();
+    if (gateRetry && options.outputDirectory === freshTarget) await retryGate.promise;
+    return exporter.exportArchive(options);
+  } }) });
+  await adapter.activate(context);
+  const selectedProject = (await defaultInventoryProvider()).projects[0];
+  await adapter.runExport(context, { scope: "recorded-project", selectedProject }, "source-snapshots", ["docx", "pdf"]);
+  // An unresolved collision notification and folder picker must not retain a lock.
+  fake.config.set("outputDirectory", anotherTarget);
+  await adapter.exportAllSessions(context);
+  assert.equal(calls.length, 2);
+  const successfulState = [...context.globalState.values];
+  fake.vscode.window.showOpenDialog = () => picker.promise;
+  action.resolve(chooseFolder);
+  await new Promise(resolve => setImmediate(resolve));
+  await adapter.exportAllSessions(context);
+  assert.equal(calls.length, 3, "a pending folder picker must not hold the lock");
+  fake.config.set("includeTools", false);
+  fake.config.set("pathStyle", "short");
+  gateRetry = true;
+  picker.resolve([{ scheme: "file", fsPath: freshTarget }]);
+  await waitFor(() => calls.length === 4, "retry start");
+  assert.equal(await adapter.exportAllSessions(context), undefined, "retry core holds the lock");
+  const original = calls[0];
+  const retry = calls[3];
+  for (const key of ["scope", "workspacePath", "recordedProjectPath", "exportProfile", "documentFormats", "pathStyle", "includeTools", "codexHome", "onSelectRecordedProject"]) assert.deepEqual(retry[key], original[key], key);
+  assert.equal(retry.onSelectRecordedProject({ projects: [selectedProject], reason: "requested" }), selectedProject.cwd);
+  assert.throws(() => retry.onSelectRecordedProject({ projects: [{ ...selectedProject, sourceBytes: 1 }], reason: "requested" }), { code: "RECORDED_PROJECT_INVENTORY_CHANGED" });
+  assert.notEqual(retry.abortSignal, original.abortSignal);
+  assert.equal(retry.outputDirectory, freshTarget);
+  assert.equal(fake.quickPicks.length, 0, "retry does not repeat any configuration pickers");
+  retryGate.resolve();
+  await waitFor(() => context.globalState.get(STATE_OUTPUT_DIR) === freshTarget, "retry success");
+  assert.equal(fake.config.get("outputDirectory"), anotherTarget, "retry never edits settings");
+  assert.equal(context.globalState.values.has("codexProjectChatExporter.rememberedOutputDirectory"), false, "a delayed retry must not store an automatic destination");
+  await adapter.exportAllSessions(context);
+  assert.equal(calls.at(-1).outputDirectory, anotherTarget, "next export uses settings");
+  assert.notDeepEqual([...context.globalState.values], successfulState);
+}
+
+// UX-01: first collision with empty state, using the registered command and real
+// core. Selected output folders must never become automatic future destinations.
+for (const destinationMode of ["empty", "configured"]) {
+  const core = await import("../../../bin/export-codex-project-chats.mjs");
+  const codexHome = path.join(temp, `ux01-${destinationMode}-home`);
+  const originalTarget = path.join(temp, `ux01-${destinationMode}-original`);
+  const retryTarget = path.join(temp, `ux01-${destinationMode}-retry`);
+  const nextTarget = path.join(temp, `ux01-${destinationMode}-next`);
+  await fsp.mkdir(path.join(codexHome, "sessions"), { recursive: true });
+  const source = path.join(codexHome, "sessions", "rollout-synthetic.jsonl");
+  const records = [
+    { type: "session_meta", timestamp: "2026-09-24T10:00:00Z", payload: { id: "cccccccc-cccc-7ccc-8ccc-cccccccccccc", cwd: oneWorkspace } },
+    { type: "response_item", timestamp: "2026-09-24T10:00:01Z", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "Synthetic collision retry" }] } },
+  ];
+  const sourceBytes = Buffer.from(records.map(record => JSON.stringify(record)).join("\n") + "\n");
+  await fsp.writeFile(source, sourceBytes);
+  // A was created outside this adapter; there must be no previous adapter state.
+  await core.exportArchive({ scope: "all", codexHome, outputDirectory: originalTarget, exportProfile: "complete" });
+  const manifestBefore = await fsp.readFile(path.join(originalTarget, "manifest.json"));
+  const action = deferred();
+  const destinations = destinationMode === "empty" ? [originalTarget, retryTarget, nextTarget, originalTarget, undefined, nextTarget] : [retryTarget];
+  const calls = [];
+  const fake = createFakeVscode({
+    config: { codexHome, outputDirectory: destinationMode === "configured" ? originalTarget : "" },
+    openDialogSelector: () => { const target = destinations.shift(); return target ? [{ scheme: "file", fsPath: target }] : []; },
+    errorMessageHandler: (_message, actions) => actions.includes(chooseFolder) ? action.promise : undefined,
+    quickPickSelector: items => items.find(item => item.scope === "all" || item.profile === "readable" || item.documentFormats?.length === 2),
+  });
+  const configBytes = Buffer.from(JSON.stringify([...fake.config]));
+  const context = createContext(temp);
+  context.workspaceState = createState();
+  const updates = [];
+  const update = context.globalState.update;
+  context.globalState.update = async (key, value) => { updates.push({ key, value }); return update(key, value); };
+  const adapter = createExtensionAdapter(fake.vscode, { loadExporter: async () => ({ ...core, async exportArchive(options) {
+    calls.push(options);
+    return core.exportArchive(options);
+  } }) });
+  await adapter.activate(context);
+  const run = () => fake.registered.get(COMMANDS.exportMenu)();
+  await run();
+  assert.equal(calls.length, 1);
+  assert.deepEqual([...context.globalState.values], [], "first collision must not save any destination");
+  assert.deepEqual(updates, []);
+  assert.ok(fake.messages.some(message => message.actions?.includes(chooseFolder)));
+  const pickerCount = fake.openDialogs.length;
+  const selectionCount = fake.quickPicks.length;
+  action.resolve(chooseFolder);
+  await waitFor(() => context.globalState.get(STATE_LATEST_HTML) === path.join(retryTarget, "index.html"), "first collision retry success");
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(calls.length, 2);
+  assert.equal(fake.quickPicks.length, selectionCount, "retry preserves the configured scope/profile/formats");
+  assert.equal(fake.openDialogs.length, pickerCount + 1);
+  for (const key of ["scope", "exportProfile", "documentFormats", "codexHome", "includeTools", "pathStyle"]) assert.deepEqual(calls[1][key], calls[0][key], key);
+  assert.notEqual(calls[1].abortSignal, calls[0].abortSignal);
+  assert.equal(await adapter.openLatestArchive(context), true);
+  assert.equal(await adapter.openExportFolder(context), true);
+  assert.deepEqual(fake.opened, [path.join(retryTarget, "index.html"), retryTarget]);
+
+  if (destinationMode === "empty") {
+    await run();
+    assert.equal(fake.openDialogs.length, pickerCount + 2, "next normal export must ask for a folder again");
+    assert.equal(calls.at(-1).outputDirectory, nextTarget);
+  }
+  const saved = [...context.globalState.values];
+  const updatesBeforeFailure = updates.length;
+  // Selecting/configuring A again must still refuse the incomplete generation.
+  const markerBefore = await fsp.readFile(path.join(originalTarget, "EXPORT_INCOMPLETE.txt"));
+  await assert.rejects(run, { code: "INCOMPLETE_EXPORT_EXISTS" });
+  assert.deepEqual([...context.globalState.values], saved);
+  assert.equal(updates.length, updatesBeforeFailure);
+  assert.deepEqual(await fsp.readFile(path.join(originalTarget, "manifest.json")), manifestBefore);
+  assert.deepEqual(await fsp.readFile(path.join(originalTarget, "EXPORT_INCOMPLETE.txt")), markerBefore);
+  const dialogsBeforeNext = fake.openDialogs.length;
+  if (destinationMode === "empty") {
+    assert.equal(await run(), undefined, "cancelling the next normal picker starts no export");
+    assert.equal(fake.openDialogs.length, dialogsBeforeNext + 1);
+    assert.deepEqual([...context.globalState.values], saved);
+    assert.equal(updates.length, updatesBeforeFailure);
+    await run();
+    assert.equal(fake.openDialogs.length, dialogsBeforeNext + 2, "picker cancellation releases the runtime lock");
+    assert.equal(calls.at(-1).outputDirectory, nextTarget);
+  } else {
+    await assert.rejects(run, { code: "INCOMPLETE_EXPORT_EXISTS" });
+    assert.equal(fake.openDialogs.length, dialogsBeforeNext, "configured target remains authoritative");
+    assert.equal(calls.at(-1).outputDirectory, originalTarget, "failed configured run releases the runtime lock");
+    assert.deepEqual([...context.globalState.values], saved);
+  }
+  assert.deepEqual(Buffer.from(JSON.stringify([...fake.config])), configBytes, "settings remain byte-identical");
+  const successKeys = [STATE_OUTPUT_TARGET, STATE_LATEST_HTML_TARGET, STATE_OUTPUT_DIR, STATE_LATEST_HTML];
+  assert.deepEqual([...context.globalState.values.keys()].sort(), [...successKeys].sort(), "only last-success records may be stored");
+  assert.ok(updates.every(({ key }) => successKeys.includes(key)), "no automatic destination preference may ever be written");
+  for (const { value } of updates) {
+    assert.notEqual(value, originalTarget);
+    assert.notEqual(value?.path, originalTarget);
+    assert.notEqual(value?.canonicalPath, originalTarget);
+  }
+  assert.deepEqual([...context.workspaceState.values], []);
+  assert.deepEqual(await fsp.readFile(source), sourceBytes);
+  assert.equal(fs.existsSync(path.join(originalTarget, ".codex-export.lock")), false);
+  assert.equal(fs.existsSync(path.join(retryTarget, ".codex-export.lock")), false);
+  assert.equal(fs.existsSync(path.join(retryTarget, "EXPORT_INCOMPLETE.txt")), false);
+  const manifest = JSON.parse(await fsp.readFile(path.join(retryTarget, "manifest.json"), "utf8"));
+  assert.equal(manifest.export_profile, "readable");
+  assert.equal(manifest.formats.docx, true);
+  assert.equal(manifest.formats.pdf, true);
+  console.log(`UX-01 real-core ${destinationMode}: PASS`);
+}
+
+for (const failure of ["cancelled", "core-error", "invalid-result", "status-error", "second-collision"]) {
+  const target = path.join(temp, `retry-failure-${failure}`);
+  const alternate = path.join(temp, `retry-failure-${failure}-alternate`);
+  await fsp.mkdir(target);
+  let calls = 0;
+  const fake = createFakeVscode({ config: { outputDirectory: target }, openDialogResult: [{ scheme: "file", fsPath: alternate }], errorMessageHandler: (message, actions) => actions.includes(chooseFolder) && calls === 2 ? chooseFolder : undefined });
+  const context = createContext(temp);
+  const adapter = createExtensionAdapter(fake.vscode, { loadExporter: async () => ({ async exportArchive(options) {
+    calls += 1;
+    if (calls === 2) throw collision();
+    if (calls === 3) {
+      if (failure === "cancelled") throw Object.assign(new Error("cancelled"), { code: "EXPORT_CANCELLED" });
+      if (failure === "core-error") throw new Error("retry core failed");
+      if (failure === "second-collision") throw collision();
+      if (failure === "invalid-result") return { outputDirectory: alternate, htmlIndexPath: path.join(alternate, "missing.html") };
+    }
+    return exporter.exportArchive(options);
+  } }) });
+  await adapter.activate(context);
+  await adapter.exportAllSessions(context);
+  const saved = [...context.globalState.values];
+  const update = context.globalState.update;
+  if (failure === "status-error") context.globalState.update = async () => { throw new Error("status unavailable"); };
+  await adapter.exportAllSessions(context);
+  await waitFor(() => calls === 3, failure);
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.deepEqual([...context.globalState.values], saved, `${failure}: no success publication`);
+  context.globalState.update = update;
+  await adapter.exportAllSessions(context);
+  assert.equal(calls, 4, `${failure}: retry failure releases lock`);
+}
+
+{
+  const target = path.join(temp, "retry-busy-target");
+  const alternate = path.join(temp, "retry-busy-alternate");
+  await fsp.mkdir(target);
+  const action = deferred();
+  const activeExport = deferred();
+  let calls = 0;
+  const fake = createFakeVscode({ config: { outputDirectory: target }, openDialogResult: [{ scheme: "file", fsPath: alternate }], errorMessageHandler: () => action.promise });
+  const adapter = createExtensionAdapter(fake.vscode, { loadExporter: async () => ({ async exportArchive(options) {
+    calls += 1;
+    if (calls === 1) throw collision();
+    if (calls === 2) await activeExport.promise;
+    return exporter.exportArchive(options);
+  } }) });
+  const context = createContext(temp);
+  await adapter.activate(context);
+  await adapter.exportAllSessions(context);
+  const running = adapter.exportAllSessions(context);
+  await waitFor(() => calls === 2, "independent export active");
+  action.resolve(chooseFolder);
+  await waitFor(() => fake.messages.some(message => message.message.includes("already running")), "busy retry refused");
+  assert.equal(calls, 2);
+  assert.equal(fs.existsSync(alternate), false);
+  assert.equal(await adapter.exportAllSessions(context), undefined, "refused delayed retry cannot unlock another export");
+  activeExport.resolve();
+  await running;
+  await adapter.exportAllSessions(context);
+  assert.equal(calls, 3);
+}
+
+// Empty outputDirectory must keep asking after every unsuccessful retry path,
+// both on first use and after a different export succeeded previously.
+for (const previousSuccess of [false, true]) {
+  for (const outcome of ["dismiss", "picker-cancel", "picker-error", "core-cancel", "core-error", "incomplete", "invalid-result"]) {
+    const caseId = `${previousSuccess ? "prior" : "fresh"}-${outcome}`;
+    const previous = path.join(temp, `ux01-${caseId}-previous`);
+    const original = path.join(temp, `ux01-${caseId}-original`);
+    const retry = path.join(temp, `ux01-${caseId}-retry`);
+    const next = path.join(temp, `ux01-${caseId}-next`);
+    await fsp.mkdir(original);
+    const action = deferred();
+    let calls = 0;
+    const destinations = previousSuccess ? [previous, original] : [original];
+    const fake = createFakeVscode({
+      config: { outputDirectory: "" },
+      openDialogSelector: () => {
+        const target = destinations.shift();
+        if (target instanceof Error) throw target;
+        return target ? [{ scheme: "file", fsPath: target }] : [];
+      },
+      errorMessageHandler: (_message, actions) => actions.includes(chooseFolder) ? action.promise : undefined,
+    });
+    const context = createContext(temp);
+    context.workspaceState = createState();
+    const writes = [];
+    const update = context.globalState.update;
+    context.globalState.update = async (key, value) => { writes.push(key); return update(key, value); };
+    const adapter = createExtensionAdapter(fake.vscode, { loadExporter: async () => ({ async exportArchive(options) {
+      calls += 1;
+      if (options.outputDirectory === original) throw collision();
+      if (options.outputDirectory === retry) {
+        if (outcome === "core-cancel") throw Object.assign(new Error("cancelled"), { code: "EXPORT_CANCELLED" });
+        if (outcome === "incomplete") throw Object.assign(new Error("incomplete"), { code: "INCOMPLETE_EXPORT_EXISTS" });
+        if (outcome === "invalid-result") return { outputDirectory: retry, htmlIndexPath: path.join(retry, "missing.html") };
+        throw new Error("synthetic retry error");
+      }
+      return exporter.exportArchive(options);
+    } }) });
+    await adapter.activate(context);
+    const run = () => fake.registered.get(COMMANDS.exportAllSessions)();
+    if (previousSuccess) await run();
+    const saved = [...context.globalState.values];
+    const savedWrites = [...writes];
+    await run();
+    assert.deepEqual([...context.globalState.values], saved, `${outcome}: collision preserves last success`);
+    const dialogsAfterCollision = fake.openDialogs.length;
+    if (outcome === "dismiss") action.resolve();
+    else {
+      destinations.push(outcome === "picker-cancel" ? undefined : outcome === "picker-error" ? new Error("picker error") : retry);
+      action.resolve(chooseFolder);
+      await waitFor(() => fake.openDialogs.length === dialogsAfterCollision + 1, `${outcome}: retry picker`);
+      if (outcome === "picker-error") await waitFor(() => fake.output.some(line => line.startsWith("Export notification or follow-up action failed")), outcome);
+      if (outcome === "core-cancel") await waitFor(() => fake.output.includes("Export cancelled."), outcome);
+      if (["core-error", "incomplete", "invalid-result"].includes(outcome)) await waitFor(() => fake.output.some(line => line.startsWith("Export failed:")), outcome);
+    }
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual([...context.globalState.values], saved, `${outcome}: no unsuccessful retry state`);
+    assert.deepEqual(writes, savedWrites, `${outcome}: no state writes before success`);
+    assert.deepEqual([...context.workspaceState.values], []);
+    assert.deepEqual([...fake.config], [["outputDirectory", ""]]);
+    for (const forbidden of [original, retry]) {
+      for (const [, value] of context.globalState.values) {
+        assert.notEqual(value, forbidden);
+        assert.notEqual(value?.path, forbidden);
+        assert.notEqual(value?.canonicalPath, forbidden);
+      }
+    }
+    assert.equal(await adapter.openLatestArchive(context), previousSuccess);
+    assert.equal(await adapter.openExportFolder(context), previousSuccess);
+    assert.deepEqual(fake.opened, previousSuccess ? [path.join(previous, "index.html"), previous] : []);
+    const attemptsBeforeNext = calls;
+    const dialogsBeforeNext = fake.openDialogs.length;
+    destinations.push(next);
+    await run();
+    assert.equal(fake.openDialogs.length, dialogsBeforeNext + 1, `${outcome}: next normal export asks again`);
+    assert.equal(calls, attemptsBeforeNext + 1, `${outcome}: runtime lock is released`);
+    assert.equal(context.globalState.get(STATE_OUTPUT_DIR), next);
+    assert.deepEqual([...context.globalState.values.keys()].sort(), [STATE_OUTPUT_TARGET, STATE_LATEST_HTML_TARGET, STATE_OUTPUT_DIR, STATE_LATEST_HTML].sort());
+    console.log(`UX-01 retry ${caseId}: PASS`);
+  }
+}
+
+{
+  // Older states must not resurrect implicit output preferences after an upgrade.
+  const context = createContext(temp);
+  await context.globalState.update("codexProjectChatExporter.rememberedOutputDirectory", path.join(temp, "obsolete-default"));
+  await context.globalState.update(STATE_OUTPUT_DIR, path.join(temp, "legacy-success"));
+  const saved = [...context.globalState.values];
+  const first = path.join(temp, "picker-first");
+  const second = path.join(temp, "picker-second");
+  const choices = [first, second];
+  const fake = createFakeVscode({ openDialogSelector: () => [{ scheme: "file", fsPath: choices.shift() }] });
+  const adapter = createExtensionAdapter(fake.vscode);
+  await adapter.activate(context);
+  assert.equal(await adapter.resolveOutputDirectory(), first);
+  assert.equal(await adapter.resolveOutputDirectory(), second);
+  assert.equal(fake.openDialogs.length, 2);
+  assert.deepEqual([...context.globalState.values], saved, "selecting a folder stores no preference or success");
+  console.log("UX-01 obsolete/legacy state ignored: PASS");
+}
+
+console.log("UX regressions passed: sidebar, collision actions, cancellation, retry selection/state and real-core preservation");
 
 const after = await fsp.readFile(sourceFile, "utf8");
 assert.equal(after, before, "synthetic source data must not be modified");

@@ -438,13 +438,14 @@ test("regular VSIX builds are byte-identical and their packaged runtime exports 
     assertPackagedReadmeTargets(packagedReadme);
     assertEightPinnedReadmeLinks(packagedReadme);
     assert.equal(packagedReadme.includes("../../"), false);
-    assert.ok(packagedReadme.includes("before the first publication, that link may not resolve."));
+    assert.equal(packagedReadme.includes("before the first publication"), false);
     assert.equal(packagedReadme.includes("is not published in the Visual Studio Code Marketplace"), false);
     assertSupportIssuesLink(packagedReadme);
     const packagedChangelog = await zip.file("extension/CHANGELOG.md")?.async("string");
     assert.ok(packagedChangelog, "packaged extension CHANGELOG is missing");
     assert.equal(packagedChangelog, await fs.readFile(path.join(extensionRoot, "CHANGELOG.md"), "utf8"));
     assert.ok(packagedChangelog.includes("## 0.2.0 – First Marketplace release"));
+    assert.ok(packagedChangelog.includes("## 0.2.1 – Unreleased"));
     for (const { source, packaged, expectedOccurrences } of PACKAGED_README_TRANSFORMATIONS) {
       assert.equal(literalOccurrenceCount(packagedReadme, source), 0, source);
       assert.equal(literalOccurrenceCount(packagedReadme, packaged), expectedOccurrences, packaged);
@@ -466,7 +467,7 @@ test("regular VSIX builds are byte-identical and their packaged runtime exports 
     assert.equal(identities.length, 1);
     assert.deepEqual(
       { id: identities[0].attributes.Id, publisher: identities[0].attributes.Publisher, version: identities[0].attributes.Version },
-      { id: "codex-project-chat-exporter-vscode", publisher: "ann-diana", version: "0.2.0" },
+      { id: "codex-project-chat-exporter-vscode", publisher: "ann-diana", version: "0.2.1" },
     );
     const changelogAssets = collectElements(vsixManifest, "Asset")
       .filter((element) => element.attributes?.Type === "Microsoft.VisualStudio.Services.Content.Changelog");
@@ -488,11 +489,24 @@ test("regular VSIX builds are byte-identical and their packaged runtime exports 
       const extension = path.posix.extname(file.name).slice(1).toLowerCase();
       assert.ok(extension ? defaults.has(extension) : overrides.has(`/${file.name}`), `missing content type: ${file.name}`);
     }
+    const sidebar = packagedExtensionManifest.contributes.viewsContainers.activitybar;
+    assert.deepEqual(sidebar, [{ id: "codexArchive", title: "Codex Exporter", icon: "images/exporter.svg" }]);
+    assert.deepEqual(packagedExtensionManifest.contributes.views.codexArchive, [{ id: "codexArchive.actions", name: "Codex Exporter", icon: "images/exporter.svg" }]);
+    const svgBytes = await zip.file("extension/images/exporter.svg").async("nodebuffer");
+    assert.deepEqual(svgBytes, await fs.readFile(path.join(extensionRoot, "images", "exporter.svg")));
+    const svg = xml2js(svgBytes.toString("utf8"), { compact: false, alwaysChildren: true });
+    assert.equal(collectElements(svg, "svg")[0].attributes.viewBox, "0 0 24 24");
+    assert.deepEqual(collectElements(svg, "svg")[0].elements.filter(e => e.type === "element").map(e => e.name), ["path"]);
+    const iconPath = collectElements(svg, "path")[0];
+    assert.equal(iconPath.attributes.fill, "none");
+    assert.equal(iconPath.attributes.stroke, "#C5C5C5");
+    assert.deepEqual(Object.keys(iconPath.attributes).sort(), ["d", "fill", "stroke", "stroke-linecap", "stroke-linejoin", "stroke-width"].sort());
+    assert.equal(collectElements(contentTypes, "Default").find(e => e.attributes.Extension === "svg").attributes.ContentType, "image/svg+xml");
     const rootPackage = JSON.parse(await fs.readFile("package.json", "utf8"));
     const lock = JSON.parse(await fs.readFile("package-lock.json", "utf8"));
     const extensionPackage = JSON.parse(await fs.readFile(path.join("integrations", "vscode", "package.json"), "utf8"));
     assert.deepEqual(packagedExtensionManifest, extensionPackage);
-    assert.equal(extensionPackage.version, "0.2.0");
+    assert.equal(extensionPackage.version, "0.2.1");
     assert.equal(extensionPackage.name, "codex-project-chat-exporter-vscode");
     assert.equal(extensionPackage.publisher, "ann-diana");
     assert.equal(extensionPackage.pricing, "Free");

@@ -2,7 +2,7 @@
   "name": "codex-project-chat-exporter-vscode",
   "displayName": "Codex Project Chat Exporter",
   "description": "Export local Codex project sessions to Markdown, HTML, editable DOCX and searchable PDF, with optional verified source snapshots.",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "publisher": "ann-diana",
   "license": "MIT",
   "pricing": "Free",
@@ -41,7 +41,9 @@
     "onCommand:codexArchive.exportCurrentWorkspace",
     "onCommand:codexArchive.exportAllSessions",
     "onCommand:codexArchive.openLatestArchive",
-    "onCommand:codexArchive.openExportFolder"
+    "onCommand:codexArchive.openExportFolder",
+    "onCommand:codexArchive.openSettings",
+    "onView:codexArchive.actions"
   ],
   "capabilities": {
     "virtualWorkspaces": false,
@@ -62,6 +64,10 @@
       {
         "command": "codexArchive.openExportFolder",
         "title": "Codex Export: Open Export Folder"
+      },
+      {
+        "command": "codexArchive.openSettings",
+        "title": "Codex Export: Extension Settings"
       }
     ],
     "configuration": {
@@ -71,7 +77,7 @@
           "type": "string",
           "default": "",
           "scope": "machine",
-          "description": "Absolute local folder where Codex exports are written. If empty, the extension asks on first export and remembers the selected folder."
+          "description": "Absolute local folder where Codex exports are written. If empty, the extension asks for a folder for every export. A selected folder applies only to that export."
         },
         "codexProjectChatExporter.codexHome": {
           "type": "string",
@@ -81,7 +87,10 @@
         },
         "codexProjectChatExporter.pathStyle": {
           "type": "string",
-          "enum": ["short", "readable"],
+          "enum": [
+            "short",
+            "readable"
+          ],
           "default": "short",
           "description": "Use short Windows-friendly export paths or longer human-readable file names."
         },
@@ -97,6 +106,24 @@
           "description": "Write message-free, path-redacted timing diagnostics with operational metadata to the output channel for a troubleshooting run. Leave disabled for normal exports."
         }
       }
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "codexArchive",
+          "title": "Codex Exporter",
+          "icon": "images/exporter.svg"
+        }
+      ]
+    },
+    "views": {
+      "codexArchive": [
+        {
+          "id": "codexArchive.actions",
+          "name": "Codex Exporter",
+          "icon": "images/exporter.svg"
+        }
+      ]
     }
   },
   "scripts": {
