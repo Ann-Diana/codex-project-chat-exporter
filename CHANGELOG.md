@@ -2,9 +2,11 @@
 
 All notable changes to this project are documented here.
 
-The latest published release is `v0.3.1`, dated 2026-09-06.
+The latest published release is `v0.4.0`, dated 2026-09-23.
 
 ## Unreleased
+
+## 0.4.0 – 2026-09-23
 
 ### Added
 
@@ -13,7 +15,7 @@ The latest published release is `v0.3.1`, dated 2026-09-06.
 
 ### Changed
 
-- Prepared VS Code extension 0.2.0 for its first Marketplace listing.
+- Published VS Code extension 0.2.0 in the Marketplace.
 - Reconstruct same-thread continuation files only through explicit `history_base` chains; unlinked, ambiguous, conflicting, missing, or cyclic relations now fail closed with a machine-readable relation status.
 - Preserve physical order and all later valid turns across duplicate, regressive, or skipped inner ordinals while retaining strict metadata anchors, byte boundaries, hashes, and source identities.
 - Preserve orphan tool outputs as independent events, report missing, empty, unknown, and ambiguous `call_id` states, and render structured tool values deterministically.

@@ -25,7 +25,7 @@ The packaged VSIX includes the exporter runtime. No separate Node.js installatio
 
 ## Installation
 
-After the Marketplace release is published, open Extensions in VS Code Desktop, search for `ann-diana.codex-project-chat-exporter-vscode` and select **Install**. You can also open the [Marketplace listing](https://marketplace.visualstudio.com/items?itemName=ann-diana.codex-project-chat-exporter-vscode); before the first publication, that link may not resolve.
+Open Extensions in VS Code Desktop, search for `ann-diana.codex-project-chat-exporter-vscode` and select **Install**. You can also open the [Marketplace listing](https://marketplace.visualstudio.com/items?itemName=ann-diana.codex-project-chat-exporter-vscode).
 
 For manual installation of a version that is also available as a VSIX on GitHub Releases:
 
@@ -42,7 +42,7 @@ code --install-extension "C:\path\to\codex-project-chat-exporter-vscode-<version
 
 ## Export
 
-Run **Codex Export: Export…** and choose:
+Open **Codex Exporter** in the Activity Bar and select **Export…**, or run **Codex Export: Export…**. Choose:
 
 1. **Scope** – Current Workspace, Project from Codex history… or All Sessions.
 2. **Profile** – Complete export, Readable export or Source snapshots.
@@ -50,6 +50,10 @@ Run **Codex Export: Export…** and choose:
 4. **Output folder** – a local destination for the new export.
 
 When a different recorded project path is selected, the extension asks for confirmation before continuing. Cancelling a picker creates no export and does not replace the last successful export state. The output folder is created only when an export actually starts.
+
+### Existing export files
+
+If required export files already exist with different bytes, the export stops without overwriting them. The collision message offers **Anderen Ordner wählen…** (choose another folder) to retry the same scope, profile and document formats in a fresh destination, or **Ordner öffnen** (open folder) to inspect the attempted destination. The alternate folder applies only to this run; saved settings stay unchanged. Picker selections are never reused automatically. Cancelling or closing either dialog starts no retry and preserves the last successful export status.
 
 ### Scopes
 
@@ -85,7 +89,7 @@ DOCX, PDF or both can be added to any profile. Both document formats are rendere
 
 ## Settings
 
-- **Output Directory** (`codexProjectChatExporter.outputDirectory`) – optional absolute local destination. If empty, the extension asks before export.
+- **Output Directory** (`codexProjectChatExporter.outputDirectory`) – optional absolute local destination. If empty, the extension asks for a folder for every export. Picker selections apply only to the current run.
 - **Codex Home** (`codexProjectChatExporter.codexHome`) – optional absolute local Codex data directory. If empty, the extension uses `CODEX_HOME` or the default `.codex` folder.
 - **Path Style** (`codexProjectChatExporter.pathStyle`) – short Windows-friendly paths or longer readable names.
 - **Include Tools** (`codexProjectChatExporter.includeTools`) – disabled by default; includes potentially sensitive Tool, Browser and `view_image` records plus selected assets in readable outputs. Raw JSONL remains unchanged.
@@ -98,6 +102,9 @@ Output Directory and Codex Home accept only absolute local paths. Web, remote, U
 - **Codex Export: Export…**
 - **Codex Export: Open Latest Export**
 - **Codex Export: Open Export Folder**
+- **Codex Export: Extension Settings**
+
+All four actions are also available in the native **Codex Exporter** sidebar. Its bundled monochrome Activity Bar icon follows the VS Code theme.
 
 The open commands use only the last successfully completed export and revalidate the local target before opening it.
 

@@ -7,11 +7,12 @@ const { performance } = require("node:perf_hooks");
 const { pathToFileURL } = require("node:url");
 
 const CONFIG_SECTION = "codexProjectChatExporter";
-const DIAGNOSTIC_BUILD_ID = "0.1.5-pre-release";
+const DIAGNOSTIC_BUILD_ID = "0.2.1";
 const STATE_OUTPUT_DIR = "codexProjectChatExporter.outputDirectory";
 const STATE_LATEST_HTML = "codexProjectChatExporter.latestHtmlIndexPath";
 const STATE_OUTPUT_TARGET = "codexProjectChatExporter.outputDirectoryTarget";
 const STATE_LATEST_HTML_TARGET = "codexProjectChatExporter.latestHtmlIndexTarget";
+const STATE_LAST_SUCCESS = "codexProjectChatExporter.lastSuccessfulExport";
 const INCOMPLETE_MARKER_NAME = "EXPORT_INCOMPLETE.txt";
 const COMMANDS = {
   exportMenu: "codexArchive.export",
@@ -19,7 +20,15 @@ const COMMANDS = {
   exportAllSessions: "codexArchive.exportAllSessions",
   openLatestArchive: "codexArchive.openLatestArchive",
   openExportFolder: "codexArchive.openExportFolder",
+  openSettings: "codexArchive.openSettings",
 };
+const SIDEBAR_VIEW = "codexArchive.actions";
+const SIDEBAR_ACTIONS = Object.freeze([
+  { label: "Export…", command: COMMANDS.exportMenu },
+  { label: "Open Latest Export", command: COMMANDS.openLatestArchive },
+  { label: "Open Export Folder", command: COMMANDS.openExportFolder },
+  { label: "Extension Settings", command: COMMANDS.openSettings },
+]);
 const EXPORT_PROFILES = Object.freeze([
   { label: "Complete export", description: "Raw JSONL checked at export time plus Markdown reading views and HTML index", profile: "complete" },
   { label: "Readable export", description: "Markdown reading views and HTML index without Raw JSONL", profile: "readable" },
@@ -51,6 +60,9 @@ function createExtensionAdapter(vscode, injected = {}) {
   const diagnosticRunContext = new AsyncLocalStorage();
   let diagnosticRunSequence = 0;
   let exportRunning = false;
+  // Keep the previous logical record visible while Memento persistence is pending
+  // or rejected; VS Code may already have changed its in-memory cache at that point.
+  const successfulExports = new WeakMap();
 
   async function activate(context) {
     outputChannel = vscode.window.createOutputChannel("Codex Project Chat Exporter");
@@ -60,6 +72,16 @@ function createExtensionAdapter(vscode, injected = {}) {
       vscode.commands.registerCommand(COMMANDS.exportAllSessions, () => runRegisteredCommand(COMMANDS.exportAllSessions, () => exportInteractiveScope(context, "all"))),
       vscode.commands.registerCommand(COMMANDS.openLatestArchive, () => openLatestArchive(context)),
       vscode.commands.registerCommand(COMMANDS.openExportFolder, () => openExportFolder(context)),
+      vscode.commands.registerCommand(COMMANDS.openSettings, () => vscode.commands.executeCommand("workbench.action.openSettings", "@ext:ann-diana.codex-project-chat-exporter-vscode")),
+      vscode.window.registerTreeDataProvider(SIDEBAR_VIEW, {
+        getChildren: (element) => element ? [] : SIDEBAR_ACTIONS,
+        getTreeItem: (action) => ({
+          id: action.command,
+          label: action.label,
+          collapsibleState: vscode.TreeItemCollapsibleState.None,
+          command: { command: action.command, title: action.label },
+        }),
+      }),
     ];
     context.subscriptions.push(outputChannel, ...registrations);
     return {
@@ -201,16 +223,7 @@ function createExtensionAdapter(vscode, injected = {}) {
     if (typeof deps.discoverRecordedProjectInventory === "function") {
       return deps.discoverRecordedProjectInventory({ exporter, codexHome, abortSignal, onProgress });
     }
-    const locations = [
-      { root: deps.path.join(codexHome, "sessions"), storage: "active" },
-      { root: deps.path.join(codexHome, "archived_sessions"), storage: "archived" },
-    ];
-    const files = [];
-    for (const location of locations) {
-      throwIfAdapterAborted(abortSignal);
-      const stat = await deps.fsp.stat(location.root).catch((error) => error?.code === "ENOENT" ? null : Promise.reject(error));
-      if (stat?.isDirectory()) await findJsonlFiles(location.root, location.storage, files, abortSignal);
-    }
+    const { files } = await enumeratePhysicalSources(codexHome, abortSignal);
     const plainFiles = new Set(files
       .filter((entry) => !entry.file.toLowerCase().endsWith(".jsonl.zst"))
       .map((entry) => normalizedLocalPath(entry.file)));
@@ -256,14 +269,118 @@ function createExtensionAdapter(vscode, injected = {}) {
     return Object.freeze({ projects: Object.freeze(projects), sessionCount: retained.size });
   }
 
-  async function findJsonlFiles(directory, storage, files, abortSignal) {
+  // Enumeration precedes both the UI's plain/zstd shadow selection and ID
+  // deduplication. The strict retry path must never use that logical inventory.
+  async function enumeratePhysicalSources(codexHome, abortSignal, strict = false) {
+    const home = deps.path.resolve(codexHome);
+    const roots = [];
+    const files = [];
+    const directories = [];
+    if (strict) directories.push(await inspectSourceDirectory(home));
+    for (const [name, storage] of [["sessions", "active"], ["archived_sessions", "archived"]]) {
+      throwIfAdapterAborted(abortSignal);
+      const root = deps.path.join(home, name);
+      const stat = await deps.fsp[strict ? "lstat" : "stat"](root, { bigint: true }).catch((error) => error?.code === "ENOENT" ? null : Promise.reject(error));
+      if (strict && stat && !stat.isDirectory()) throw unverifiableSources();
+      roots.push({ root, storage, present: Boolean(stat?.isDirectory()) });
+      if (stat?.isDirectory()) await findJsonlFiles(root, { root, storage }, files, abortSignal, strict ? directories : null);
+    }
+    return { roots, files: files.sort((a, b) => compareOpenPaths(a.file, b.file)), directories: directories.sort((a, b) => compareOpenPaths(a.path, b.path)) };
+  }
+
+  async function inspectSourceDirectory(directory) {
+    const stat = await deps.fsp.lstat(directory, { bigint: true });
+    const canonicalPath = await deps.fsp.realpath(directory);
+    if (!stat.isDirectory() || !reliableOpenIdentity(stat) || normalizedLocalPath(canonicalPath) !== normalizedLocalPath(directory)) throw unverifiableSources();
+    return { path: deps.path.resolve(directory), canonicalPath, identity: reliableOpenIdentity(stat) };
+  }
+
+  async function findJsonlFiles(directory, location, files, abortSignal, directories) {
     throwIfAdapterAborted(abortSignal);
+    if (directories) directories.push(await inspectSourceDirectory(directory));
     const entries = (await deps.fsp.readdir(directory, { withFileTypes: true })).sort((left, right) => left.name.localeCompare(right.name));
     for (const entry of entries) {
       throwIfAdapterAborted(abortSignal);
       const candidate = deps.path.join(directory, entry.name);
-      if (entry.isDirectory()) await findJsonlFiles(candidate, storage, files, abortSignal);
-      else if (entry.isFile() && (entry.name.toLowerCase().endsWith(".jsonl") || entry.name.toLowerCase().endsWith(".jsonl.zst"))) files.push({ file: candidate, storage });
+      if (entry.isDirectory()) await findJsonlFiles(candidate, location, files, abortSignal, directories);
+      else if (entry.isFile() && (entry.name.toLowerCase().endsWith(".jsonl") || entry.name.toLowerCase().endsWith(".jsonl.zst"))) files.push({ file: candidate, ...location });
+      // A link may hide an entire source subtree, regardless of its name.
+      else if (directories && !entry.isFile()) throw unverifiableSources();
+    }
+  }
+
+  function unverifiableSources() {
+    return createAdapterError("RECORDED_PROJECT_INVENTORY_UNVERIFIABLE", "The complete physical source inventory cannot be verified. Start a new export and review the project selection.");
+  }
+
+  function sourceProperties(stat) {
+    const identity = reliableOpenIdentity(stat);
+    if (!stat.isFile() || !identity) throw unverifiableSources();
+    return { identity, size: String(stat.size), mtimeNs: String(stat.mtimeNs), ctimeNs: String(stat.ctimeNs), birthtimeNs: String(stat.birthtimeNs), mode: String(stat.mode) };
+  }
+
+  async function inspectSourceFile(file) {
+    const properties = sourceProperties(await deps.fsp.lstat(file, { bigint: true }));
+    const canonicalPath = await deps.fsp.realpath(file);
+    if (normalizedLocalPath(canonicalPath) !== normalizedLocalPath(file)) throw unverifiableSources();
+    return { canonicalPath, properties };
+  }
+
+  async function hashPhysicalSource(file, expected, abortSignal) {
+    // Sequential streaming reads use one bounded buffer and one owned handle.
+    // No stream/read promises escape the finally block, including cancellation.
+    throwIfAdapterAborted(abortSignal);
+    const handle = await deps.fsp.open(file, "r");
+    try {
+      if (canonicalInventoryValue(sourceProperties(await handle.stat({ bigint: true }))) !== canonicalInventoryValue(expected)) throw unverifiableSources();
+      const hash = createHash("sha256");
+      const buffer = Buffer.allocUnsafe(64 * 1024);
+      let total = 0n;
+      while (true) {
+        throwIfAdapterAborted(abortSignal);
+        const { bytesRead } = await handle.read(buffer, 0, buffer.length, null);
+        throwIfAdapterAborted(abortSignal);
+        if (!bytesRead) break;
+        total += BigInt(bytesRead);
+        hash.update(buffer.subarray(0, bytesRead));
+      }
+      if (String(total) !== expected.size || canonicalInventoryValue(sourceProperties(await handle.stat({ bigint: true }))) !== canonicalInventoryValue(expected)) throw unverifiableSources();
+      return hash.digest("hex");
+    } finally {
+      await handle.close();
+    }
+  }
+
+  async function capturePhysicalSourceBinding(exporter, codexHome, abortSignal, onProgress) {
+    try {
+      // Conservatively bind the whole home: history may cross project and ID
+      // boundaries. This avoids a second, divergent history resolver here. Even
+      // unrelated changes require a fresh selection; opaque sources fail closed.
+      const catalog = await enumeratePhysicalSources(codexHome, abortSignal, true);
+      const sources = [];
+      for (const entry of catalog.files) {
+        throwIfAdapterAborted(abortSignal);
+        onProgress?.({ message: `Verifying physical source ${sources.length + 1} of ${catalog.files.length}` });
+        const before = await inspectSourceFile(entry.file);
+        const meta = await exporter.readSessionDiscoveryMeta(entry.file, { abortSignal });
+        if (!meta.hasSessionMeta || !meta.id || meta.metadataIdMismatch || !meta.cwd || !exporter.recordedPathIdentity(meta.cwd)
+          || meta.discoverySnapshot?.firstRecordTruncated) throw unverifiableSources();
+        const { bytesRead: _bytesRead, ...snapshot } = meta.discoverySnapshot || {};
+        const sha256 = await hashPhysicalSource(entry.file, before.properties, abortSignal);
+        if (canonicalInventoryValue(await inspectSourceFile(entry.file)) !== canonicalInventoryValue(before)) throw unverifiableSources();
+        sources.push({ ...entry, ...before, compression: entry.file.toLowerCase().endsWith(".jsonl.zst") ? "zstd" : "plain", metadata: { ...meta, discoverySnapshot: snapshot }, sha256 });
+      }
+      // Detect additions/removals/root replacements during the sequential pass.
+      if (canonicalInventoryValue(await enumeratePhysicalSources(codexHome, abortSignal, true)) !== canonicalInventoryValue(catalog)) throw unverifiableSources();
+      for (const source of sources) {
+        throwIfAdapterAborted(abortSignal);
+        if (canonicalInventoryValue(await inspectSourceFile(source.file)) !== canonicalInventoryValue({ canonicalPath: source.canonicalPath, properties: source.properties })) throw unverifiableSources();
+      }
+      throwIfAdapterAborted(abortSignal);
+      return canonicalInventoryValue({ ...catalog, sources });
+    } catch (error) {
+      if (error?.code === "EXPORT_CANCELLED") throw error;
+      throw unverifiableSources();
     }
   }
 
@@ -330,105 +447,165 @@ function createExtensionAdapter(vscode, injected = {}) {
   async function runExport(context, scopeOptions, explicitProfile, documentFormats, prepared = {}) {
     ensureDesktopLocalExtensionHost();
     if (!prepared.lockHeld) return withExclusiveExport(() => runExport(context, scopeOptions, explicitProfile, documentFormats, { ...prepared, lockHeld: true }));
-    const adapterExportStartedAt = performance.now();
-      writeDiagnostic("adapter_export_start", { selected_scope: scopeOptions.scope, profile: explicitProfile || "complete" });
-      const outputDirectory = await resolveOutputDirectory(context);
-      if (outputDirectory === null) return undefined;
-      if (!outputDirectory) return undefined;
+    writeDiagnostic("adapter_export_start", { selected_scope: scopeOptions.scope, profile: explicitProfile || "complete" });
+    const outputDirectory = await resolveOutputDirectory();
+    if (outputDirectory === null) return undefined;
+    if (!outputDirectory) return undefined;
 
-      const config = getConfig();
-      const exporter = prepared.exporter || await deps.loadExporter(context);
-      const configuredProfile = resolveConfiguredProfile(explicitProfile);
-      const options = {
-        scope: scopeOptions.scope,
-        workspacePath: scopeOptions.workspacePath,
-        recordedProjectPath: scopeOptions.recordedProjectPath,
-        outputDirectory,
-        exportProfile: configuredProfile,
-        documentFormats: [...documentFormats],
-        pathStyle: config.get("pathStyle", "short"),
-        includeTools: getUserOnlyConfigValue("includeTools", false),
-      };
-      if (scopeOptions.selectedProject) {
-        const expectedProject = scopeOptions.selectedProject;
-        const sameIdentity = deps.sameRecordedPathIdentity || exporter.sameRecordedPathIdentity;
-        options.onSelectRecordedProject = ({ projects, reason }) => {
-          if (reason !== "requested") throw createAdapterError("RECORDED_PROJECT_INVENTORY_CHANGED", "The recorded-project selection changed before export started.");
-          const currentProject = projects.find((project) => sameIdentity(project.cwd, expectedProject.cwd));
-          if (!currentProject || !sameProjectInventory(currentProject, expectedProject)) {
-            throw createAdapterError("RECORDED_PROJECT_INVENTORY_CHANGED", "The recorded-project inventory changed before export started. Review the project selection again.");
-          }
-          return currentProject.cwd;
-        };
-      }
-      const codexHome = prepared.codexHome || getUserOnlyConfigValue("codexHome", "");
-      if (codexHome) {
-        const validatedCodexHome = validateLocalAbsolutePath(codexHome, "codexProjectChatExporter.codexHome");
-        if (!validatedCodexHome) return undefined;
-        options.codexHome = validatedCodexHome;
-      }
-
-      outputChannel.appendLine(`Starting ${scopeOptions.scope === "all" ? "all-session" : "workspace"} export.`);
-      outputChannel.appendLine(`Export profile: ${configuredProfile}`);
-      outputChannel.appendLine(`Output directory: ${outputDirectory}`);
-      if (scopeOptions.workspacePath) outputChannel.appendLine(`Workspace: ${scopeOptions.workspacePath}`);
-
-      try {
-        const withProgressStartedAt = performance.now();
-        writeDiagnostic("with_progress_start");
-        const abortController = new AbortController();
-        const result = await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: "Exporting Codex sessions", cancellable: true }, async (progress, token) => {
-          const coreCallStartedAt = performance.now();
-          writeDiagnostic("with_progress_enter");
-          options.onProgress = (event) => progress.report({ message: event.message });
-          options.abortSignal = abortController.signal;
-          const cancellation = token?.onCancellationRequested?.(() => abortController.abort());
-          if (diagnosticsEnabled()) options.onDiagnostic = (event) => recordDiagnostic(event);
-          writeDiagnostic("core_call_start");
-          try {
-            const coreResult = await exporter.exportArchive(options);
-            writeDiagnostic("core_call_end", { status: "COMPLETED", duration_ms: roundDiagnosticMs(performance.now() - coreCallStartedAt) });
-            return coreResult;
-          } catch (error) {
-            writeDiagnostic("core_call_end", { status: error?.code === "EXPORT_CANCELLED" ? "CANCELLED" : "FAILED", error_code: error?.code || "UNKNOWN", duration_ms: roundDiagnosticMs(performance.now() - coreCallStartedAt) });
-            throw error;
-          } finally {
-            cancellation?.dispose?.();
-          }
-        });
-        writeDiagnostic("with_progress_end", { duration_ms: roundDiagnosticMs(performance.now() - withProgressStartedAt) });
-        const openTargets = await captureCompletedExportTargets(result);
-        await context.globalState.update(STATE_OUTPUT_TARGET, openTargets.output);
-        await context.globalState.update(STATE_LATEST_HTML_TARGET, openTargets.index);
-        await context.globalState.update(STATE_OUTPUT_DIR, result.outputDirectory);
-        await context.globalState.update(STATE_LATEST_HTML, result.htmlIndexPath);
-        const summary = formatExportSummary(result.exportedSessionCount, result.exportedProjectCount);
-        outputChannel.appendLine(`Exported ${summary}.`);
-        outputChannel.appendLine(`Output directory: ${result.outputDirectory}`);
-        outputChannel.appendLine(`HTML index: ${result.htmlIndexPath}`);
-        outputChannel.appendLine(`Manifest: ${result.manifestPath}`);
-        if (result.runtimeTimings) outputChannel.appendLine(formatRuntimeSummary(result.runtimeTimings));
-        writeDiagnostic("success_message_show", { duration_ms: roundDiagnosticMs(performance.now() - adapterExportStartedAt) });
-        showExportNotification(
-          () => vscode.window.showInformationMessage(`Exported ${summary} to ${result.outputDirectory}.`, "Open HTML Index", "Open Export Folder"),
-          async (action) => {
-            writeDiagnostic("success_message_resolved", { action: action === "Open HTML Index" ? "OPEN_INDEX" : action === "Open Export Folder" ? "OPEN_FOLDER" : "DISMISSED", duration_ms: roundDiagnosticMs(performance.now() - adapterExportStartedAt) });
-            if (action === "Open HTML Index") await openVerifiedTarget(openTargets.index, openTargets.output);
-            if (action === "Open Export Folder") await openVerifiedTarget(openTargets.output);
-          },
-        );
-        return result;
-      } catch (error) {
-        if (error?.code === "EXPORT_CANCELLED") {
-          outputChannel.appendLine("Export cancelled.");
-          showExportNotification(() => vscode.window.showInformationMessage("Export cancelled."));
-          return undefined;
+    const config = getConfig();
+    const exporter = prepared.exporter || await deps.loadExporter(context);
+    const configuredProfile = resolveConfiguredProfile(explicitProfile);
+    const options = {
+      scope: scopeOptions.scope,
+      workspacePath: scopeOptions.workspacePath,
+      recordedProjectPath: scopeOptions.recordedProjectPath,
+      outputDirectory,
+      exportProfile: configuredProfile,
+      documentFormats: [...documentFormats],
+      pathStyle: config.get("pathStyle", "short"),
+      includeTools: getUserOnlyConfigValue("includeTools", false),
+    };
+    if (scopeOptions.selectedProject) {
+      const expectedProject = scopeOptions.selectedProject;
+      const sameIdentity = deps.sameRecordedPathIdentity || exporter.sameRecordedPathIdentity;
+      options.onSelectRecordedProject = ({ projects, reason }) => {
+        if (reason !== "requested") throw createAdapterError("RECORDED_PROJECT_INVENTORY_CHANGED", "The recorded-project selection changed before export started.");
+        const currentProject = projects.find((project) => sameIdentity(project.cwd, expectedProject.cwd));
+        if (!currentProject || !sameProjectInventory(currentProject, expectedProject)) {
+          throw createAdapterError("RECORDED_PROJECT_INVENTORY_CHANGED", "The recorded-project inventory changed before export started. Review the project selection again.");
         }
-        const message = safeErrorMessage(error);
-        outputChannel.appendLine(`Export failed: ${message}`);
-        showExportNotification(() => vscode.window.showErrorMessage(`Codex export failed: ${message}`));
-        throw error;
+        return currentProject.cwd;
+      };
     }
+    const codexHome = prepared.codexHome || resolveCodexHome();
+    if (!codexHome) return undefined;
+    if (codexHome) {
+      const validatedCodexHome = validateLocalAbsolutePath(codexHome, "codexProjectChatExporter.codexHome");
+      if (!validatedCodexHome) return undefined;
+      options.codexHome = validatedCodexHome;
+    }
+
+    return executeExport(context, exporter, options);
+  }
+
+  // Each attempt gets fresh progress/cancellation hooks while keeping the user's
+  // configured selection. Only the destination changes for a collision retry.
+  async function executeExport(context, exporter, selection, sourceBinding = null, isRetry = false) {
+    ensureDesktopLocalExtensionHost();
+    const adapterExportStartedAt = performance.now();
+    const options = { ...selection, documentFormats: [...selection.documentFormats] };
+    const { outputDirectory, exportProfile: configuredProfile } = options;
+    outputChannel.appendLine(`Starting ${options.scope === "all" ? "all-session" : "workspace"} export.`);
+    outputChannel.appendLine(`Export profile: ${configuredProfile}`);
+    outputChannel.appendLine(`Output directory: ${outputDirectory}`);
+    if (options.workspacePath) outputChannel.appendLine(`Workspace: ${options.workspacePath}`);
+
+    try {
+      const withProgressStartedAt = performance.now();
+      writeDiagnostic("with_progress_start");
+      const abortController = new AbortController();
+      const result = await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: "Exporting Codex sessions", cancellable: true }, async (progress, token) => {
+        const coreCallStartedAt = performance.now();
+        writeDiagnostic("with_progress_enter");
+        options.onProgress = (event) => progress.report({ message: event.message });
+        options.abortSignal = abortController.signal;
+        const cancellation = token?.onCancellationRequested?.(() => abortController.abort());
+        if (diagnosticsEnabled()) options.onDiagnostic = (event) => recordDiagnostic(event);
+        writeDiagnostic("core_call_start");
+        try {
+          if (isRetry && options.scope !== "all") {
+            const current = await capturePhysicalSourceBinding(exporter, options.codexHome, options.abortSignal, options.onProgress);
+            if (!sourceBinding || current !== sourceBinding) {
+              throw createAdapterError("RECORDED_PROJECT_INVENTORY_CHANGED", "The selected sessions changed before the collision retry. Review the project selection again.");
+            }
+            throwIfAdapterAborted(options.abortSignal);
+          }
+          const coreResult = await exporter.exportArchive(options);
+          writeDiagnostic("core_call_end", { status: "COMPLETED", duration_ms: roundDiagnosticMs(performance.now() - coreCallStartedAt) });
+          return coreResult;
+        } catch (error) {
+          // Capture only after an actual collision, before offering a retry. A
+          // second collision must retain the first binding, never reset it.
+          if (error?.code === "EXPORT_DESTINATION_COLLISION" && options.scope !== "all" && sourceBinding === null) {
+            sourceBinding = await capturePhysicalSourceBinding(exporter, options.codexHome, options.abortSignal, options.onProgress);
+          }
+          writeDiagnostic("core_call_end", { status: error?.code === "EXPORT_CANCELLED" ? "CANCELLED" : "FAILED", error_code: error?.code || "UNKNOWN", duration_ms: roundDiagnosticMs(performance.now() - coreCallStartedAt) });
+          throw error;
+        } finally {
+          cancellation?.dispose?.();
+        }
+      });
+      writeDiagnostic("with_progress_end", { duration_ms: roundDiagnosticMs(performance.now() - withProgressStartedAt) });
+      const openTargets = await captureCompletedExportTargets(result);
+      const previous = readLastSuccessfulExport(context);
+      successfulExports.set(context.globalState, previous);
+      const success = snapshotSuccessfulExport({ version: 1, outputDirectory: openTargets.output.path, htmlIndexPath: openTargets.index.path, ...openTargets });
+      await context.globalState.update(STATE_LAST_SUCCESS, success);
+      successfulExports.set(context.globalState, success);
+      const summary = formatExportSummary(result.exportedSessionCount, result.exportedProjectCount);
+      outputChannel.appendLine(`Exported ${summary}.`);
+      outputChannel.appendLine(`Output directory: ${result.outputDirectory}`);
+      outputChannel.appendLine(`HTML index: ${result.htmlIndexPath}`);
+      outputChannel.appendLine(`Manifest: ${result.manifestPath}`);
+      if (result.runtimeTimings) outputChannel.appendLine(formatRuntimeSummary(result.runtimeTimings));
+      writeDiagnostic("success_message_show", { duration_ms: roundDiagnosticMs(performance.now() - adapterExportStartedAt) });
+      showExportNotification(
+        () => vscode.window.showInformationMessage(`Exported ${summary} to ${result.outputDirectory}.`, "Open HTML Index", "Open Export Folder"),
+        async (action) => {
+          writeDiagnostic("success_message_resolved", { action: action === "Open HTML Index" ? "OPEN_INDEX" : action === "Open Export Folder" ? "OPEN_FOLDER" : "DISMISSED", duration_ms: roundDiagnosticMs(performance.now() - adapterExportStartedAt) });
+          if (action === "Open HTML Index") await openVerifiedTarget(openTargets.index, openTargets.output);
+          if (action === "Open Export Folder") await openVerifiedTarget(openTargets.output);
+        },
+      );
+      return result;
+    } catch (error) {
+      if (error?.code === "EXPORT_CANCELLED") {
+        outputChannel.appendLine("Export cancelled.");
+        showExportNotification(() => vscode.window.showInformationMessage("Export cancelled."));
+        return undefined;
+      }
+      if (error?.code === "EXPORT_DESTINATION_COLLISION") {
+        await showDestinationCollision(context, exporter, selection, sourceBinding);
+        return undefined;
+      }
+      const message = safeErrorMessage(error);
+      outputChannel.appendLine(`Export failed: ${message}`);
+      showExportNotification(() => vscode.window.showErrorMessage(`Codex export failed: ${message}`));
+      throw error;
+    }
+  }
+
+  async function showDestinationCollision(context, exporter, selection, sourceBinding) {
+    const collisionTarget = await inspectOpenTarget(selection.outputDirectory, "directory").catch(() => null);
+    const message = "Export abgebrochen: Im Zielordner sind bereits Exportdateien mit abweichendem Inhalt vorhanden. Es wurde nichts überschrieben. Wählen Sie einen anderen, leeren Ordner für diesen Export.";
+    outputChannel.appendLine(`EXPORT_DESTINATION_COLLISION: ${message}`);
+    showExportNotification(
+      () => vscode.window.showErrorMessage(message, "Anderen Ordner wählen…", "Ordner öffnen"),
+      async (action) => {
+        ensureDesktopLocalExtensionHost();
+        if (action === "Ordner öffnen") {
+          try {
+            // The collided folder may be incomplete; opening it is for inspection.
+            // Revalidate its captured identity without treating it as a success.
+            const verified = await verifyOpenTarget(collisionTarget);
+            await openFile(verified.path);
+          } catch {
+            vscode.window.showWarningMessage("Der Zielordner kann nicht geöffnet werden, weil er nicht mehr sicher überprüfbar ist.");
+          }
+        }
+        if (action !== "Anderen Ordner wählen…") return;
+        const selected = await vscode.window.showOpenDialog({ canSelectFiles: false, canSelectFolders: true, canSelectMany: false, openLabel: "Use Export Folder", title: "Choose another Codex export output folder" });
+        if (!selected?.length) return;
+        if (selected[0].scheme !== "file") {
+          vscode.window.showWarningMessage("Choose an absolute local export folder.");
+          return;
+        }
+        const outputDirectory = validateAbsoluteOutputDirectory(selected[0].fsPath);
+        if (!outputDirectory) return;
+        await runRegisteredCommand(COMMANDS.exportMenu, () => withExclusiveExport(() =>
+          executeExport(context, exporter, { ...selection, outputDirectory }, sourceBinding, true)));
+      },
+    );
   }
 
   async function getLocalWorkspacePath() {
@@ -454,43 +631,67 @@ function createExtensionAdapter(vscode, injected = {}) {
     if (vscode.env.uiKind && vscode.env.uiKind !== vscode.UIKind.Desktop) throw new Error("vscode.dev and github.dev are not supported by this MVP.");
   }
 
-  async function resolveOutputDirectory(context) {
+  async function resolveOutputDirectory() {
     const configValue = getUserOnlyConfigValue("outputDirectory", "");
     if (configValue) return validateAbsoluteOutputDirectory(configValue);
-    const remembered = context.globalState.get(STATE_OUTPUT_DIR, "");
-    if (remembered) return validateAbsoluteOutputDirectory(remembered);
+    // Last-success records serve open actions only; picker targets are per-run.
     const selected = await vscode.window.showOpenDialog({ canSelectFiles: false, canSelectFolders: true, canSelectMany: false, openLabel: "Use Export Folder", title: "Choose Codex export output folder" });
+    if (selected?.length && selected[0]?.scheme !== "file") {
+      vscode.window.showWarningMessage("Choose an absolute local export folder (file URI).");
+      return null;
+    }
     const folder = selected?.[0]?.fsPath || "";
     return folder ? validateAbsoluteOutputDirectory(folder) : "";
   }
 
   async function openLatestArchive(context) {
     ensureDesktopLocalExtensionHost();
-    const latest = context.globalState.get(STATE_LATEST_HTML, "");
-    if (!latest) {
-      vscode.window.showWarningMessage("No latest Codex export HTML index was found. Run an export first.");
+    const success = readLastSuccessfulExport(context);
+    if (!success) {
+      vscode.window.showWarningMessage("No latest Codex export HTML index with complete, consistent verification data was found. Run an export first.");
       return false;
     }
-    const validated = validateLocalAbsolutePath(latest, STATE_LATEST_HTML);
-    if (!validated) return false;
-    const storedIndex = context.globalState.get(STATE_LATEST_HTML_TARGET, null);
-    const storedOutput = context.globalState.get(STATE_OUTPUT_TARGET, null);
-    if (!storedIndex || !storedOutput || storedIndex.path !== validated) return refuseStaleOpenTarget("latest HTML index");
-    return openVerifiedTarget(storedIndex, storedOutput);
+    return openVerifiedTarget(success.index, success.output);
   }
 
   async function openExportFolder(context) {
     ensureDesktopLocalExtensionHost();
-    const folder = context.globalState.get(STATE_OUTPUT_DIR, "");
-    if (!folder) {
-      vscode.window.showWarningMessage("No Codex export folder is configured yet.");
+    const success = readLastSuccessfulExport(context);
+    if (!success) {
+      vscode.window.showWarningMessage("No Codex export folder with complete, consistent verification data was found. Run an export first.");
       return false;
     }
-    const validated = validateAbsoluteOutputDirectory(folder);
-    if (!validated) return false;
-    const storedOutput = context.globalState.get(STATE_OUTPUT_TARGET, null);
-    if (!storedOutput || storedOutput.path !== validated) return refuseStaleOpenTarget("export folder");
-    return openVerifiedTarget(storedOutput);
+    return openVerifiedTarget(success.output);
+  }
+
+  function readLastSuccessfulExport(context) {
+    if (successfulExports.has(context.globalState)) return successfulExports.get(context.globalState);
+    const stored = context.globalState.get(STATE_LAST_SUCCESS);
+    // A present but invalid/newer record must not resurrect older destinations.
+    const record = stored === undefined ? {
+      version: 1,
+      outputDirectory: context.globalState.get(STATE_OUTPUT_DIR),
+      htmlIndexPath: context.globalState.get(STATE_LATEST_HTML),
+      output: context.globalState.get(STATE_OUTPUT_TARGET),
+      index: context.globalState.get(STATE_LATEST_HTML_TARGET),
+    } : stored;
+    if (!record || record.version !== 1 || !coherentTarget(record.output, "directory", record.outputDirectory)
+      || !coherentTarget(record.index, "file", record.htmlIndexPath)
+      || openPathKey(record.htmlIndexPath) !== openPathKey(deps.path.join(record.outputDirectory, "index.html"))) return null;
+    return snapshotSuccessfulExport(record);
+  }
+
+  function coherentTarget(target, kind, recordedPath) {
+    return target?.kind === kind && typeof recordedPath === "string" && deps.path.isAbsolute(recordedPath)
+      && !isWindowsNetworkOrDevicePath(recordedPath) && target.path === recordedPath
+      && typeof target.canonicalPath === "string" && deps.path.isAbsolute(target.canonicalPath)
+      && !isWindowsNetworkOrDevicePath(target.canonicalPath) && openPathKey(target.canonicalPath) === openPathKey(recordedPath)
+      && typeof target.identity === "string" && target.identity.length > 0;
+  }
+
+  function snapshotSuccessfulExport(record) {
+    return Object.freeze({ version: 1, outputDirectory: record.outputDirectory, htmlIndexPath: record.htmlIndexPath,
+      output: Object.freeze({ ...record.output }), index: Object.freeze({ ...record.index }) });
   }
 
   function validateAbsoluteOutputDirectory(folder) {
@@ -526,6 +727,7 @@ function createExtensionAdapter(vscode, injected = {}) {
     const output = await inspectOpenTarget(result.outputDirectory, "directory");
     await assertCompleteExportDirectory(output);
     const index = await inspectOpenTarget(result.htmlIndexPath, "file", output);
+    if (openPathKey(index.path) !== openPathKey(deps.path.join(output.path, "index.html"))) throw new Error("Export index does not belong to the completed export folder");
     return { index, output };
   }
 
@@ -558,11 +760,6 @@ function createExtensionAdapter(vscode, injected = {}) {
     const error = new Error(`${INCOMPLETE_MARKER_NAME} is present`);
     error.code = "INCOMPLETE_EXPORT";
     throw error;
-  }
-
-  function refuseStaleOpenTarget(label) {
-    vscode.window.showWarningMessage(`The saved Codex ${label} has no current verification record. Run a new export before opening it.`);
-    return false;
   }
 
   async function verifyOpenTarget(record, expectedOutput = null) {
@@ -755,6 +952,12 @@ function sameProjectInventory(current, expected) {
     && current.recordedPaths.every((value, index) => value === expected.recordedPaths[index]);
 }
 
+function canonicalInventoryValue(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalInventoryValue).join(",")}]`;
+  if (value && typeof value === "object") return `{${Object.keys(value).sort(compareOpenPaths).map((key) => `${JSON.stringify(key)}:${canonicalInventoryValue(value[key])}`).join(",")}}`;
+  return JSON.stringify(value ?? null);
+}
+
 function throwIfAdapterAborted(signal) {
   if (signal?.aborted) throw createAdapterError("EXPORT_CANCELLED", "Export cancelled");
 }
@@ -813,4 +1016,4 @@ function isWindowsNetworkOrDevicePath(value) {
   return String(value || "").replaceAll("/", "\\").startsWith("\\\\");
 }
 
-module.exports = { COMMANDS, CONFIG_SECTION, DIAGNOSTIC_BUILD_ID, DOCUMENT_FORMATS, EXPORT_PROFILES, EXPORT_SCOPES, STATE_LATEST_HTML, STATE_LATEST_HTML_TARGET, STATE_OUTPUT_DIR, STATE_OUTPUT_TARGET, createExtensionAdapter, defaultLoadExporter, formatExportSummary, formatRuntimeSummary, isWindowsNetworkOrDevicePath, resolveConfiguredProfile, safeErrorMessage };
+module.exports = { SIDEBAR_VIEW, COMMANDS, CONFIG_SECTION, DIAGNOSTIC_BUILD_ID, DOCUMENT_FORMATS, EXPORT_PROFILES, EXPORT_SCOPES, STATE_LAST_SUCCESS, STATE_LATEST_HTML, STATE_LATEST_HTML_TARGET, STATE_OUTPUT_DIR, STATE_OUTPUT_TARGET, createExtensionAdapter, defaultLoadExporter, formatExportSummary, formatRuntimeSummary, isWindowsNetworkOrDevicePath, resolveConfiguredProfile, safeErrorMessage };

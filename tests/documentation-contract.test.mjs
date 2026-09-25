@@ -385,14 +385,21 @@ test("public documentation keeps scope, format, privacy and version contracts co
   assert.ok(vscodeReadmeLower.includes("folder is created only when an export actually starts"));
   assert.ok(documents["integrations/vscode/README.md"].includes("Raw JSONL is source-faithful and is not automatically safe to share"));
   assert.ok(documents["integrations/vscode/README.md"].includes("No telemetry, uploader or application-level remote content fetch"));
-  assert.ok(documents["integrations/vscode/README.md"].includes("before the first publication, that link may not resolve."));
+  assert.equal(vscodeReadmeLower.includes("before the first publication"), false);
+  assert.equal(vscodeReadmeLower.includes("after the marketplace release"), false);
+  for (const text of ["without overwriting", "Anderen Ordner wählen…", "Ordner öffnen", "only to this run", "last successful export status", "Activity Bar", "Extension Settings"]) assert.ok(documents["integrations/vscode/README.md"].includes(text), text);
   assert.ok(documents["integrations/vscode/README.md"].includes("a version that is also available as a VSIX on GitHub Releases"));
   assert.equal(documents["integrations/vscode/README.md"].includes("is not published in the Visual Studio Code Marketplace"), false);
+  assert.ok(vscodeReadmeLower.includes("asks for a folder for every export"));
+  assert.ok(vscodeReadmeLower.includes("picker selections are never reused automatically"));
+  assert.equal(vscodeReadmeLower.includes("remembered default"), false);
   assertSupportIssuesLink(documents["integrations/vscode/README.md"]);
   assert.ok(documents["README.md"].includes("After Marketplace publication, install `ann-diana.codex-project-chat-exporter-vscode`"));
 
   const extensionChangelog = await fs.readFile(path.join(repositoryRoot, "integrations", "vscode", "CHANGELOG.md"), "utf8");
   assert.ok(extensionChangelog.includes("## 0.2.0 – First Marketplace release"));
+  assert.ok(extensionChangelog.includes("## 0.2.1 – Unreleased"));
+  assert.ok(extensionChangelog.includes("Bundled CLI remains 0.4.0"));
   assert.ok(extensionChangelog.includes("archive format 1, coverage schema 1 and asset schema 2 unchanged"));
 
   const archiveContract = await fs.readFile(path.join(repositoryRoot, "docs", "archive-format-v1.md"), "utf8");
@@ -405,7 +412,9 @@ test("public documentation keeps scope, format, privacy and version contracts co
   const changelog = await fs.readFile(path.join(repositoryRoot, "CHANGELOG.md"), "utf8");
   const releasePreparation = changelog.slice(0, changelog.indexOf("## 0.2.0"));
   assert.ok(releasePreparation.indexOf("## Unreleased") < releasePreparation.indexOf("## 0.3.1 – 2026-09-06"));
-  assert.ok(releasePreparation.includes("The latest published release is `v0.3.1`, dated 2026-09-06."));
+  assert.ok(releasePreparation.includes("The latest published release is `v0.4.0`, dated 2026-09-23."));
+
+  assert.equal(normalizeTextLineEndings(changelog).split("## Unreleased\n")[1].split("## 0.4.0 – 2026-09-23")[0].trim(), "", "root Unreleased must remain empty");
 
   const rootPackage = JSON.parse(await fs.readFile(path.join(repositoryRoot, "package.json"), "utf8"));
   const lockfile = JSON.parse(await fs.readFile(path.join(repositoryRoot, "package-lock.json"), "utf8"));
@@ -413,7 +422,8 @@ test("public documentation keeps scope, format, privacy and version contracts co
   assert.equal(lockfile.version, rootPackage.version);
   assert.equal(lockfile.packages[""].version, rootPackage.version);
   const extensionPackage = JSON.parse(await fs.readFile(path.join(repositoryRoot, "integrations", "vscode", "package.json"), "utf8"));
-  assert.equal(extensionPackage.version, "0.2.0");
+  assert.equal(extensionPackage.version, "0.2.1");
+  assert.equal(extensionPackage.contributes.configuration.properties["codexProjectChatExporter.outputDirectory"].description, "Absolute local folder where Codex exports are written. If empty, the extension asks for a folder for every export. A selected folder applies only to that export.");
   assert.equal(extensionPackage.publisher, "ann-diana");
   assert.equal(extensionPackage.name, "codex-project-chat-exporter-vscode");
   assert.equal(extensionPackage.pricing, "Free");

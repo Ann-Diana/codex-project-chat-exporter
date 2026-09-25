@@ -104,6 +104,7 @@ export async function buildVsix(options = {}) {
     await copyVerifiedFile(path.join(extensionRoot, "LICENSE"), path.join(stage, "extension", "LICENSE"), stageOwned, stage);
     for (const name of [
       "icon.png",
+      "exporter.svg",
       "codex-project-chat-exporter-hero.png",
       "01-scope-picker.png",
       "02-project-history-picker.png",
@@ -680,7 +681,7 @@ function createContentTypes(stageOwned, stage) {
   const known = new Map([
     ["cjs", "application/javascript"], ["js", "application/javascript"], ["json", "application/json"],
     ["map", "application/json"], ["md", "text/markdown"], ["markdown", "text/markdown"],
-    ["mjs", "application/javascript"], ["png", "image/png"], ["ttf", "font/ttf"], ["txt", "text/plain"],
+    ["mjs", "application/javascript"], ["svg", "image/svg+xml"], ["png", "image/png"], ["ttf", "font/ttf"], ["txt", "text/plain"],
     ["vsixmanifest", "text/xml"], ["xml", "text/xml"],
   ]);
   const extensions = new Set();
