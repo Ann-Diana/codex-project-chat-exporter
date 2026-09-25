@@ -9,7 +9,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { buildVsix } from "../scripts/build-vsix.mjs";
 
 const require = createRequire(import.meta.url);
-const { SIDEBAR_VIEW, COMMANDS, DIAGNOSTIC_BUILD_ID, DOCUMENT_FORMATS, EXPORT_PROFILES, EXPORT_SCOPES, STATE_LATEST_HTML, STATE_LATEST_HTML_TARGET, STATE_OUTPUT_DIR, STATE_OUTPUT_TARGET, createExtensionAdapter: createExtensionAdapterCore, defaultLoadExporter, formatExportSummary, isWindowsNetworkOrDevicePath, resolveConfiguredProfile } = require("../src/vscode-adapter.cjs");
+const { SIDEBAR_VIEW, COMMANDS, DIAGNOSTIC_BUILD_ID, DOCUMENT_FORMATS, EXPORT_PROFILES, EXPORT_SCOPES, STATE_LAST_SUCCESS, STATE_LATEST_HTML, STATE_LATEST_HTML_TARGET, STATE_OUTPUT_DIR, STATE_OUTPUT_TARGET, createExtensionAdapter: createExtensionAdapterCore, defaultLoadExporter, formatExportSummary, isWindowsNetworkOrDevicePath, resolveConfiguredProfile } = require("../src/vscode-adapter.cjs");
 
 function createExtensionAdapter(vscode, injected = {}) {
   const recordedPathIdentity = (value) => String(value || "").replaceAll("/", "\\").replace(/[\\]+$/, "").toLowerCase();
@@ -388,7 +388,7 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
 }
 
 {
-  const fake = createFakeVscode({ workspaceFolders: [folder(oneWorkspace)], openDialogResult: [{ fsPath: outputDirectory }] });
+  const fake = createFakeVscode({ workspaceFolders: [folder(oneWorkspace)], openDialogResult: [{ scheme: "file", fsPath: outputDirectory }] });
   const context = createContext(temp);
   const adapter = createExtensionAdapter(fake.vscode, { loadExporter: async () => exporter });
   await adapter.activate(context);
@@ -399,10 +399,10 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
   assert.equal(lastOptions.scope, "project");
   assert.equal(lastOptions.workspacePath, oneWorkspace);
   assert.equal(result.exportedSessionCount, 2);
-  assert.equal(context.globalState.get(STATE_OUTPUT_DIR), outputDirectory);
-  assert.equal(context.globalState.get(STATE_LATEST_HTML), path.join(outputDirectory, "index.html"));
-  assert.equal(context.globalState.get(STATE_OUTPUT_TARGET).kind, "directory");
-  assert.equal(context.globalState.get(STATE_LATEST_HTML_TARGET).kind, "file");
+  assert.equal(context.globalState.get(STATE_LAST_SUCCESS)?.outputDirectory, outputDirectory);
+  assert.equal(context.globalState.get(STATE_LAST_SUCCESS)?.htmlIndexPath, path.join(outputDirectory, "index.html"));
+  assert.equal(context.globalState.get(STATE_LAST_SUCCESS)?.output.kind, "directory");
+  assert.equal(context.globalState.get(STATE_LAST_SUCCESS)?.index.kind, "file");
   const infoMessage = fake.messages.find((message) => message.type === "info");
   assert.match(infoMessage.message, /2 sessions across 1 project/);
   assert.match(infoMessage.message, new RegExp(outputDirectory.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
@@ -456,8 +456,8 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
   assert.ok(rejectedRun, "the rejected simultaneous command must not contain core events");
   assert.equal(rejectedRun[0].event, "command_start");
   assert.equal(rejectedRun.at(-1).event, "command_end");
-  assert.equal(context.globalState.get(STATE_OUTPUT_DIR), outputDirectory, "only a completed export may update the remembered output folder");
-  assert.equal(context.globalState.get(STATE_LATEST_HTML), path.join(outputDirectory, "index.html"), "only a completed export may update the latest index");
+  assert.equal(context.globalState.get(STATE_LAST_SUCCESS)?.outputDirectory, outputDirectory, "only a completed export may update the remembered output folder");
+  assert.equal(context.globalState.get(STATE_LAST_SUCCESS)?.htmlIndexPath, path.join(outputDirectory, "index.html"), "only a completed export may update the latest index");
 }
 
 {
@@ -561,7 +561,7 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
   assert.equal(context.globalState.get(STATE_LATEST_HTML), path.join(previousOutput, "index.html"));
   await fake.registered.get(COMMANDS.exportAllSessions)();
   assert.equal(calls, 2, "an export failure must release the lock for the next attempt");
-  assert.equal(context.globalState.get(STATE_OUTPUT_DIR), outputDirectory);
+  assert.equal(context.globalState.get(STATE_LAST_SUCCESS)?.outputDirectory, outputDirectory);
   assert.ok(fake.output.some((line) => line === "Export failed: Synthetic export failure"));
   assert.ok(fake.output.some((line) => line.startsWith("Exported ")));
 }
@@ -632,7 +632,7 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
   await assert.rejects(() => fake.registered.get(COMMANDS.exportAllSessions)(), /Synthetic progress failure/);
   assert.equal(context.globalState.values.size, 0, "a progress UI error must not publish a last-successful-export state");
   await fake.registered.get(COMMANDS.exportAllSessions)();
-  assert.equal(context.globalState.get(STATE_OUTPUT_DIR), outputDirectory, "a progress UI error must release the lock");
+  assert.equal(context.globalState.get(STATE_LAST_SUCCESS)?.outputDirectory, outputDirectory, "a progress UI error must release the lock");
 }
 
 {
@@ -650,7 +650,7 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
   assert.equal(context.globalState.values.size, 0, "a failed state update must not claim a successful export");
   await fake.registered.get(COMMANDS.exportAllSessions)();
   await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(context.globalState.get(STATE_OUTPUT_DIR), outputDirectory, "a status or notification error must not retain the lock");
+  assert.equal(context.globalState.get(STATE_LAST_SUCCESS)?.outputDirectory, outputDirectory, "a status or notification error must not retain the lock");
   assert.ok(fake.output.some((line) => line.startsWith("Export notification or follow-up action failed")));
 }
 
@@ -935,7 +935,7 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
 }
 
 {
-  const fake = createFakeVscode({ openDialogResult: [{ fsPath: outputDirectory }] });
+  const fake = createFakeVscode({ openDialogResult: [{ scheme: "file", fsPath: outputDirectory }] });
   const context = createContext(temp);
   const adapter = createExtensionAdapter(fake.vscode, { loadExporter: async () => ({ exportArchive: async () => { throw Object.assign(new Error("Synthetic core failure"), { code: "SYNTHETIC" }); } }) });
   await adapter.activate(context);
@@ -947,7 +947,7 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
 
 {
   const latestOutput = path.join(temp, "open-latest-output");
-  const fake = createFakeVscode({ openDialogResult: [{ fsPath: latestOutput }] });
+  const fake = createFakeVscode({ openDialogResult: [{ scheme: "file", fsPath: latestOutput }] });
   const context = createContext(temp);
   const adapter = createExtensionAdapter(fake.vscode, { loadExporter: async () => exporter });
   await adapter.activate(context);
@@ -961,7 +961,7 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
 
 {
   const incompleteOutput = path.join(temp, "open-incomplete-output");
-  const fake = createFakeVscode({ openDialogResult: [{ fsPath: incompleteOutput }] });
+  const fake = createFakeVscode({ openDialogResult: [{ scheme: "file", fsPath: incompleteOutput }] });
   const context = createContext(temp);
   const adapter = createExtensionAdapter(fake.vscode, { loadExporter: async () => exporter });
   await adapter.activate(context);
@@ -987,7 +987,7 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
       return { outputDirectory: options.outputDirectory, htmlIndexPath, manifestPath, exportedProjectCount: 1, exportedSessionCount: 1, warnings: [] };
     },
   };
-  const fake = createFakeVscode({ openDialogResult: [{ fsPath: incompleteResultOutput }] });
+  const fake = createFakeVscode({ openDialogResult: [{ scheme: "file", fsPath: incompleteResultOutput }] });
   const context = createContext(temp);
   const adapter = createExtensionAdapter(fake.vscode, { loadExporter: async () => incompleteExporter });
   await adapter.activate(context);
@@ -1004,13 +1004,13 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
   await context.globalState.update(STATE_LATEST_HTML, "\\\\server\\share\\index.html");
   assert.equal(await adapter.openLatestArchive(context), false, "a remembered UNC index must not be opened");
   assert.equal(fake.opened.length, 0);
-  assert.match(fake.messages.at(-1).message, /network or device path/);
+  assert.match(fake.messages.at(-1).message, /complete, consistent verification/);
 }
 
 {
   const rememberedOutput = path.join(temp, "remembered-open-folder");
   const configuredButUnused = path.join(temp, "configured-but-unused");
-  const fake = createFakeVscode({ config: { outputDirectory: configuredButUnused }, openDialogResult: [{ fsPath: rememberedOutput }] });
+  const fake = createFakeVscode({ config: { outputDirectory: configuredButUnused }, openDialogResult: [{ scheme: "file", fsPath: rememberedOutput }] });
   const context = createContext(temp);
   const adapter = createExtensionAdapter(fake.vscode, { loadExporter: async () => exporter });
   await adapter.activate(context);
@@ -1029,13 +1029,13 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
   await context.globalState.update(STATE_OUTPUT_DIR, "\\\\server\\share\\exports");
   assert.equal(await adapter.openExportFolder(context), false, "a remembered UNC output folder must not be opened");
   assert.equal(fake.opened.length, 0);
-  assert.match(fake.messages.at(-1).message, /network or device path/);
+  assert.match(fake.messages.at(-1).message, /complete, consistent verification/);
 }
 
 {
   const swappedOutput = path.join(temp, "swapped-open-output");
   const movedOutput = path.join(temp, "swapped-open-output-original");
-  const fake = createFakeVscode({ openDialogResult: [{ fsPath: swappedOutput }] });
+  const fake = createFakeVscode({ openDialogResult: [{ scheme: "file", fsPath: swappedOutput }] });
   const context = createContext(temp);
   const adapter = createExtensionAdapter(fake.vscode, { loadExporter: async () => exporter });
   await adapter.activate(context);
@@ -1050,14 +1050,14 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
 
 {
   const replacedIndexOutput = path.join(temp, "replaced-index-output");
-  const fake = createFakeVscode({ openDialogResult: [{ fsPath: replacedIndexOutput }] });
+  const fake = createFakeVscode({ openDialogResult: [{ scheme: "file", fsPath: replacedIndexOutput }] });
   const context = createContext(temp);
   const adapter = createExtensionAdapter(fake.vscode, { loadExporter: async () => exporter });
   await adapter.activate(context);
   await adapter.exportAllSessions(context, "readable");
   const indexPath = path.join(replacedIndexOutput, "index.html");
   const originalIndexPath = path.join(replacedIndexOutput, "index-original.html");
-  const storedIndex = context.globalState.get(STATE_LATEST_HTML_TARGET);
+  const storedIndex = context.globalState.get(STATE_LAST_SUCCESS)?.index;
   const originalCanonicalPath = await fsp.realpath(indexPath);
   const originalStat = await fsp.stat(indexPath, { bigint: true });
   assert.equal(storedIndex.canonicalPath, originalCanonicalPath, "the stored canonical index path must describe the original file");
@@ -1082,7 +1082,7 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
 {
   const linkedIndexOutput = path.join(temp, "linked-index-output");
   const outsideIndex = path.join(temp, "outside-index.html");
-  const fake = createFakeVscode({ openDialogResult: [{ fsPath: linkedIndexOutput }] });
+  const fake = createFakeVscode({ openDialogResult: [{ scheme: "file", fsPath: linkedIndexOutput }] });
   const context = createContext(temp);
   const adapter = createExtensionAdapter(fake.vscode, { loadExporter: async () => exporter });
   await adapter.activate(context);
@@ -1102,7 +1102,7 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
   const junctionOutput = path.join(temp, "junction-open-output");
   const movedOutput = path.join(temp, "junction-open-output-original");
   const outsideDirectory = path.join(temp, "junction-outside-directory");
-  const fake = createFakeVscode({ openDialogResult: [{ fsPath: junctionOutput }] });
+  const fake = createFakeVscode({ openDialogResult: [{ scheme: "file", fsPath: junctionOutput }] });
   const context = createContext(temp);
   const adapter = createExtensionAdapter(fake.vscode, { loadExporter: async () => exporter });
   await adapter.activate(context);
@@ -1587,10 +1587,14 @@ for (const outcome of ["dismiss", "cancel", "remote", "relative", "network", "di
   const picker = deferred();
   const retryGate = deferred();
   const calls = [];
-  const fake = createFakeVscode({ config: { outputDirectory: firstTarget, codexHome: temp, includeTools: true, pathStyle: "readable" }, errorMessageHandler: () => action.promise });
+  const core = await import("../../../bin/export-codex-project-chats.mjs");
+  const codexHome = path.join(temp, "delayed-binding-home");
+  await fsp.mkdir(path.join(codexHome, "sessions"), { recursive: true });
+  await fsp.writeFile(path.join(codexHome, "sessions", "session.jsonl"), JSON.stringify({ type: "session_meta", payload: { id: "aaaaaaaa-aaaa-7aaa-8aaa-aaaaaaaaaaaa", cwd: oneWorkspace } }) + "\n");
+  const fake = createFakeVscode({ config: { outputDirectory: firstTarget, codexHome, includeTools: true, pathStyle: "readable" }, errorMessageHandler: () => action.promise });
   const context = createContext(temp);
   let gateRetry = false;
-  const adapter = createExtensionAdapter(fake.vscode, { loadExporter: async () => ({ async exportArchive(options) {
+  const adapter = createExtensionAdapter(fake.vscode, { loadExporter: async () => ({ ...core, async exportArchive(options) {
     calls.push(options);
     if (calls.length === 1) throw collision();
     if (gateRetry && options.outputDirectory === freshTarget) await retryGate.promise;
@@ -1624,7 +1628,7 @@ for (const outcome of ["dismiss", "cancel", "remote", "relative", "network", "di
   assert.equal(retry.outputDirectory, freshTarget);
   assert.equal(fake.quickPicks.length, 0, "retry does not repeat any configuration pickers");
   retryGate.resolve();
-  await waitFor(() => context.globalState.get(STATE_OUTPUT_DIR) === freshTarget, "retry success");
+  await waitFor(() => context.globalState.get(STATE_LAST_SUCCESS)?.outputDirectory === freshTarget, "retry success");
   assert.equal(fake.config.get("outputDirectory"), anotherTarget, "retry never edits settings");
   assert.equal(context.globalState.values.has("codexProjectChatExporter.rememberedOutputDirectory"), false, "a delayed retry must not store an automatic destination");
   await adapter.exportAllSessions(context);
@@ -1680,7 +1684,7 @@ for (const destinationMode of ["empty", "configured"]) {
   const pickerCount = fake.openDialogs.length;
   const selectionCount = fake.quickPicks.length;
   action.resolve(chooseFolder);
-  await waitFor(() => context.globalState.get(STATE_LATEST_HTML) === path.join(retryTarget, "index.html"), "first collision retry success");
+  await waitFor(() => context.globalState.get(STATE_LAST_SUCCESS)?.htmlIndexPath === path.join(retryTarget, "index.html"), "first collision retry success");
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(calls.length, 2);
   assert.equal(fake.quickPicks.length, selectionCount, "retry preserves the configured scope/profile/formats");
@@ -1721,7 +1725,7 @@ for (const destinationMode of ["empty", "configured"]) {
     assert.deepEqual([...context.globalState.values], saved);
   }
   assert.deepEqual(Buffer.from(JSON.stringify([...fake.config])), configBytes, "settings remain byte-identical");
-  const successKeys = [STATE_OUTPUT_TARGET, STATE_LATEST_HTML_TARGET, STATE_OUTPUT_DIR, STATE_LATEST_HTML];
+  const successKeys = [STATE_LAST_SUCCESS];
   assert.deepEqual([...context.globalState.values.keys()].sort(), [...successKeys].sort(), "only last-success records may be stored");
   assert.ok(updates.every(({ key }) => successKeys.includes(key)), "no automatic destination preference may ever be written");
   for (const { value } of updates) {
@@ -1879,8 +1883,8 @@ for (const previousSuccess of [false, true]) {
     await run();
     assert.equal(fake.openDialogs.length, dialogsBeforeNext + 1, `${outcome}: next normal export asks again`);
     assert.equal(calls, attemptsBeforeNext + 1, `${outcome}: runtime lock is released`);
-    assert.equal(context.globalState.get(STATE_OUTPUT_DIR), next);
-    assert.deepEqual([...context.globalState.values.keys()].sort(), [STATE_OUTPUT_TARGET, STATE_LATEST_HTML_TARGET, STATE_OUTPUT_DIR, STATE_LATEST_HTML].sort());
+    assert.equal(context.globalState.get(STATE_LAST_SUCCESS)?.outputDirectory, next);
+    assert.deepEqual([...context.globalState.values.keys()].sort(), [STATE_LAST_SUCCESS].sort());
     console.log(`UX-01 retry ${caseId}: PASS`);
   }
 }
@@ -1905,6 +1909,678 @@ for (const previousSuccess of [false, true]) {
 }
 
 console.log("UX regressions passed: sidebar, collision actions, cancellation, retry selection/state and real-core preservation");
+
+// Logical-summary changes are also covered by the complete physical binding.
+for (const mutation of ["swap-id", "workspace-swap", "swap-path", "replace-file", "touch", "add", "remove", "remove-all", "storage", "discovery-cancel", "discovery-error", "stable", "reorder"]) {
+  const core = await import("../../../bin/export-codex-project-chats.mjs");
+  const home = path.join(temp, `bound-${mutation}-home`);
+  const active = path.join(home, "sessions");
+  const archived = path.join(home, "archived_sessions");
+  await fsp.mkdir(active, { recursive: true });
+  await fsp.mkdir(archived);
+  const sources = [path.join(active, "a.jsonl"), path.join(active, "b.jsonl")];
+  const recordBytes = (letter) => Buffer.from(JSON.stringify({ type: "session_meta", timestamp: "2026-09-24T10:00:00Z", payload: {
+    id: `${letter.repeat(8)}-${letter.repeat(4)}-7${letter.repeat(3)}-8${letter.repeat(3)}-${letter.repeat(12)}`, cwd: oneWorkspace, timestamp: "2026-09-24T10:00:00Z",
+  } }) + "\n");
+  await fsp.writeFile(sources[0], recordBytes("a"));
+  await fsp.writeFile(sources[1], recordBytes("b"));
+  const prior = path.join(temp, `bound-${mutation}-prior`);
+  const original = path.join(temp, `bound-${mutation}-original`);
+  const retry = path.join(temp, `bound-${mutation}-retry`);
+  const next = path.join(temp, `bound-${mutation}-next`);
+  await core.exportArchive({ scope: "all", codexHome: home, outputDirectory: original, exportProfile: "complete" });
+  const sentinel = await fsp.readFile(path.join(original, "manifest.json"));
+  const action = deferred();
+  const calls = [];
+  const discoveryHomes = [];
+  let reverse = false;
+  let retryDiscovery = false;
+  let synthetic = true;
+  const fake = createFakeVscode({ config: { codexHome: home, outputDirectory: prior }, workspaceFolders: [folder(oneWorkspace)],
+    openDialogResult: [{ scheme: "file", fsPath: retry }],
+    errorMessageHandler: (_message, actions) => actions.includes(chooseFolder) ? action.promise : undefined,
+    quickPickSelector: (items, options) => {
+      if (options.placeHolder === "Choose what to export") return items.find(item => item.scope === (mutation === "workspace-swap" ? "project" : "recorded-project"));
+      if (options.placeHolder === "Choose an export profile") return items.find(item => item.profile === "readable");
+      if (options.placeHolder === "Choose optional document formats") return items.find(item => item.documentFormats.length === 2);
+      return items[0];
+    },
+  });
+  const context = createContext(temp);
+  const adapter = createExtensionAdapterCore(fake.vscode, { fsp: { ...fsp, async readdir(directory, options) {
+    discoveryHomes.push(directory);
+    const entries = await fsp.readdir(directory, options);
+    return reverse ? entries.reverse() : entries;
+  } }, loadExporter: async () => ({ ...core,
+    async readSessionDiscoveryMeta(...args) {
+      if (retryDiscovery && mutation === "discovery-cancel") throw Object.assign(new Error("synthetic discovery cancellation"), { code: "EXPORT_CANCELLED" });
+      if (retryDiscovery && mutation === "discovery-error") throw Object.assign(new Error("synthetic discovery read failure"), { code: "EACCES" });
+      const meta = await core.readSessionDiscoveryMeta(...args);
+      if (!reverse) return meta;
+      // Stable metadata must not depend on property insertion order or I/O counts.
+      return Object.fromEntries(Object.entries({ ...meta, discoverySnapshot: {
+        ...meta.discoverySnapshot, bytesRead: meta.discoverySnapshot.bytesRead + 1,
+      } }).reverse());
+    },
+    async exportArchive(options) {
+      if (synthetic) return exporter.exportArchive(options);
+      calls.push(options);
+      return core.exportArchive(options);
+    },
+  }) });
+  await adapter.activate(context);
+  await adapter.exportAllSessions(context);
+  const saved = structuredClone([...context.globalState.values]);
+  const successMessages = fake.messages.filter(message => message.message.startsWith("Exported ")).length;
+  synthetic = false;
+  fake.config.set("outputDirectory", original);
+  await fake.registered.get(COMMANDS.exportMenu)();
+  assert.equal(calls.length, 1);
+  assert.ok(fake.messages.some(message => message.actions.includes(chooseFolder)), "the first real export must collide");
+  const project = fake.quickPicks.find(pick => pick.options.title === "Choose a project folder from Codex history")?.items[0].project;
+  if (project) {
+    assert.equal(project.sessionCount, 2);
+    assert.equal(Object.hasOwn(project, "sessionInventory"), false, "display inventory is not a security binding");
+  }
+  const marker = await fsp.readFile(path.join(original, "EXPORT_INCOMPLETE.txt"));
+  const picks = fake.quickPicks.length;
+  if (mutation === "swap-id" || mutation === "workspace-swap") {
+    assert.equal(recordBytes("a").length, recordBytes("c").length, "replacement preserves byte totals");
+    await fsp.writeFile(sources[0], recordBytes("c"));
+    const replacement = await core.readSessionDiscoveryMeta(sources[0]);
+    if (project) {
+      assert.equal(replacement.fileSize * 2, project.sourceBytes);
+      assert.equal(new Date(replacement.timestamp).toISOString(), project.firstSessionAt);
+      assert.equal(new Date(replacement.timestamp).toISOString(), project.lastSessionAt);
+      assert.deepEqual(project.recordedPaths, [replacement.cwd]);
+    }
+  }
+  if (mutation === "swap-path") await fsp.rename(sources[0], path.join(active, "replacement.jsonl"));
+  if (mutation === "replace-file") {
+    const before = await fsp.stat(sources[0], { bigint: true });
+    await fsp.rename(sources[0], path.join(temp, "retired-binding-source.jsonl"));
+    await fsp.writeFile(sources[0], recordBytes("a"));
+    assert.notEqual(testFileIdentity(await fsp.stat(sources[0], { bigint: true })), testFileIdentity(before));
+  }
+  if (mutation === "touch") await fsp.utimes(sources[0], new Date("2026-09-25T01:00:00Z"), new Date("2026-09-25T01:00:00Z"));
+  if (mutation === "add") await fsp.writeFile(path.join(active, "c.jsonl"), recordBytes("c"));
+  if (mutation === "remove" || mutation === "remove-all") await fsp.unlink(sources[0]);
+  if (mutation === "remove-all") await fsp.unlink(sources[1]);
+  if (mutation === "storage") await fsp.rename(sources[0], path.join(archived, "a.jsonl"));
+  reverse = mutation === "reorder";
+  // The retry must retain the original validated home even if settings change.
+  fake.config.set("codexHome", path.join(temp, "different-home-must-not-be-read"));
+  discoveryHomes.length = 0;
+  retryDiscovery = true;
+  action.resolve(chooseFolder);
+  const allowed = mutation === "stable" || mutation === "reorder";
+  const expectedFailure = mutation === "discovery-cancel" ? "Export cancelled." : mutation === "discovery-error" ? "RECORDED_PROJECT_INVENTORY_UNVERIFIABLE" : "RECORDED_PROJECT_INVENTORY_CHANGED";
+  await waitFor(() => allowed ? context.globalState.get(STATE_LAST_SUCCESS)?.outputDirectory === retry
+    : fake.output.some(line => line.includes(expectedFailure)), `bound retry ${mutation}`);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.ok(discoveryHomes.length > 0, "retry rediscovers before core export");
+  assert.ok(discoveryHomes.every(directory => directory === active || directory === archived));
+  assert.equal(fake.quickPicks.length, picks, "no project/profile/format reselection during retry");
+  if (allowed) {
+    assert.equal(calls.length, 2);
+    for (const key of ["scope", "exportProfile", "documentFormats", "codexHome", "onSelectRecordedProject"]) assert.deepEqual(calls[1][key], calls[0][key]);
+    const manifest = JSON.parse(await fsp.readFile(path.join(retry, "manifest.json"), "utf8"));
+    assert.equal(manifest.sessions.length, 2);
+    assert.equal(await adapter.openLatestArchive(context), true);
+  } else {
+    assert.equal(calls.length, 1, "changed inventory must fail before the retry core call");
+    assert.equal(fs.existsSync(retry), false, "no retry output or replacement session may be published");
+    assert.deepEqual([...context.globalState.values], saved);
+    assert.equal(fake.messages.filter(message => message.message.startsWith("Exported ")).length, successMessages);
+    assert.equal(await adapter.openLatestArchive(context), true);
+    assert.equal(fake.opened.at(-1), path.join(prior, "index.html"));
+  }
+  assert.deepEqual(await fsp.readFile(path.join(original, "manifest.json")), sentinel);
+  assert.deepEqual(await fsp.readFile(path.join(original, "EXPORT_INCOMPLETE.txt")), marker);
+  assert.equal(fs.existsSync(path.join(original, ".codex-export.lock")), false);
+  synthetic = true;
+  fake.config.set("outputDirectory", next);
+  assert.equal((await adapter.exportAllSessions(context)).outputDirectory, next, "all inventory paths release the adapter lock");
+  console.log(`Security inventory ${mutation}: PASS`);
+}
+
+// R1: the independent audit's 12 continuation variants plus shadows, aliases,
+// byte identity and ordering. No logical-inventory injection in these tests.
+const bindingCore = await import("../../../bin/export-codex-project-chats.mjs");
+const bindingThread = "11111111-1111-7111-8111-111111111111";
+const bindingParent = "aaaaaaaa-aaaa-7aaa-8aaa-aaaaaaaaaaaa";
+const bindingChild = "bbbbbbbb-bbbb-7bbb-8bbb-bbbbbbbbbbbb";
+const bindingName = id => "rollout-2026-09-24T10-00-00-" + bindingThread + "_" + id + ".jsonl";
+function bindingBytes(child, label = "ADDED_CHILD_CONTENT", cwd = oneWorkspace) {
+  const at = "2026-09-24T10:00:00Z";
+  const records = [
+    { ordinal: child ? 2 : 0, type: "session_meta", timestamp: at, payload: {
+      id: bindingThread, cwd, timestamp: at, thread_source: "user", history_mode: "paginated",
+      ...(child ? { history_base: { thread_id: bindingParent, end_ordinal_exclusive: 2, end_byte_offset: 1600 } } : {}),
+    } },
+    { ordinal: child ? 3 : 1, type: "response_item", timestamp: at, payload: {
+      type: "message", role: "assistant", content: [{ type: "output_text", text: child ? label : "ORIGINAL_PARENT_CONTENT" }],
+    } },
+  ];
+  const encode = () => Buffer.from(records.map(record => JSON.stringify(record)).join("\n") + "\n");
+  records[1].payload.content[0].text += "x".repeat(1600 - encode().length);
+  assert.equal(encode().length, 1600);
+  return encode();
+}
+function trackedBindingIo({ fault = () => {}, mapStat = (_file, stat) => stat, reverse = () => false } = {}) {
+  const active = new Set(), reads = [], opened = [];
+  return { active, reads, opened, io: {
+    ...fsp,
+    async readdir(directory, options) {
+      fault("enumerate", directory);
+      const entries = await fsp.readdir(directory, options);
+      return reverse() ? entries.reverse() : entries;
+    },
+    async lstat(file, options) { return mapStat(file, await fsp.lstat(file, options)); },
+    async open(file, flags) {
+      fault("open", file);
+      const handle = await fsp.open(file, flags);
+      active.add(handle);
+      opened.push(file);
+      assert.equal(active.size, 1, "hash sources sequentially");
+      return {
+        async stat(options) { fault("stat", file); return mapStat(file, await handle.stat(options)); },
+        async read(buffer, offset, length, position) {
+          assert.ok(length <= 64 * 1024, "bounded streaming hash buffer");
+          fault("read", file);
+          const result = await handle.read(buffer, offset, length, position);
+          reads.push({ file, bytes: result.bytesRead });
+          return result;
+        },
+        async close() {
+          try { await handle.close(); } finally { active.delete(handle); }
+          fault("close", file);
+        },
+      };
+    },
+  } };
+}
+const physicalCases = [];
+for (const scope of ["recorded-project", "project"]) {
+  for (const storage of ["active", "archived"]) {
+    for (const mutation of ["add", "change", "remove"]) physicalCases.push({ scope, storage, mutation, kind: "chain" });
+  }
+}
+for (const kind of ["chain", "aliases", "shadow"]) {
+  for (const mutation of ["stable", "reorder", "same-size-restored", "hash-only"]) physicalCases.push({ scope: "recorded-project", storage: "archived", kind, mutation });
+}
+for (const kind of ["aliases", "shadow"]) {
+  for (const mutation of ["add", "change", "remove"]) physicalCases.push({ scope: "project", storage: "active", kind, mutation });
+}
+physicalCases.push({ scope: "recorded-project", storage: "archived", kind: "chain", mutation: "unknown-added" });
+physicalCases.push({ scope: "project", storage: "archived", kind: "chain", mutation: "unrelated-added" });
+for (const mutation of ["stable", "add", "remove"]) physicalCases.push({ scope: "project", storage: "archived", kind: "hardlinks", mutation });
+for (const test of physicalCases) {
+  const { scope, storage, kind, mutation } = test;
+  const label = [scope, storage, kind, mutation].join("-");
+  const home = path.join(temp, "physical-" + label), active = path.join(home, "sessions"), archive = path.join(home, "archived_sessions");
+  await fsp.mkdir(active, { recursive: true });
+  await fsp.mkdir(archive);
+  const parent = path.join(active, bindingName(bindingParent));
+  const child = kind === "shadow" ? parent + ".zst" : path.join(storage === "active" ? active : archive, bindingName(bindingChild));
+  const parentBytes = bindingBytes(false);
+  const initialChild = kind === "chain" ? bindingBytes(true) : parentBytes;
+  // Use a raw zstd frame so same-length payload edits also preserve compressed
+  // file size. It is a standard single-segment frame containing one raw block.
+  const encodeChild = bytes => {
+    if (kind !== "shadow") return bytes;
+    const header = Buffer.from([0x28, 0xb5, 0x2f, 0xfd, 0x60, 0, 0, 0, 0, 0]);
+    header.writeUInt16LE(bytes.length - 256, 5);
+    header.writeUIntLE((bytes.length << 3) | 1, 7, 3);
+    return Buffer.concat([header, bytes]);
+  };
+  await fsp.writeFile(parent, parentBytes);
+  if (mutation !== "add") {
+    if (kind === "hardlinks") await fsp.link(parent, child);
+    else await fsp.writeFile(child, encodeChild(initialChild));
+  }
+  if (kind === "aliases") await fsp.writeFile(path.join(active, "byte-identical-alias.jsonl"), parentBytes);
+  const original = path.join(temp, "physical-original-" + label), retry = path.join(temp, "physical-retry-" + label);
+  await bindingCore.exportArchive({ scope: "all", codexHome: home, outputDirectory: original, exportProfile: "complete" });
+  const originalManifest = await fsp.readFile(path.join(original, "manifest.json"));
+  const prior = await savedExportFixture("physical-prior-" + label);
+  const context = createContext(temp);
+  context.globalState.values.set(STATE_LAST_SUCCESS, prior);
+  const saved = structuredClone([...context.globalState.values]), action = deferred(), calls = [];
+  let retrying = false, synthetic = false;
+  const frozenStat = mutation === "hash-only" ? await fsp.lstat(child, { bigint: true }) : null;
+  const frozenMeta = frozenStat ? await bindingCore.readSessionDiscoveryMeta(child) : null;
+  const tracker = trackedBindingIo({
+    reverse: () => retrying && mutation === "reorder",
+    mapStat: (file, stat) => file === child && frozenStat ? frozenStat : stat,
+  });
+  const fake = createFakeVscode({
+    config: { codexHome: home, outputDirectory: original }, workspaceFolders: [folder(oneWorkspace)],
+    errorMessageHandler: (_message, actions) => actions.includes(chooseFolder) ? action.promise : undefined,
+    openDialogResult: [{ scheme: "file", fsPath: retry }],
+    quickPickSelector: (items, options) => {
+      if (options.placeHolder === "Choose what to export") return items.find(item => item.scope === scope);
+      if (options.placeHolder === "Choose an export profile") return items.find(item => item.profile === "readable");
+      return items[0];
+    },
+  });
+  const adapter = createExtensionAdapterCore(fake.vscode, { fsp: tracker.io, loadExporter: async () => ({ ...bindingCore,
+    async readSessionDiscoveryMeta(file, options) {
+      const meta = await bindingCore.readSessionDiscoveryMeta(file, options);
+      // Digest-only counterexample: report unchanged properties/metadata while
+      // real physical bytes beyond the bounded first record are changed.
+      return file === child && frozenMeta ? frozenMeta : meta;
+    },
+    async exportArchive(options) {
+      if (synthetic) return exporter.exportArchive(options);
+      calls.push(options);
+      return bindingCore.exportArchive(options);
+    },
+  }) });
+  await adapter.activate(context);
+  await fake.registered.get(COMMANDS.exportMenu)();
+  assert.equal(calls.length, 1, label);
+  assert.ok(fake.messages.some(message => message.actions.includes(chooseFolder)), label);
+  assert.deepEqual([...context.globalState.values], saved, "collision preserves status");
+  assert.equal(tracker.active.size, 0, "baseline closes handles before notification");
+  assert.ok(tracker.opened.includes(parent));
+  if (mutation !== "add") assert.ok(tracker.opened.includes(child), "include duplicate/continuation/shadow before reductions");
+  const beforeProperties = mutation === "same-size-restored" ? await fsp.stat(child) : null;
+  if (mutation === "remove") await fsp.unlink(child);
+  if (["add", "change", "same-size-restored", "hash-only"].includes(mutation)) {
+    const bytes = kind === "chain" ? bindingBytes(true, "CHANGED_CHILD_CONTENT") : Buffer.from(parentBytes);
+    if (kind !== "chain") bytes[bytes.lastIndexOf("x")] = 121;
+    const encoded = encodeChild(bytes);
+    if (beforeProperties) assert.equal(encoded.length, beforeProperties.size);
+    if (kind === "hardlinks") await fsp.link(parent, child);
+    else await fsp.writeFile(child, encoded);
+    if (beforeProperties) await fsp.utimes(child, beforeProperties.atime, beforeProperties.mtime);
+  }
+  if (mutation === "unknown-added") await fsp.writeFile(path.join(archive, "unknown.jsonl"), '{"type":"session_meta","payload":{"id":"unknown"}}\n');
+  if (mutation === "unrelated-added") await fsp.writeFile(path.join(active, "unrelated.jsonl"), bindingBytes(false, "", twoWorkspace));
+  tracker.opened.length = 0;
+  retrying = true;
+  action.resolve(chooseFolder);
+  const allowed = mutation === "stable" || mutation === "reorder";
+  const status = mutation === "unknown-added" ? "RECORDED_PROJECT_INVENTORY_UNVERIFIABLE" : "RECORDED_PROJECT_INVENTORY_CHANGED";
+  await waitFor(() => allowed ? context.globalState.get(STATE_LAST_SUCCESS)?.outputDirectory === retry : fake.output.some(line => line.includes(status)), label);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(tracker.active.size, 0, "retry closes handles");
+  if (mutation !== "unknown-added") assert.ok(tracker.opened.includes(parent));
+  if (allowed) {
+    assert.equal(calls.length, 2);
+    assert.ok(tracker.opened.includes(child));
+    for (const key of ["scope", "codexHome", "exportProfile", "documentFormats", "onSelectRecordedProject"]) assert.deepEqual(calls[1][key], calls[0][key]);
+    const manifest = JSON.parse(await fsp.readFile(path.join(retry, "manifest.json"), "utf8"));
+    assert.equal(manifest.sessions.length, 1);
+    if (kind === "chain") assert.ok((await fsp.readFile(path.join(retry, manifest.sessions[0].markdown_file), "utf8")).includes("ADDED_CHILD_CONTENT"));
+  } else {
+    assert.equal(calls.length, 1, "reject before retry core");
+    assert.equal(fs.existsSync(retry), false);
+    assert.deepEqual([...context.globalState.values], saved);
+    assert.equal(fake.messages.some(message => message.message.startsWith("Exported ")), false);
+    assert.equal(await adapter.openLatestArchive(context), true);
+    assert.equal(fake.opened.at(-1), prior.htmlIndexPath);
+    assert.equal(await adapter.openExportFolder(context), true);
+    assert.equal(fake.opened.at(-1), prior.outputDirectory);
+  }
+  assert.deepEqual(await fsp.readFile(parent), parentBytes);
+  assert.deepEqual(await fsp.readFile(path.join(original, "manifest.json")), originalManifest);
+  assert.equal(fs.existsSync(path.join(original, ".codex-export.lock")), false);
+  synthetic = true;
+  fake.config.set("outputDirectory", path.join(temp, "physical-unlocked-" + label));
+  await adapter.exportAllSessions(context);
+  assert.equal(context.globalState.get(STATE_LAST_SUCCESS).outputDirectory, fake.config.get("outputDirectory"), "released runtime lock");
+  console.log("Security physical " + label + ": PASS");
+}
+
+// Failure injection exercises both baseline capture and pre-core retry checks.
+// All adapter-owned handles are observed; the real metadata reader is retained.
+for (const phase of ["baseline", "retry"]) {
+  for (const failure of ["enumerate-error", "enumerate-cancel", "metadata-error", "metadata-cancel", "open-error", "stat-error", "read-error", "read-cancel", "close-error", "unassignable", "mismatched-id", "truncated", "invalid-shadow", "linked-subtree"]) {
+    const label = phase + "-" + failure;
+    const home = path.join(temp, "binding-fault-" + label), sessions = path.join(home, "sessions");
+    await fsp.mkdir(sessions, { recursive: true });
+    const source = path.join(sessions, "session.jsonl");
+    const bytes = Buffer.concat([bindingBytes(false), Buffer.from(JSON.stringify({ type: "event_msg", payload: { type: "agent_message", message: "x".repeat(200_000) } }) + "\n")]);
+    await fsp.writeFile(source, bytes);
+    const prior = path.join(temp, "binding-fault-prior-" + label), original = path.join(temp, "binding-fault-original-" + label), retry = path.join(temp, "binding-fault-retry-" + label);
+    const action = deferred(), context = createContext(temp);
+    async function addUnverifiableSource() {
+      if (failure === "invalid-shadow") await fsp.writeFile(source + ".zst", "invalid zstd bytes");
+      if (failure === "linked-subtree") {
+        const outside = path.join(temp, "binding-outside-" + label);
+        await fsp.mkdir(outside);
+        await fsp.writeFile(path.join(outside, "session.jsonl"), bindingBytes(false));
+        await fsp.symlink(outside, path.join(sessions, "linked"), process.platform === "win32" ? "junction" : "dir");
+      }
+    }
+    let mode = "success", armed = false, cancel, subscriptions = 0, calls = 0;
+    const injectedFailure = () => Object.assign(new Error("injected physical-source failure"), { code: "EACCES" });
+    const tracker = trackedBindingIo({ fault(operation) {
+      if (!armed) return;
+      if (failure === operation + "-cancel") cancel();
+      if (failure === operation + "-error") throw injectedFailure();
+    } });
+    const fake = createFakeVscode({
+      config: { codexHome: home, outputDirectory: prior }, workspaceFolders: [folder(oneWorkspace)],
+      errorMessageHandler: (_message, actions) => actions.includes(chooseFolder) ? action.promise : undefined,
+      openDialogResult: [{ scheme: "file", fsPath: retry }],
+    });
+    fake.vscode.window.withProgress = async (_options, task) => task({ report() {} }, {
+      onCancellationRequested(callback) {
+        cancel = callback;
+        subscriptions++;
+        return { dispose() { subscriptions--; } };
+      },
+    });
+    const adapter = createExtensionAdapterCore(fake.vscode, { fsp: tracker.io, loadExporter: async () => ({ ...bindingCore,
+      async readSessionDiscoveryMeta(file, options) {
+        if (armed && failure === "metadata-error") throw injectedFailure();
+        if (armed && failure === "metadata-cancel") cancel();
+        const meta = await bindingCore.readSessionDiscoveryMeta(file, options);
+        if (armed && failure === "unassignable") return { ...meta, cwd: "" };
+        if (armed && failure === "mismatched-id") return { ...meta, metadataIdMismatch: true };
+        if (armed && failure === "truncated") return { ...meta, discoverySnapshot: { ...meta.discoverySnapshot, firstRecordTruncated: true } };
+        return meta;
+      },
+      async exportArchive(options) {
+        calls++;
+        if (mode === "success") return exporter.exportArchive(options);
+        assert.equal(tracker.opened.length, 0, "no full hash before the first collision");
+        if (phase === "baseline") armed = true;
+        if (armed) await addUnverifiableSource();
+        throw collision();
+      },
+    }) });
+    await adapter.activate(context);
+    // An ordinary, collision-free project export must never open a full-hash
+    // handle, even though the source extends far beyond bounded discovery.
+    await fake.registered.get(COMMANDS.exportCurrentWorkspace)();
+    assert.equal(calls, 1);
+    assert.equal(tracker.opened.length, 0);
+    assert.equal(tracker.reads.length, 0);
+    assert.equal(subscriptions, 0);
+    const saved = structuredClone([...context.globalState.values]);
+    const successfulMessages = fake.messages.filter(message => message.message.startsWith("Exported ")).length;
+    fake.config.set("outputDirectory", original);
+    mode = "collision";
+    // Also covers the direct current-workspace entry point (no picker inventory).
+    const attempt = adapter.exportCurrentWorkspace(context);
+    const cancelled = failure.endsWith("-cancel");
+    const code = "RECORDED_PROJECT_INVENTORY_UNVERIFIABLE";
+    if (phase === "baseline" && !cancelled) await assert.rejects(attempt, { code });
+    else await attempt;
+    if (phase === "retry") {
+      assert.ok(fake.messages.some(message => message.actions.includes(chooseFolder)));
+      assert.equal(tracker.active.size, 0);
+      assert.equal(subscriptions, 0);
+      const reads = tracker.reads.filter(read => read.file === source);
+      assert.equal(reads.reduce((sum, read) => sum + read.bytes, 0), bytes.length, "baseline reads every byte");
+      assert.ok(reads.length > 3, "source spans multiple bounded hash reads");
+      armed = true;
+      await addUnverifiableSource();
+      action.resolve(chooseFolder);
+    }
+    await waitFor(() => fake.output.some(line => line.includes(cancelled ? "Export cancelled." : code)), label);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(calls, 2, "no retry core call after capture/check failure");
+    assert.equal(tracker.active.size, 0, "close handles on all errors and cancellations");
+    assert.equal(subscriptions, 0, "dispose cancellation subscriptions");
+    assert.equal(fs.existsSync(retry), false);
+    assert.equal(fs.existsSync(original), false, "synthetic collision creates no output");
+    assert.deepEqual([...context.globalState.values], saved);
+    assert.equal(fake.messages.filter(message => message.message.startsWith("Exported ")).length, successfulMessages);
+    if (phase === "baseline") assert.equal(fake.messages.some(message => message.actions.includes(chooseFolder)), false, "never offer a retry without a complete baseline");
+    assert.equal(await adapter.openLatestArchive(context), true);
+    assert.equal(fake.opened.at(-1), path.join(prior, "index.html"));
+    mode = "success";
+    armed = false;
+    fake.config.set("outputDirectory", path.join(temp, "binding-fault-unlocked-" + label));
+    await adapter.exportAllSessions(context);
+    assert.equal(calls, 3, "release runtime lock after capture/check failure");
+    console.log("Security physical failure " + label + ": PASS");
+  }
+}
+
+// A second collision cannot replace the original physical binding.
+{
+  const home = path.join(temp, "binding-second-collision"), sessions = path.join(home, "sessions");
+  await fsp.mkdir(sessions, { recursive: true });
+  const source = path.join(sessions, "session.jsonl");
+  await fsp.writeFile(source, bindingBytes(false));
+  const first = path.join(temp, "binding-second-first"), second = path.join(temp, "binding-second-next"), third = path.join(temp, "binding-second-third");
+  const actions = [deferred(), deferred()], destinations = [second, third], context = createContext(temp);
+  const tracker = trackedBindingIo();
+  let calls = 0, synthetic = false, notifications = 0;
+  const fake = createFakeVscode({
+    config: { codexHome: home, outputDirectory: first }, workspaceFolders: [folder(oneWorkspace)],
+    errorMessageHandler: (_message, buttons) => buttons.includes(chooseFolder) ? actions[notifications++].promise : undefined,
+    openDialogSelector: () => [{ scheme: "file", fsPath: destinations.shift() }],
+  });
+  const adapter = createExtensionAdapterCore(fake.vscode, { fsp: tracker.io, loadExporter: async () => ({ ...bindingCore,
+    async exportArchive(options) {
+      if (synthetic) return exporter.exportArchive(options);
+      calls++;
+      if (calls === 2) {
+        assert.equal(tracker.opened.length, 2, "one baseline hash and one pre-retry hash");
+        // The next notification is not yet displayed; recapturing after this
+        // collision would bless the new physical source for a third attempt.
+        await fsp.writeFile(path.join(sessions, "new-alias.jsonl"), bindingBytes(false));
+      }
+      throw collision();
+    },
+  }) });
+  await adapter.activate(context);
+  await adapter.exportCurrentWorkspace(context);
+  await waitFor(() => notifications === 1, "first physical collision");
+  actions[0].resolve(chooseFolder);
+  await waitFor(() => notifications === 2, "second physical collision");
+  assert.equal(tracker.opened.length, 2, "second collision does not reset or rehash the baseline");
+  actions[1].resolve(chooseFolder);
+  await waitFor(() => fake.output.some(line => line.includes("RECORDED_PROJECT_INVENTORY_CHANGED")), "third collision binding");
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(calls, 2);
+  assert.equal(tracker.active.size, 0);
+  assert.equal(context.globalState.values.size, 0);
+  for (const directory of [first, second, third]) assert.equal(fs.existsSync(directory), false);
+  synthetic = true;
+  fake.config.set("outputDirectory", path.join(temp, "binding-second-unlocked"));
+  assert.ok(await adapter.exportAllSessions(context));
+  console.log("Security physical repeated collision: PASS");
+}
+
+async function savedExportFixture(name) {
+  const directory = path.join(temp, name);
+  await fsp.mkdir(directory);
+  const indexPath = path.join(directory, "index.html");
+  await fsp.writeFile(indexPath, "<html>synthetic successful export</html>");
+  const target = async (targetPath, kind) => ({ path: targetPath, canonicalPath: await fsp.realpath(targetPath),
+    identity: testFileIdentity(await fsp.stat(targetPath, { bigint: true })), kind, verifiedAt: "2026-09-24T00:00:00.000Z" });
+  return { version: 1, outputDirectory: directory, htmlIndexPath: indexPath, output: await target(directory, "directory"), index: await target(indexPath, "file") };
+}
+function legacyEntries(record) {
+  return [[STATE_OUTPUT_TARGET, record.output], [STATE_LATEST_HTML_TARGET, record.index], [STATE_OUTPUT_DIR, record.outputDirectory], [STATE_LATEST_HTML, record.htmlIndexPath]];
+}
+const legacyA = await savedExportFixture("security-legacy-a");
+const legacyB = await savedExportFixture("security-legacy-b");
+// Every possible mix of the old four writes, and every missing component.
+for (const scenario of [...Array.from({ length: 16 }, (_, mask) => ({ mask })), ...Array.from({ length: 4 }, (_, missing) => ({ missing }))]) {
+  const context = createContext(temp);
+  const a = legacyEntries(legacyA);
+  const b = legacyEntries(legacyB);
+  for (let index = 0; index < a.length; index += 1) {
+    if (scenario.missing === index) continue;
+    const [key, value] = scenario.mask & (1 << index) ? b[index] : a[index];
+    context.globalState.values.set(key, structuredClone(value));
+  }
+  const before = structuredClone([...context.globalState.values]);
+  const fake = createFakeVscode();
+  const adapter = createExtensionAdapter(fake.vscode);
+  await adapter.activate(context);
+  const valid = scenario.missing === undefined && (scenario.mask === 0 || scenario.mask === 15);
+  assert.equal(await adapter.openLatestArchive(context), valid, `legacy index ${JSON.stringify(scenario)}`);
+  assert.equal(await adapter.openExportFolder(context), valid, `legacy folder ${JSON.stringify(scenario)}`);
+  assert.deepEqual([...context.globalState.values], before, "legacy read must not migrate/write state");
+}
+console.log("Security legacy migration: 20 complete/mixed/incomplete cases PASS");
+
+{
+  const nested = await savedExportFixture(path.join("security-legacy-a", "nested-export"));
+  for (const storage of ["legacy", "composite"]) {
+    const mixed = { ...legacyA, htmlIndexPath: nested.htmlIndexPath, index: nested.index };
+    const context = createContext(temp);
+    for (const [key, value] of storage === "legacy" ? legacyEntries(mixed) : [[STATE_LAST_SUCCESS, mixed]]) context.globalState.values.set(key, value);
+    const fake = createFakeVscode();
+    const adapter = createExtensionAdapter(fake.vscode);
+    await adapter.activate(context);
+    assert.equal(await adapter.openLatestArchive(context), false, "a nested different export is not the folder's own index");
+    assert.equal(await adapter.openExportFolder(context), false);
+    assert.deepEqual(fake.opened, []);
+  }
+  const invalidOutput = path.join(temp, "status-nested-core-result");
+  const fake = createFakeVscode({ config: { outputDirectory: invalidOutput } });
+  const context = createContext(temp);
+  context.globalState.values.set(STATE_LAST_SUCCESS, legacyA);
+  const saved = structuredClone([...context.globalState.values]);
+  let invalid = true;
+  const adapter = createExtensionAdapter(fake.vscode, { loadExporter: async () => ({ async exportArchive(options) {
+    if (!invalid) return exporter.exportArchive(options);
+    await fsp.mkdir(options.outputDirectory);
+    const nested = await savedExportFixture(path.join("status-nested-core-result", "different-export"));
+    return { outputDirectory: options.outputDirectory, htmlIndexPath: nested.htmlIndexPath };
+  } }) });
+  await adapter.activate(context);
+  await assert.rejects(() => adapter.exportAllSessions(context), /does not belong/);
+  assert.deepEqual([...context.globalState.values], saved);
+  invalid = false;
+  fake.config.set("outputDirectory", `${invalidOutput}-next`);
+  await adapter.exportAllSessions(context);
+  console.log("Security nested index migration/result: 3 fail-closed cases PASS");
+}
+
+for (const invalid of [null, { ...legacyA, version: 2 }, { ...legacyA, index: legacyB.index }, { ...legacyA, htmlIndexPath: legacyB.htmlIndexPath }]) {
+  const context = createContext(temp);
+  for (const [key, value] of legacyEntries(legacyA)) context.globalState.values.set(key, value);
+  context.globalState.values.set(STATE_LAST_SUCCESS, invalid);
+  const fake = createFakeVscode();
+  const adapter = createExtensionAdapter(fake.vscode);
+  await adapter.activate(context);
+  assert.equal(await adapter.openLatestArchive(context), false, "invalid new records must not fall back to legacy state");
+  assert.equal(await adapter.openExportFolder(context), false);
+  assert.deepEqual(fake.opened, []);
+}
+console.log("Security malformed composite: 4 fail-closed cases PASS");
+
+for (const previousKind of ["legacy", "composite"]) {
+  for (const oldFailurePosition of [1, 2, 3, 4]) {
+    const context = createContext(temp);
+    const entries = previousKind === "legacy" ? legacyEntries(legacyA) : [[STATE_LAST_SUCCESS, legacyA]];
+    for (const [key, value] of entries) context.globalState.values.set(key, structuredClone(value));
+    context.workspaceState = createState();
+    const before = structuredClone([...context.globalState.values]);
+    const target = path.join(temp, `atomic-${previousKind}-${oldFailurePosition}`);
+    const fake = createFakeVscode({ config: { outputDirectory: target } });
+    const adapter = createExtensionAdapter(fake.vscode, { loadExporter: async () => exporter });
+    await adapter.activate(context);
+    const update = context.globalState.update;
+    const writes = [];
+    context.globalState.update = async (key, value) => {
+      writes.push(key);
+      // The old implementation fails at each individual write. Its replacement
+      // has one atomic persistence boundary, tested with the same rejection.
+      if (key === STATE_LAST_SUCCESS || writes.length === oldFailurePosition) throw new Error("synthetic persistence rejection");
+      return update(key, value);
+    };
+    await assert.rejects(() => adapter.exportAllSessions(context), /synthetic persistence rejection/);
+    assert.deepEqual(writes, [STATE_LAST_SUCCESS]);
+    assert.deepEqual([...context.globalState.values], before, "failed persistence leaves the complete previous state unchanged");
+    assert.equal(await adapter.openLatestArchive(context), true);
+    assert.equal(await adapter.openExportFolder(context), true);
+    assert.deepEqual(fake.opened, [legacyA.htmlIndexPath, legacyA.outputDirectory]);
+    assert.equal(fake.messages.some(message => message.message.startsWith("Exported ")), false);
+    context.globalState.update = async (key, value) => { writes.push(key); return update(key, value); };
+    const next = `${target}-next`;
+    fake.config.set("outputDirectory", next);
+    await adapter.exportAllSessions(context);
+    assert.deepEqual(writes, [STATE_LAST_SUCCESS, STATE_LAST_SUCCESS], "exactly one update per successful core result; no legacy follow-up writes");
+    assert.equal(context.globalState.get(STATE_LAST_SUCCESS).version, 1);
+    assert.equal(context.globalState.get(STATE_LAST_SUCCESS).outputDirectory, next);
+    if (previousKind === "legacy") for (const [key, value] of entries) assert.deepEqual(context.globalState.get(key), value);
+    const reloaded = createExtensionAdapter(fake.vscode);
+    await reloaded.activate(context);
+    assert.equal(await reloaded.openLatestArchive(context), true);
+    assert.equal(await reloaded.openExportFolder(context), true);
+    assert.deepEqual(fake.opened.slice(-2), [path.join(next, "index.html"), next]);
+    assert.equal(context.workspaceState.values.size, 0);
+    console.log(`Security atomic state ${previousKind}-${oldFailurePosition}: PASS`);
+  }
+}
+
+// Model VS Code's eager Memento cache separately from durable storage. Opening
+// while an update is pending or after rejection must still use the old record.
+{
+  const context = createContext(temp);
+  context.globalState.values.set(STATE_LAST_SUCCESS, structuredClone(legacyA));
+  const durable = structuredClone([...context.globalState.values]);
+  const pending = deferred();
+  const started = deferred();
+  const target = path.join(temp, "atomic-eager-cache");
+  const fake = createFakeVscode({ config: { outputDirectory: target } });
+  const adapter = createExtensionAdapter(fake.vscode, { loadExporter: async () => exporter });
+  await adapter.activate(context);
+  context.globalState.update = async (key, value) => {
+    context.globalState.values.set(key, value);
+    started.resolve();
+    await pending.promise;
+    throw new Error("eager cache persistence rejected");
+  };
+  const running = adapter.exportAllSessions(context);
+  const rejection = assert.rejects(running, /eager cache persistence rejected/);
+  await started.promise;
+  assert.equal(await adapter.openLatestArchive(context), true);
+  assert.equal(await adapter.openExportFolder(context), true);
+  pending.resolve();
+  await rejection;
+  assert.equal(await adapter.openLatestArchive(context), true);
+  assert.equal(await adapter.openExportFolder(context), true);
+  assert.deepEqual(fake.opened, [legacyA.htmlIndexPath, legacyA.outputDirectory, legacyA.htmlIndexPath, legacyA.outputDirectory]);
+  const restartedContext = createContext(temp);
+  for (const [key, value] of durable) restartedContext.globalState.values.set(key, value);
+  const restarted = createExtensionAdapter(fake.vscode);
+  await restarted.activate(restartedContext);
+  assert.equal(await restarted.openLatestArchive(restartedContext), true);
+  assert.equal(fake.opened.at(-1), legacyA.htmlIndexPath);
+  context.globalState.update = async (key, value) => { context.globalState.values.set(key, value); };
+  fake.config.set("outputDirectory", `${target}-next`);
+  await adapter.exportAllSessions(context);
+  assert.equal(await adapter.openExportFolder(context), true);
+  assert.equal(fake.opened.at(-1), `${target}-next`);
+  console.log("Security pending/rejected Memento cache: PASS");
+}
+
+for (const scheme of ["vscode-remote", "untitled", "https", "File", undefined]) {
+  const invalid = path.join(temp, `non-file-${scheme ?? "missing"}`);
+  const valid = `${invalid}-valid`;
+  let calls = 0;
+  const fake = createFakeVscode({ openDialogResult: [{ scheme, fsPath: invalid }] });
+  const context = createContext(temp);
+  const adapter = createExtensionAdapter(fake.vscode, { loadExporter: async () => ({ async exportArchive(options) {
+    calls += 1;
+    return exporter.exportArchive(options);
+  } }) });
+  await adapter.activate(context);
+  assert.equal(await adapter.exportAllSessions(context), undefined);
+  assert.equal(calls, 0);
+  assert.equal(fs.existsSync(invalid), false);
+  assert.equal(context.globalState.values.size, 0);
+  assert.match(fake.messages.at(-1).message, /local export folder.*file URI/);
+  fake.vscode.window.showOpenDialog = async () => [{ scheme: "file", fsPath: valid }];
+  await adapter.exportAllSessions(context);
+  assert.equal(calls, 1, "invalid URI must release the runtime lock");
+  assert.equal(context.globalState.get(STATE_LAST_SUCCESS).outputDirectory, valid);
+  console.log(`Security normal picker ${scheme ?? "missing"}: PASS`);
+}
 
 const after = await fsp.readFile(sourceFile, "utf8");
 assert.equal(after, before, "synthetic source data must not be modified");
