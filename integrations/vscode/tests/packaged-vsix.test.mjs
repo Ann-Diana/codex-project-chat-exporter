@@ -16,8 +16,10 @@ import { inflateSync } from "node:zlib";
 
 import JSZip from "jszip";
 import xmlJs from "xml-js";
+import { fromMarkdown } from "mdast-util-from-markdown";
+import { Marked } from "marked";
 
-import { buildVsix, resolveCheckedOutCommit, transformPackagedReadme, validateSourceCommit } from "../scripts/build-vsix.mjs";
+import { buildVsix, resolveCheckedOutCommit, transformPackagedReadme, validateSourceCommit, verifyReadmeRendererAgreement } from "../scripts/build-vsix.mjs";
 
 const require = createRequire(import.meta.url);
 const { xml2js } = xmlJs;
@@ -67,15 +69,11 @@ function sha256(bytes) {
 
 function markdownLinkTargets(text) {
   const targets = [];
-  let cursor = 0;
-  while (cursor < text.length) {
-    const marker = text.indexOf("](", cursor);
-    if (marker < 0) break;
-    const end = text.indexOf(")", marker + 2);
-    if (end < 0) break;
-    targets.push(text.slice(marker + 2, end).trim());
-    cursor = end + 1;
-  }
+  const visit = (node) => {
+    if (["link", "image", "definition"].includes(node.type)) targets.push(node.url);
+    for (const child of node.children || []) visit(child);
+  };
+  visit(fromMarkdown(text));
   return targets;
 }
 
@@ -156,6 +154,10 @@ function expectedPackagedReadme(sourceReadme) {
     assert.equal(literalOccurrenceCount(expected, source), expectedOccurrences, source);
     expected = expected.replaceAll(source, packaged);
   }
+  for (const file of ["FAQ.md", "SECURITY.md", "docs/archive-format-v1.md"]) {
+    expected = expected.replace(`${PACKAGED_README_REPOSITORY_URL}/blob/main/${file}`, `${PACKAGED_README_REPOSITORY_URL}/blob/${EXPECTED_SOURCE_REF}/${file}`);
+  }
+  expected = expected.replace(`${PACKAGED_README_REPOSITORY_URL}#readme`, `${PACKAGED_README_REPOSITORY_URL}/tree/${EXPECTED_SOURCE_REF}#readme`);
   return expected;
 }
 
@@ -166,20 +168,20 @@ function pinnedReadmeLinks(readme) {
     const url = new URL(target);
     const parts = url.pathname.split("/").filter(Boolean);
     if (url.hostname === "github.com" && parts[0] === "Ann-Diana" && parts[1] === "codex-project-chat-exporter"
-      && (parts[2] === "raw" || parts[2] === "blob") && parts[4] === "integrations" && parts[5] === "vscode") {
+      && ["raw", "blob", "tree"].includes(parts[2])) {
       assert.equal(url.protocol, "https:");
       assert.equal(url.username, "");
       assert.equal(url.password, "");
       assert.equal(url.port, "");
       assert.equal(url.search, "");
-      assert.equal(url.hash, "");
+      assert.equal(url.hash, parts[2] === "tree" ? "#readme" : "");
       pinned.push(url);
     }
   }
   return pinned;
 }
 
-function assertEightPinnedReadmeLinks(readme) {
+function assertAllPinnedReadmeLinks(readme) {
   const pinned = pinnedReadmeLinks(readme);
   const imageRoot = `${PACKAGED_README_REPOSITORY_URL}/raw/${EXPECTED_SOURCE_REF}/integrations/vscode/images/`;
   const documentRoot = `${PACKAGED_README_REPOSITORY_URL}/blob/${EXPECTED_SOURCE_REF}/integrations/vscode/`;
@@ -192,8 +194,12 @@ function assertEightPinnedReadmeLinks(readme) {
     `${documentRoot}LICENSE`,
     `${documentRoot}LICENSE`,
     `${documentRoot}PACKAGED_TEST_PLAN.md`,
+    `${PACKAGED_README_REPOSITORY_URL}/blob/${EXPECTED_SOURCE_REF}/FAQ.md`,
+    `${PACKAGED_README_REPOSITORY_URL}/blob/${EXPECTED_SOURCE_REF}/SECURITY.md`,
+    `${PACKAGED_README_REPOSITORY_URL}/blob/${EXPECTED_SOURCE_REF}/docs/archive-format-v1.md`,
+    `${PACKAGED_README_REPOSITORY_URL}/tree/${EXPECTED_SOURCE_REF}#readme`,
   ];
-  assert.equal(pinned.length, 8);
+  assert.equal(pinned.length, 12);
   assert.ok(pinned.every((url) => url.pathname.split("/")[4] === EXPECTED_SOURCE_REF), "no old, moving or alternate ref is permitted");
   assert.deepEqual(pinned.map((url) => url.href).sort(), expected.sort());
   assert.equal(pinned.some((url) => url.pathname.split("/")[4] === "c0d31b9712edfa577ea3276254e941651e7badfd"), false);
@@ -219,9 +225,24 @@ test("source commit resolution rejects missing Git context and malformed SHA out
     assert.notEqual(first, second, "the source ref must follow the actual checkout HEAD");
     const readme = await fs.readFile(path.join(extensionRoot, "README.md"), "utf8");
     const links = pinnedReadmeLinks(transformPackagedReadme(readme, second));
-    assert.equal(links.length, 8);
+    assert.equal(links.length, 12);
     assert.ok(links.every((url) => url.pathname.split("/")[4] === second));
     assert.ok(links.every((url) => url.pathname.split("/")[4] !== first));
+    execFileSync("git", ["checkout", "--quiet", "--detach", first], { cwd: temp, windowsHide: true });
+    assert.equal(await resolveCheckedOutCommit(temp), first, "detached HEAD is the actual build source");
+    const worktree = path.join(temp, "linked-checkout");
+    execFileSync("git", ["worktree", "add", "--quiet", "--detach", worktree, second], { cwd: temp, windowsHide: true });
+    assert.equal(await resolveCheckedOutCommit(worktree), second, "a linked worktree must resolve its own HEAD");
+    assert.ok(pinnedReadmeLinks(transformPackagedReadme(readme, await resolveCheckedOutCommit(worktree)))
+      .every((url) => url.pathname.split("/")[4] === second));
+    execFileSync("git", ["checkout", "--quiet", "-b", "merge-proof", second], { cwd: temp, windowsHide: true });
+    execFileSync("git", ["checkout", "--quiet", "-b", "incoming", first], { cwd: temp, windowsHide: true });
+    commitGitFixture(temp, "incoming");
+    execFileSync("git", ["checkout", "--quiet", "merge-proof"], { cwd: temp, windowsHide: true });
+    execFileSync("git", ["-c", "user.name=VSIX Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false", "merge", "--quiet", "--no-ff", "-m", "merge proof", "incoming"], { cwd: temp, windowsHide: true });
+    const merged = await resolveCheckedOutCommit(temp);
+    assert.notEqual(merged, first); assert.notEqual(merged, second);
+    assert.ok(pinnedReadmeLinks(transformPackagedReadme(readme, merged)).every((url) => url.pathname.split("/")[4] === merged), "a subsequent merge uses its actual commit, never a configured SHA");
   } finally {
     await fs.rm(temp, { recursive: true, force: true });
   }
@@ -274,7 +295,7 @@ test("packaged README transformation is exact, HEAD-bound and fails closed", asy
     false,
   );
   assert.equal(transformPackagedReadme(sourceReadme, EXPECTED_SOURCE_REF), expectedPackagedReadme(sourceReadme));
-  assertEightPinnedReadmeLinks(transformPackagedReadme(sourceReadme, EXPECTED_SOURCE_REF));
+  assertAllPinnedReadmeLinks(transformPackagedReadme(sourceReadme, EXPECTED_SOURCE_REF));
 
   const missingHero = sourceReadme.replace(
     'src="images/codex-project-chat-exporter-hero.png"',
@@ -289,6 +310,508 @@ test("packaged README transformation is exact, HEAD-bound and fails closed", asy
     () => transformPackagedReadme(`${sourceReadme}\n[unexpected](EXTRA.md)\n`, EXPECTED_SOURCE_REF),
     /Unmapped relative VSIX README target/,
   );
+});
+
+test("all repository content URL forms bind paths structurally while preserving encoded suffixes", async () => {
+  const readme = await fs.readFile(path.join(extensionRoot, "README.md"), "utf8");
+  const base = PACKAGED_README_REPOSITORY_URL;
+  const otherCommit = "b".repeat(40);
+  const cases = [
+    ...["FAQ.md", "SECURITY.md", "docs/archive-format-v1.md", "new/future-file.md"].map((file) => [`${base}/blob/main/${file}`, `${base}/blob/${EXPECTED_SOURCE_REF}/${file}`]),
+    [`${base}/raw/main/images/new.svg`, `${base}/raw/${EXPECTED_SOURCE_REF}/images/new.svg`],
+    [`${base}/tree/main/docs`, `${base}/tree/${EXPECTED_SOURCE_REF}/docs`],
+    [`${base}/tree/main/docs/`, `${base}/tree/${EXPECTED_SOURCE_REF}/docs/`],
+    [`${base}/blob/${otherCommit}/README.md`, `${base}/blob/${EXPECTED_SOURCE_REF}/README.md`],
+    [`https://raw.githubusercontent.com/Ann-Diana/codex-project-chat-exporter/main/images/new.svg`, `https://raw.githubusercontent.com/Ann-Diana/codex-project-chat-exporter/${EXPECTED_SOURCE_REF}/images/new.svg`],
+    [`${base}/blob/main/docs/a%20b%23%3F%25%2B%C3%A4.md?raw=1&name=a%2Bb+main&next=%2Fmain#section-main%20%C3%A4`, `${base}/blob/${EXPECTED_SOURCE_REF}/docs/a%20b%23%3F%25%2B%C3%A4.md?raw=1&name=a%2Bb+main&next=%2Fmain#section-main%20%C3%A4`],
+    [`${base}/blob/main/docs/name(1).md?value=(main)#part(2)`, `${base}/blob/${EXPECTED_SOURCE_REF}/docs/name(1).md?value=(main)#part(2)`],
+    [`${base}/blob/main/docs/ä.md?name=ä#ä`, `${base}/blob/${EXPECTED_SOURCE_REF}/docs/%C3%A4.md?name=%C3%A4#%C3%A4`],
+    [`${base}#readme`, `${base}/tree/${EXPECTED_SOURCE_REF}#readme`],
+  ];
+  for (const [source, expected] of cases) {
+    const result = transformPackagedReadme(`${readme}\n[probe](${source})`, EXPECTED_SOURCE_REF);
+    const line = result.split("\n").at(-1);
+    assert.equal(line.slice(0, 8), "[probe]("); assert.equal(line.at(-1), ")");
+    const actualUrl = new URL(markdownLinkTargets(line)[0]), expectedUrl = new URL(expected);
+    for (const key of ["protocol", "hostname", "username", "password", "port", "pathname", "search", "hash"]) assert.equal(actualUrl[key], expectedUrl[key], `${source}: ${key}`);
+    assert.equal(actualUrl.href, expected);
+  }
+});
+
+test("external URLs and deliberately live services are unchanged even with main or repository decoys", async () => {
+  const readme = await fs.readFile(path.join(extensionRoot, "README.md"), "utf8");
+  const base = PACKAGED_README_REPOSITORY_URL;
+  const targets = [
+    base, `${base}/`, ...["issues", "pull/13", "pulls", "actions/workflows/test.yml", "releases/tag/v0.4.0", "discussions", "security"].map((route) => `${base}/${route}?ref=main#main`),
+    "https://marketplace.visualstudio.com/items?itemName=ann-diana.codex-project-chat-exporter-vscode",
+    "https://img.shields.io/github/actions/workflow/status/Ann-Diana/codex-project-chat-exporter/test.yml?branch=main",
+    `${base}/issues?next=${base}/blob/main/FAQ.md#main`,
+    `https://example.test/?next=${base}/blob/main/FAQ.md#main`,
+    `https://example.test/#${base}/blob/main/FAQ.md`,
+    "https://main.example.test/Ann-Diana/codex-project-chat-exporter/blob/main/FAQ.md",
+    "https://github.com.evil.example/Ann-Diana/codex-project-chat-exporter/blob/main/FAQ.md",
+    "https://github.com@evil.example/Ann-Diana/codex-project-chat-exporter/blob/main/FAQ.md",
+    "https://github.com/other/repository/blob/main/FAQ.md", "http://example.test/main?ref=main#main", "mailto:info@example.test", "#main",
+  ];
+  for (const target of targets) {
+    const result = transformPackagedReadme(`${readme}\n[probe](${target})`, EXPECTED_SOURCE_REF);
+    const actual = result.split("\n").at(-1).slice(8, -1);
+    assert.equal(actual, target);
+    if (!target.startsWith("#")) assert.deepEqual(new URL(actual), new URL(target));
+  }
+});
+
+test("reference and quoted HTML destinations are bound without corrupting URL encoding", async () => {
+  const readme = await fs.readFile(path.join(extensionRoot, "README.md"), "utf8");
+  const url = `${PACKAGED_README_REPOSITORY_URL}/blob/main/docs/a%20b.md?x=1&y=%26#main`;
+  const expected = new URL(url); expected.pathname = `/Ann-Diana/codex-project-chat-exporter/blob/${EXPECTED_SOURCE_REF}/docs/a%20b.md`;
+  for (const [input, extract] of [
+    [`[probe](<${url}> "title")`, (line) => markdownLinkTargets(line)[0]],
+    [`[ref]: <${url}> "title"`, (line) => markdownLinkTargets(line)[0]],
+    [`<a href='${url.replaceAll("&", "&amp;")}' title="main">`, (line) => xml2js(line.slice(0, -1) + "/>", { compact: true }).a._attributes.href],
+    [`<a href="${url}">`, (line) => xml2js(line.slice(0, -1) + "/>", { compact: true }).a._attributes.href],
+    [`<img src="${url.replaceAll("&", "&amp;")}" alt='literal href="main"'>`, (line) => xml2js(line.slice(0, -1) + "/>", { compact: true }).img._attributes.src],
+  ]) {
+    const result = transformPackagedReadme(`${readme}\n${input}`, EXPECTED_SOURCE_REF);
+    assert.equal(new URL(extract(result.split("\n").at(-1))).href, expected.href);
+  }
+  const external = '<a href="https://example.test/?a=1&b=main">';
+  assert.equal(transformPackagedReadme(`${readme}\n${external}`, EXPECTED_SOURCE_REF).split("\n").at(-1), external);
+  const entities = `<a href="${PACKAGED_README_REPOSITORY_URL}/blob/main/FAQ.md?q=&quot;A&quot;&amp;v=&#x2B;#main">`;
+  const bound = transformPackagedReadme(`${readme}\n${entities}`, EXPECTED_SOURCE_REF).split("\n").at(-1);
+  const parsed = new URL(xml2js(bound.slice(0, -1) + "/>", { compact: true }).a._attributes.href);
+  assert.equal(parsed.pathname, `/Ann-Diana/codex-project-chat-exporter/blob/${EXPECTED_SOURCE_REF}/FAQ.md`);
+  assert.equal(parsed.search, "?q=%22A%22&v=+"); assert.equal(parsed.hash, "#main");
+  assert.throws(() => transformPackagedReadme(`${readme}\n<a href="${url}&unknown=&bogus;">`, EXPECTED_SOURCE_REF), /entity/);
+});
+
+test("approved relative README files retain query, fragment and HTML entity semantics", async () => {
+  const readme = await fs.readFile(path.join(extensionRoot, "README.md"), "utf8");
+  const changed = readme
+    .replace('src="images/codex-project-chat-exporter-hero.png"', 'src="images/codex-project-chat-exporter-hero.png?x=1&amp;y=%26#main"')
+    .replace("](LICENSE)", "](LICENSE?download=a%2Bb+main#license%20%C3%A4)");
+  const result = transformPackagedReadme(changed, EXPECTED_SOURCE_REF);
+  const image = xml2js(result.slice(result.indexOf("<img"), result.indexOf(">", result.indexOf("<img"))) + "/>", { compact: true });
+  const imageUrl = new URL(image.img._attributes.src);
+  assert.equal(imageUrl.pathname, `/Ann-Diana/codex-project-chat-exporter/raw/${EXPECTED_SOURCE_REF}/integrations/vscode/images/codex-project-chat-exporter-hero.png`);
+  assert.equal(imageUrl.search, "?x=1&y=%26"); assert.equal(imageUrl.hash, "#main");
+  const license = markdownLinkTargets(result).map((target) => new URL(target, "https://anchor.invalid")).find((url) => url.searchParams.has("download"));
+  assert.equal(license.pathname, `/Ann-Diana/codex-project-chat-exporter/blob/${EXPECTED_SOURCE_REF}/integrations/vscode/LICENSE`);
+  assert.equal(license.search, "?download=a%2Bb+main"); assert.equal(license.hash, "#license%20%C3%A4");
+});
+
+test("unknown or ambiguous own-repository URLs fail closed instead of guessing ref boundaries", async () => {
+  const readme = await fs.readFile(path.join(extensionRoot, "README.md"), "utf8");
+  const base = PACKAGED_README_REPOSITORY_URL;
+  for (const target of [
+    `${base}/unknown/main/FAQ.md`, `${base}/blob/feature/branch/FAQ.md`, `${base}/blob/v0.4.0/FAQ.md`, `${base}/blob?ref=main`, `${base}/blob/main`, `${base}/blob/main//FAQ.md`,
+    `${base}/blob/main/../FAQ.md`, `${base}/blob/main/%2e%2e/FAQ.md`, `${base}/blob/main/docs%2fFAQ.md`, `${base}/blob/main/docs%5cFAQ.md`, `${base}/blob/main/%00FAQ.md`, `${base}/blob/main/%GG.md`,
+    "https://github.com/Ann-Diana%2fcodex-project-chat-exporter/blob/main/FAQ.md",
+    `${base}/blob/main\\FAQ.md`, "https://user:password@github.com/Ann-Diana/codex-project-chat-exporter/blob/main/FAQ.md",
+    "https://github.com:444/Ann-Diana/codex-project-chat-exporter/blob/main/FAQ.md", base.replace("https:", "http:") + "/blob/main/FAQ.md",
+    "https://github.com./Ann-Diana/codex-project-chat-exporter/blob/main/FAQ.md", "https://www.github.com/Ann-Diana/codex-project-chat-exporter/blob/main/FAQ.md",
+    "https:github.com/Ann-Diana/codex-project-chat-exporter/blob/main/FAQ.md",
+    "https://raw.githubusercontent.com/Ann-Diana/codex-project-chat-exporter/feature/branch/FAQ.md",
+  ]) assert.throws(() => transformPackagedReadme(`${readme}\n[probe](${target})`, EXPECTED_SOURCE_REF), /VSIX README|URL encoding/, target);
+  assert.throws(() => transformPackagedReadme(`${readme}\n<a href="${base}/blob/main/FAQ.md" href="${base}/blob/main/SECURITY.md">`, EXPECTED_SOURCE_REF), /Duplicate/);
+  for (const suffix of [
+    `${base}/blob/main/FAQ.md`,
+    `> [quoted-ref]: ${base}/blob/main/FAQ.md`,
+    `[unclosed](${base}/blob/main/FAQ.md`,
+    `<a href="${base}/blob/main/FAQ.md"`,
+  ]) assert.throws(() => transformPackagedReadme(`${readme}\n${suffix}`, EXPECTED_SOURCE_REF), /VSIX README/);
+});
+
+test("the builder cleans its stage and produces no package for an ambiguous repository README URL", async () => {
+  const temp = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "packaged-vsix-ambiguous-readme-")));
+  try {
+    const fixture = path.join(temp, "extension"); await copyExtensionFixture(fixture);
+    await fs.appendFile(path.join(fixture, "README.md"), `\n[ambiguous](${PACKAGED_README_REPOSITORY_URL}/blob/feature/branch/FAQ.md)\n`);
+    const distDir = path.join(temp, "dist");
+    await assert.rejects(() => buildVsix({ extensionRoot: fixture, distDir }), /Ambiguous or unsupported VSIX README repository URL/);
+    assert.deepEqual(await fs.readdir(distDir), []);
+  } finally { await fs.rm(temp, { recursive: true, force: true }); }
+});
+
+test("R-01 parser semantics bind numeric, named and escaped Markdown targets exactly once", async () => {
+  const readme = await fs.readFile(path.join(extensionRoot, "README.md"), "utf8");
+  const base = PACKAGED_README_REPOSITORY_URL;
+  const semantic = `${base}/blob/main/FAQ.md`;
+  const expected = `${base}/blob/${EXPECTED_SOURCE_REF}/FAQ.md`;
+  const spellings = [
+    semantic.replace("Ann-Diana", "Ann&#45;Diana"),
+    semantic.replace("Ann-Diana", "Ann&#x2D;Diana"),
+    semantic.replace("Ann-Diana", "Ann&#X2d;Diana"),
+    semantic.replace("github.com", "github&#46;com"),
+    semantic.replace("github.com", "git&#x68;ub.com"),
+    semantic.replace("github.com", "github&period;com"),
+    semantic.replace("codex-project", "codex&#45;project").replace("main", "m&#97;in"),
+    semantic.replace("https://", "https&colon;&sol;&sol;").replace("/FAQ.md", "&sol;FAQ.md"),
+    semantic.replace("Ann-Diana", String.raw`Ann\-Diana`),
+    semantic.replace("https:", String.raw`https\:`).replace("github.com", String.raw`github\.com`),
+    semantic.replace("Ann-Diana", String.raw`Ann\-Diana`).replace("github.com", "github&#x2E;com"),
+  ];
+  for (const spelling of spellings) {
+    for (const snippet of [
+      `[probe](${spelling} "unchanged title")`, `[probe](<${spelling}>)`, `![probe](${spelling})`,
+      `[probe][r01]\n\n[r01]: <${spelling}> "unchanged title"`,
+      `![r01][]\n\n[r01]: ${spelling}`, `[r01]\n\n[r01]: ${spelling}`,
+    ]) {
+      assert.deepEqual(markdownLinkTargets(snippet), [semantic], snippet);
+      const output = transformPackagedReadme(`${readme}\n\n${snippet}`, EXPECTED_SOURCE_REF);
+      assert.equal(markdownLinkTargets(output).at(-1), expected, snippet);
+      assert.equal(new URL(markdownLinkTargets(output).at(-1)).pathname.split("/")[4], EXPECTED_SOURCE_REF);
+    }
+  }
+});
+
+test("R-01 entity suffixes, delimiters, titles and repeated source ranges survive reparsing", async () => {
+  const readme = await fs.readFile(path.join(extensionRoot, "README.md"), "utf8");
+  const base = PACKAGED_README_REPOSITORY_URL;
+  const cases = [
+    [`${base}/blob/main/a\\(1\\).md?q=&NotEqualTilde;&amp;v=&#43;#&#x3B1;`, `${base}/blob/main/a(1).md?q=≂̸&v=+#α`],
+    [`${base}/blob/main/FAQ.md?q=&amp;copy;&amp;d=&amp;#45;#&amp;period;`, `${base}/blob/main/FAQ.md?q=&copy;&d=&#45;#&period;`],
+    [`${base}/blob/main/FAQ.md?q=&bogus;&amp;unfinished=&#xZZ;#&incomplete`, `${base}/blob/main/FAQ.md?q=&bogus;&unfinished=&#xZZ;#&incomplete`],
+    [`${base}/blob/main/FAQ.md?q=&#x3c;x&#x3e;#&#x22;`, `${base}/blob/main/FAQ.md?q=<x>#"`],
+  ];
+  for (const [spelling, semantic] of cases) {
+    const snippet = `[probe](<${spelling}> 'a &quot;title&quot;')`;
+    assert.equal(markdownLinkTargets(snippet)[0], semantic);
+    const expected = new URL(semantic); expected.pathname = expected.pathname.replace("/main/", `/${EXPECTED_SOURCE_REF}/`);
+    const output = transformPackagedReadme(`${readme}\n\n${snippet}\n\n${snippet}`, EXPECTED_SOURCE_REF);
+    const actual = markdownLinkTargets(output).slice(-2);
+    assert.deepEqual(actual.map((value) => new URL(value).href), [expected.href, expected.href]);
+    assert.equal(fromMarkdown(output).children.at(-1).children[0].title, 'a "title"');
+  }
+  const code = `\n\n\`\`\`md\n[not a link](${base}/blob/main/FAQ.md)\n\`\`\`\n`;
+  assert.equal(transformPackagedReadme(readme + code, EXPECTED_SOURCE_REF), transformPackagedReadme(readme, EXPECTED_SOURCE_REF) + code);
+});
+
+test("R-01 external and live spellings remain byte-exact without recursive decoding", async () => {
+  const readme = await fs.readFile(path.join(extensionRoot, "README.md"), "utf8");
+  const base = PACKAGED_README_REPOSITORY_URL;
+  for (const spelling of [
+    "https://example&period;test/?q=&copy;#&#45;",
+    "https://example.test/?q=&amp;amp;copy;#&amp;copy;",
+    "https://github&#46;com.evil.example/Ann-Diana/codex-project-chat-exporter/blob/main/FAQ.md",
+    "https://github.com&#64;evil.example/Ann-Diana/codex-project-chat-exporter/blob/main/FAQ.md",
+    "https://sub.github.com:444/Ann-Diana/codex-project-chat-exporter/blob/main/FAQ.md",
+    `${base.replace("Ann-Diana", "Ann&hyphen;Diana")}/blob/main/FAQ.md`,
+    `${base.replace("Ann-Diana", "Ann&#45;Diana")}/issues?q=&copy;`,
+    "mailto:info&#64;example.test", "#&#x6D;ain",
+  ]) {
+    const snippet = `[probe](<${spelling}>)`;
+    const result = transformPackagedReadme(`${readme}\n\n${snippet}`, EXPECTED_SOURCE_REF);
+    assert.equal(result.split("\n").at(-1), snippet);
+    assert.equal(markdownLinkTargets(result).at(-1), markdownLinkTargets(snippet)[0]);
+  }
+  const autolink = `<${base}/blob/main/FAQ.md?x=&amp;copy;>`;
+  assert.equal(markdownLinkTargets(autolink)[0], `${base}/blob/main/FAQ.md?x=&amp;copy;`, "mdast autolinks do not decode entities");
+  assert.throws(() => transformPackagedReadme(`${readme}\n\n${autolink}`, EXPECTED_SOURCE_REF), { code: "VSIX_README_AMBIGUOUS_AUTOLINK" });
+});
+
+test("R-01 malformed identities, ambiguous definitions and encoded active schemes fail closed", async () => {
+  const readme = await fs.readFile(path.join(extensionRoot, "README.md"), "utf8");
+  const base = PACKAGED_README_REPOSITORY_URL;
+  for (const spelling of [
+    ...["Ann&amp;#45;Diana", "Ann&amp;amp;#45;Diana", "Ann&#45Diana", "Ann&bogus;Diana", "Ann&#xZZ;Diana", "Ann&#x110000;Diana"].map((owner) => `${base.replace("Ann-Diana", owner)}/blob/main/FAQ.md`),
+    "https://github&#46com/Ann-Diana/codex-project-chat-exporter/blob/main/FAQ.md",
+    `${base.replace("github.com", "user&#64;github.com")}/blob/main/FAQ.md`,
+    `${base.replace("github.com", "github.com&#58;444")}/blob/main/FAQ.md`,
+    `${base.replace("github.com", "www&#46;github.com")}/blob/main/FAQ.md`,
+    `${base.replace("Ann-Diana", String.raw`Ann\\-Diana`)}/blob/main/FAQ.md`,
+    "javascript:alert%281%29", "java&#115;cript&colon;alert%281%29", String.raw`javascript\:alert%281%29`,
+    "java&#9;script:alert%281%29", "data&colon;text/html,test", "file&colon;/etc/passwd",
+    "command&colon;workbench.action.openSettings", "vscode&colon;//file/test", "vbscript:msgbox%281%29",
+    "javascript&amp;colon;alert%281%29", "&#0;https://example.test", "https://example.test/&#xD800;",
+  ]) assert.throws(() => transformPackagedReadme(`${readme}\n\n[probe](<${spelling}>)`, EXPECTED_SOURCE_REF), /VSIX README/, spelling);
+  for (const snippet of [
+    `<${base.replace("github.com", "github&#46;com")}/blob/main/FAQ.md>`,
+    `<${base.replace("Ann-Diana", "Ann&#45;Diana")}/blob/main/FAQ.md>`,
+    `[x][same]\n\n[same]: ${base}/blob/main/FAQ.md\n[SAME]: https://example.test/`,
+    `[empty]()`, `<a href="${base}/blob/main/FAQ.md?x=&not">`,
+    `<a href="${base}/blob/main/FAQ.md?x=&Amp;">`,
+  ]) assert.throws(() => transformPackagedReadme(`${readme}\n\n${snippet}`, EXPECTED_SOURCE_REF), /VSIX README/, snippet);
+});
+
+function ambiguousAutolinkTargets() {
+  const url = `${PACKAGED_README_REPOSITORY_URL}/blob/main/FAQ.md`;
+  return [
+    // Renderer-dependent single/double decoding and backslash spellings.
+    ...["&amp;copy;", "&#38;copy;", "&#x26;copy;", "&amp;amp;copy;", String.raw`\&copy;`,
+      "&copy;", "&amp;&#45;", "&", "&unfinished", "&#", "&#45", "&#x", "&#xZZ;", "&bogus;", "1&y=2",
+    ].map((value) => `${url}?q=${value}`),
+    `${url}#&#45;`, `${url}#&copy;`, `${url}#fragment&`,
+    url.replace("Ann-Diana", "Ann&#45;Diana"), url.replace("Ann-Diana", "Ann&#x2D;Diana"),
+    url.replace("github.com", "github&period;com"), url.replace("github.com", "github&#46;com"),
+    url.replace("github.com", "git&#x68;ub.com"), url.replace("Ann-Diana", String.raw`Ann\-Diana`),
+    url.replace("github.com", "github&#46;com").replace("Ann-Diana", String.raw`Ann\-Diana`),
+    "https://example.test/?q=&amp;copy;", "https://example.test/?q=1&next=2",
+    String.raw`https://example.test/a\b`, `${PACKAGED_README_REPOSITORY_URL}/issues?q=&copy;`,
+    "javascript:alert&#40;1&#41;", String.raw`data:text/html,\script`,
+  ];
+}
+
+function assertAmbiguousAutolink(error) {
+  assert.equal(error.code, "VSIX_README_AMBIGUOUS_AUTOLINK");
+  assert.match(error.message, /use a normal Markdown link with an unambiguous URL instead/);
+  return true;
+}
+
+test("R-01 autolinks reject raw ampersands and backslashes before any renderer decoding", async () => {
+  const readme = await fs.readFile(path.join(extensionRoot, "README.md"), "utf8");
+  for (const target of ambiguousAutolinkTargets()) {
+    const snippet = `<${target}>`;
+    assert.equal(fromMarkdown(snippet).children[0].children[0].type, "link", snippet);
+    assert.throws(() => transformPackagedReadme(`${readme}\n\n${snippet}`, EXPECTED_SOURCE_REF), assertAmbiguousAutolink, snippet);
+  }
+  // Angle brackets around an ordinary Markdown destination are not autolinks.
+  const spelling = `${PACKAGED_README_REPOSITORY_URL.replace("Ann-Diana", String.raw`Ann\-Diana`)}/blob/main/FAQ.md?q=&amp;copy;`;
+  const expected = `${PACKAGED_README_REPOSITORY_URL}/blob/${EXPECTED_SOURCE_REF}/FAQ.md?q=&copy;`;
+  for (const snippet of [`[FAQ](<${spelling}>)`, `![FAQ](<${spelling}>)`, `[FAQ][r]\n\n[r]: <${spelling}>`]) {
+    assert.equal(markdownLinkTargets(transformPackagedReadme(`${readme}\n\n${snippet}`, EXPECTED_SOURCE_REF)).at(-1), expected);
+  }
+  const code = `\n\n\`<${ambiguousAutolinkTargets()[0]}>\``;
+  assert.equal(transformPackagedReadme(readme + code, EXPECTED_SOURCE_REF), transformPackagedReadme(readme, EXPECTED_SOURCE_REF) + code);
+});
+
+test("R-01 unambiguous and percent-encoded autolinks retain structural URL classification", async () => {
+  const readme = await fs.readFile(path.join(extensionRoot, "README.md"), "utf8");
+  const base = PACKAGED_README_REPOSITORY_URL;
+  for (const target of [
+    `${base}/blob/main/FAQ.md`, `${base}/blob/main/a%20b.md?q=%26amp%3Bcopy%3B#%5Cmain`,
+    `${base.replace("github.com", "%67ithub.com")}/blob/main/FAQ.md?q=%2526copy%253B`,
+    `${base.replace("Ann-Diana", "Ann%2DDiana")}/blob/main/FAQ.md?x=main#main`,
+  ]) {
+    const output = transformPackagedReadme(`${readme}\n\n<${target}>`, EXPECTED_SOURCE_REF);
+    const actual = new URL(markdownLinkTargets(output).at(-1)), original = new URL(target);
+    assert.equal(actual.hostname, "github.com");
+    assert.equal(actual.pathname, original.pathname.replace("/main/", `/${EXPECTED_SOURCE_REF}/`));
+    assert.equal(actual.search, original.search); assert.equal(actual.hash, original.hash);
+  }
+  for (const target of [
+    "https://example.test/?q=%26copy%3B#%5C", "https://example.test/?q=%2526copy%253B",
+    "https://github.com.evil.example/Ann-Diana/codex-project-chat-exporter/blob/main/FAQ.md",
+    "https://github.com%40evil.example@other.example/Ann-Diana/codex-project-chat-exporter/blob/main/FAQ.md",
+    "https://sub.github.com:444/Ann-Diana/codex-project-chat-exporter/blob/main/FAQ.md",
+    `${base}/issues?q=%26copy%3B`, "https://marketplace.visualstudio.com/items?itemName=ann-diana.codex-project-chat-exporter-vscode",
+  ]) {
+    const snippet = `<${target}>`;
+    const result = transformPackagedReadme(`${readme}\n\n${snippet}`, EXPECTED_SOURCE_REF);
+    assert.equal(result.split("\n").at(-1), snippet);
+    assert.equal(markdownLinkTargets(result).at(-1), target);
+  }
+  for (const target of [
+    `${base.replace("github.com", "user%40evil.example@github.com")}/blob/main/FAQ.md`,
+    `${base.replace("github.com", "%67ithub.com:444")}/blob/main/FAQ.md`,
+    "javascript:alert%281%29", "data:text/html,test", "file:/etc/passwd", "command:workbench.action.openSettings",
+  ]) assert.throws(() => transformPackagedReadme(`${readme}\n\n<${target}>`, EXPECTED_SOURCE_REF), /VSIX README/, target);
+});
+
+test("R-01 every ambiguous autolink aborts the real builder before archive creation and leaves an empty target", async () => {
+  const temp = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "packaged-vsix-autolink-")));
+  try {
+    const fixture = path.join(temp, "extension"); await copyExtensionFixture(fixture);
+    const readme = await fs.readFile(path.join(fixture, "README.md"), "utf8");
+    let archiveCalls = 0;
+    for (const [index, target] of ambiguousAutolinkTargets().entries()) {
+      await fs.writeFile(path.join(fixture, "README.md"), `${readme}\n\n<${target}>\n`);
+      const distDir = path.join(temp, `dist-${index}`); await fs.mkdir(distDir);
+      assert.deepEqual(await fs.readdir(distDir), []);
+      await assert.rejects(() => buildVsix({
+        extensionRoot: fixture, distDir,
+        archiveWriter: async () => { archiveCalls++; throw new Error("Archive writer must not be called"); },
+      }), assertAmbiguousAutolink, target);
+      assert.equal(archiveCalls, 0);
+      assert.deepEqual(await fs.readdir(distDir), [], "no VSIX, partial archive or staging directory may remain");
+    }
+  } finally { await fs.rm(temp, { recursive: true, force: true }); }
+});
+
+function rendererAmbiguousSnippets() {
+  const base = PACKAGED_README_REPOSITORY_URL;
+  const snippets = [];
+  for (const target of [
+    ...["\\&copy;", "\\&#45;", "\\&#x2D;", "\\&NotEqualTilde;", "\\&amp;copy;"].map((value) => `${base}/blob/main/FAQ.md?q=${value}#${value}`),
+    "https://example.test/?q=\\&copy;", `${base}/issues?q=\\&#45;`,
+    "https://example.test/?q=&amp;amp;copy;#\\&copy;",
+    `${base}/blob/main/FAQ.md?q=\\&copy;#\\&#45;`,
+    "https://github.com.evil.example/?q=\\&copy;", "https://example.test/?q=\\&NewLine;",
+  ]) {
+    snippets.push(`[probe](<${target}>)`, `![probe](${target})`, `[probe][r]\n\n[r]: <${target}>`);
+  }
+  return snippets.concat([
+    "https://example.test/", "www.example.test", "[x](https://example.test/) www.other.test",
+    '<p src="https://example.test/image">unsupported resource</p>',
+    '<img src="https://example.test/image" srcset="https://other.test/image 2x">',
+    '![a [b](https://example.test/inner)](https://example.test/image)',
+  ]);
+}
+
+test("R-01 dual-parser gate rejects entity, occurrence and source mapping differences", async () => {
+  const readme = await fs.readFile(path.join(extensionRoot, "README.md"), "utf8");
+  for (const snippet of rendererAmbiguousSnippets()) {
+    assert.throws(() => transformPackagedReadme(`${readme}\n\n${snippet}`, EXPECTED_SOURCE_REF), { code: "VSIX_README_RENDERER_AMBIGUITY" }, snippet);
+  }
+  // The lexer alone does not expose the effective HTML target: the renderer
+  // preserves &copy;, which HTML interprets as © after the Markdown escape.
+  const marked = new Marked(), snippet = String.raw`[x](https://example.test/?q=\&copy;)`;
+  assert.equal(marked.lexer(snippet)[0].tokens[0].href, "https://example.test/?q=&copy;");
+  assert.equal(markdownLinkTargets(snippet)[0], "https://example.test/?q=&copy;");
+  assert.throws(() => verifyReadmeRendererAgreement(snippet), { code: "VSIX_README_RENDERER_AMBIGUITY" });
+  for (const spelling of ["&copy;", "&#45;", "&#x2D;", "&amp;copy;", "&amp;amp;copy;", "&bogus;", "&incomplete"]) {
+    const graph = verifyReadmeRendererAgreement(`[x](https://example.test/?q=${spelling}#${spelling})`);
+    assert.equal(graph.mdast.length, 1); assert.equal(graph.marked.length, 1);
+    assert.equal(new URL(graph.mdast[0].url).href, new URL(graph.marked[0].url).href);
+  }
+});
+
+test("R-01 dual-parser graph resolves repeated references, ignores unused definitions and preserves nested occurrence order", async () => {
+  const readme = await fs.readFile(path.join(extensionRoot, "README.md"), "utf8");
+  const snippet = '[a][r] [b][r] ![i][r]\n\n[r]: https://example.test/?q=&copy;\n[unused]: https://example.test/?q=\\&copy;';
+  const graph = verifyReadmeRendererAgreement(snippet);
+  assert.deepEqual(graph.mdast.map(({ kind }) => kind), ["link", "link", "image"]);
+  assert.deepEqual(graph.mdast.map(({ start, end }) => snippet.slice(start, end)), ["[a][r]", "[b][r]", "![i][r]"]);
+  assert.equal(graph.mdast.length, graph.marked.length);
+  assert.equal(transformPackagedReadme(`${readme}\n\n${snippet}`, EXPECTED_SOURCE_REF).endsWith(snippet), true);
+  const nested = '[![image](https://example.test/image)](https://example.test/page)';
+  for (const input of [nested, `${nested}\n\n${nested}`, `\`${nested}\`\n\n${nested}`, `> ${nested}`, `- ${nested}`]) {
+    const result = verifyReadmeRendererAgreement(input);
+    assert.deepEqual(result.mdast.map(({ kind }) => kind), input === `${nested}\n\n${nested}` ? ["link", "image", "link", "image"] : ["link", "image"]);
+    assert.ok(result.mdast.every((node, index) => node.kind === result.marked[index].kind && node.start === result.marked[index].start && node.end === result.marked[index].end));
+    transformPackagedReadme(`${readme}\n\n${input}`, EXPECTED_SOURCE_REF);
+  }
+  assert.deepEqual(verifyReadmeRendererAgreement(snippet.replaceAll("\n", "\r\n")), graph);
+});
+
+test("R-01 raw HTML resources are either fully mapped in both graphs or rejected", async () => {
+  const readme = await fs.readFile(path.join(extensionRoot, "README.md"), "utf8");
+  const base = PACKAGED_README_REPOSITORY_URL;
+  const html = `<div class="note"><a href="${base}/blob/main/FAQ.md?x=1&amp;y=2"><img src="${base}/raw/main/example.png" alt="sample"></a><span>plain</span></div>`;
+  const graph = verifyReadmeRendererAgreement(html);
+  assert.deepEqual(graph.mdast, graph.marked);
+  assert.deepEqual(graph.mdast.map(({ kind }) => kind), ["link", "image"]);
+  const result = transformPackagedReadme(`${readme}\n\n${html}`, EXPECTED_SOURCE_REF);
+  for (const item of verifyReadmeRendererAgreement(result).mdast.slice(-2)) assert.equal(new URL(item.url).pathname.split("/")[4], EXPECTED_SOURCE_REF);
+  for (const presentation of ['<div class="note"><span>plain</span></div>', '<p><strong>plain</strong><br><em>text</em></p>']) {
+    assert.deepEqual(verifyReadmeRendererAgreement(presentation), { mdast: [], marked: [] });
+    assert.ok(transformPackagedReadme(`${readme}\n\n${presentation}`, EXPECTED_SOURCE_REF).endsWith(presentation));
+  }
+  for (const invalid of [`<img src=${base}/raw/main/a.png>`, `<a href="${base}/blob/main/FAQ.md" href="https://example.test/">`, '<svg><a href="https://example.test/">x</a></svg>']) {
+    assert.throws(() => transformPackagedReadme(`${readme}\n\n${invalid}`, EXPECTED_SOURCE_REF), /VSIX README/);
+  }
+});
+
+test("R-01 dual-parser gate detects count, kind and order drift at the rendering boundary", () => {
+  const source = "[one](https://example.test/one) [two](https://example.test/two)";
+  const original = Marked.prototype.parser;
+  for (const change of [
+    (tokens) => tokens.reverse(),
+    (tokens) => tokens.pop(),
+    (tokens) => { tokens[0].type = "image"; },
+  ]) {
+    try {
+      // Fault injection after source mapping proves that agreement is checked
+      // against emitted occurrences, not merely the lexer's token inventory.
+      Marked.prototype.parser = function (tokens, options) {
+        change(tokens[0].tokens);
+        return original.call(this, tokens, options);
+      };
+      assert.throws(() => verifyReadmeRendererAgreement(source), { code: "VSIX_README_RENDERER_AMBIGUITY" });
+    } finally { Marked.prototype.parser = original; }
+  }
+  assert.equal(verifyReadmeRendererAgreement(source).mdast.length, 2);
+});
+
+test("R-01 every dual-parser rejection stops the real builder without a package or staging residue", async () => {
+  const temp = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "packaged-vsix-dual-parser-")));
+  try {
+    const fixture = path.join(temp, "extension"); await copyExtensionFixture(fixture);
+    const readme = await fs.readFile(path.join(fixture, "README.md"), "utf8");
+    let archives = 0;
+    for (const [index, snippet] of rendererAmbiguousSnippets().entries()) {
+      await fs.writeFile(path.join(fixture, "README.md"), `${readme}\n\n${snippet}\n`);
+      const distDir = path.join(temp, `dist-${index}`); await fs.mkdir(distDir);
+      await assert.rejects(() => buildVsix({ extensionRoot: fixture, distDir, archiveWriter: async () => { archives++; } }), { code: "VSIX_README_RENDERER_AMBIGUITY" }, snippet);
+      assert.equal(archives, 0); assert.deepEqual(await fs.readdir(distDir), []);
+    }
+  } finally { await fs.rm(temp, { recursive: true, force: true }); }
+});
+
+test("R-01 the rewritten README is gated again before the archive writer can run", async () => {
+  const temp = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "packaged-vsix-renderer-recheck-")));
+  const original = Marked.prototype.parser;
+  let injected = 0, archives = 0;
+  try {
+    Marked.prototype.parser = function (tokens, options) {
+      this.walkTokens(tokens, (token) => {
+        if (token.type !== "link") return;
+        let url; try { url = new URL(token.href); } catch { return; }
+        if (url.pathname.split("/").includes(EXPECTED_SOURCE_REF)) { token.href = "https://example.test/changed"; injected++; }
+      });
+      return original.call(this, tokens, options);
+    };
+    await assert.rejects(() => buildVsix({ distDir: temp, archiveWriter: async () => { archives++; } }), { code: "VSIX_README_RENDERER_AMBIGUITY" });
+    assert.ok(injected > 0); assert.equal(archives, 0); assert.deepEqual(await fs.readdir(temp), []);
+  } finally { Marked.prototype.parser = original; await fs.rm(temp, { recursive: true, force: true }); }
+});
+
+test("R-01 all 22 real README targets are parsed and exactly 12 content targets are pinned", async () => {
+  const source = await fs.readFile(path.join(extensionRoot, "README.md"), "utf8");
+  const result = transformPackagedReadme(source, EXPECTED_SOURCE_REF);
+  const sourceTargets = [...markdownLinkTargets(source), ...htmlImageSources(source)];
+  const resultTargets = [...markdownLinkTargets(result), ...htmlImageSources(result)];
+  assert.equal(sourceTargets.length, 22); assert.equal(resultTargets.length, 22);
+  assertAllPinnedReadmeLinks(result);
+  assert.equal(resultTargets.filter((target, index) => target !== sourceTargets[index]).length, 12);
+  assert.equal(result, expectedPackagedReadme(source));
+  const before = verifyReadmeRendererAgreement(source), after = verifyReadmeRendererAgreement(result);
+  assert.equal(before.mdast.length, 22); assert.equal(before.marked.length, 22);
+  for (const parser of ["mdast", "marked"]) {
+    assert.equal(after[parser].length, 22);
+    const changed = after[parser].filter((target, index) => target.url !== before[parser][index].url);
+    assert.equal(changed.length, 12);
+    for (const target of changed) {
+      const url = new URL(target.url);
+      assert.equal(url.hostname, "github.com");
+      assert.equal(url.pathname.split("/")[4], EXPECTED_SOURCE_REF);
+    }
+  }
+});
+
+test("build-only manifest projection preserves mixed line endings and rejects duplicate keys", async () => {
+  const temp = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "packaged-vsix-dev-manifests-")));
+  try {
+    const fixture = path.join(temp, "repo");
+    for (const dir of ["bin", "lib", "fonts"]) await fs.mkdir(path.join(fixture, dir), { recursive: true });
+    for (const name of ["OFL.txt", "OFL-SYMBOLS.txt", "OFL-EMOJI.txt"]) await fs.writeFile(path.join(fixture, "fonts", name), "fixture license\n");
+    await fs.writeFile(path.join(fixture, "LICENSE"), "MIT\n");
+    await fs.writeFile(path.join(fixture, "bin", "export-codex-project-chats.mjs"), "export function exportArchive() {}\n");
+    initializeGitFixture(fixture);
+    const productionPackage = '{\r\n  "name": "fixture",\n  "version": "1.0.0",\r\n  "type": "module",\n  "custom": ["literal \\\"devDependencies\\\": {}", {"quoted": "\\\\"}],\r\n  "dependencies": {}\r\n}\n';
+    const productionLock = '{\n  "lockfileVersion": 3,\r\n  "packages": {\r\n    "": {"name": "fixture", "dependencies": {}}\n  }\r\n}\n';
+    const dev = '"devDependencies": {"parser": "1.0.0"}';
+    const packageVariants = [
+      productionPackage.replace('{', `{ ${dev},`),
+      productionPackage.replace('  "dependencies":', `  ${dev},\r\n  "dependencies":`),
+      productionPackage.replace('"dependencies": {}', `"dependencies": {},\r\n  ${dev}`),
+    ];
+    const lock = productionLock.replace('"name": "fixture"', `${dev},"name": "fixture"`)
+      .replace('    "":', '    "node_modules/parser-a": {"dev": true},\r\n    "":')
+      .replace('"dependencies": {}}', '"dependencies": {}},\r\n    "node_modules/parser-z": {"dev": true}');
+    for (let index = 0; index < packageVariants.length; index++) {
+      await fs.writeFile(path.join(fixture, "package.json"), packageVariants[index]);
+      await fs.writeFile(path.join(fixture, "package-lock.json"), lock);
+      const result = await buildVsix({ repoRoot: fixture, distDir: path.join(temp, `dist-${index}`) });
+      const zip = await JSZip.loadAsync(await fs.readFile(result.vsixPath), { checkCRC32: true });
+      const prefix = "extension/vendor/codex-project-chat-exporter/";
+      assert.equal(await zip.file(`${prefix}package.json`).async("string"), productionPackage);
+      assert.equal(await zip.file(`${prefix}package-lock.json`).async("string"), productionLock);
+    }
+    await fs.writeFile(path.join(fixture, "package.json"), productionPackage.replace('"dependencies": {}', '"dependencies": {}, "dependencies": {}'));
+    await assert.rejects(() => buildVsix({ repoRoot: fixture, distDir: path.join(temp, "duplicate") }), /Duplicate runtime manifest object key/);
+    assert.deepEqual(await fs.readdir(path.join(temp, "duplicate")), []);
+  } finally { await fs.rm(temp, { recursive: true, force: true }); }
 });
 
 function collectElements(value, name, result = []) {
@@ -436,7 +959,7 @@ test("regular VSIX builds are byte-identical and their packaged runtime exports 
     assert.notEqual(packagedReadme, sourceReadme);
     assert.equal(packagedReadme, expectedPackagedReadme(sourceReadme));
     assertPackagedReadmeTargets(packagedReadme);
-    assertEightPinnedReadmeLinks(packagedReadme);
+    assertAllPinnedReadmeLinks(packagedReadme);
     assert.equal(packagedReadme.includes("../../"), false);
     assert.equal(packagedReadme.includes("before the first publication"), false);
     assert.equal(packagedReadme.includes("is not published in the Visual Studio Code Marketplace"), false);
@@ -543,6 +1066,24 @@ test("regular VSIX builds are byte-identical and their packaged runtime exports 
     }
     assert.deepEqual(lock.packages[""].dependencies, rootPackage.dependencies);
     const vendorPrefix = "extension/vendor/codex-project-chat-exporter/";
+    assert.deepEqual(rootPackage.devDependencies, { marked: "18.0.14", "mdast-util-from-markdown": "2.0.3" });
+    assert.deepEqual(lock.packages[""].devDependencies, rootPackage.devDependencies);
+    const productionPackage = structuredClone(rootPackage), productionLock = structuredClone(lock);
+    delete productionPackage.devDependencies;
+    delete productionLock.packages[""].devDependencies;
+    const developmentPaths = Object.entries(lock.packages).filter(([, entry]) => entry.dev === true).map(([name]) => name);
+    assert.ok(developmentPaths.includes("node_modules/mdast-util-from-markdown"));
+    assert.ok(developmentPaths.includes("node_modules/marked"));
+    assert.ok(developmentPaths.includes("node_modules/micromark"));
+    for (const devPath of developmentPaths) {
+      delete productionLock.packages[devPath];
+      assert.equal(files.some((file) => file.name.startsWith(`${vendorPrefix}${devPath}/`)), false, devPath);
+    }
+    assert.deepEqual(JSON.parse(await zip.file(`${vendorPrefix}package.json`).async("string")), productionPackage);
+    assert.deepEqual(JSON.parse(await zip.file(`${vendorPrefix}package-lock.json`).async("string")), productionLock);
+    for (const name of ["scripts/build-vsix.mjs", "tests/packaged-vsix.test.mjs", "node_modules/mdast-util-from-markdown/index.js", "node_modules/marked/lib/marked.esm.js"]) {
+      assert.equal(zip.file(`extension/${name}`), null, name);
+    }
     const integrity = JSON.parse(await zip.file(`${vendorPrefix}integrity.json`).async("string"));
     const actualRuntimeFiles = files.map((file) => file.name).filter((name) => name.startsWith(vendorPrefix) && name !== `${vendorPrefix}integrity.json`).map((name) => name.slice(vendorPrefix.length)).sort();
     assert.deepEqual(Object.keys(integrity.files).sort(), actualRuntimeFiles);
