@@ -791,8 +791,9 @@ test("build-only manifest projection preserves mixed line endings and rejects du
     const productionPackage = '{\r\n  "name": "fixture",\n  "version": "1.0.0",\r\n  "type": "module",\n  "custom": ["literal \\\"devDependencies\\\": {}", {"quoted": "\\\\"}],\r\n  "dependencies": {}\r\n}\n';
     const productionLock = '{\n  "lockfileVersion": 3,\r\n  "packages": {\r\n    "": {"name": "fixture", "dependencies": {}}\n  }\r\n}\n';
     const dev = '"devDependencies": {"parser": "1.0.0"}';
+    assert.ok(productionPackage.startsWith("{"));
     const packageVariants = [
-      productionPackage.replace('{', `{ ${dev},`),
+      `{ ${dev},${productionPackage.slice(1)}`,
       productionPackage.replace('  "dependencies":', `  ${dev},\r\n  "dependencies":`),
       productionPackage.replace('"dependencies": {}', `"dependencies": {},\r\n  ${dev}`),
     ];
