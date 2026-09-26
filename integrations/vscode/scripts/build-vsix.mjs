@@ -6,6 +6,9 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
 import JSZip from "jszip";
+import xmlJs from "xml-js";
+import { fromMarkdown } from "mdast-util-from-markdown";
+import { Marked, Renderer } from "marked";
 
 const defaultExtensionRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const defaultRepoRoot = path.resolve(defaultExtensionRoot, "..", "..");
@@ -214,70 +217,347 @@ export async function resolveCheckedOutCommit(repoRoot) {
 
 export function transformPackagedReadme(sourceReadme, sourceRef) {
   if (typeof sourceReadme !== "string") throw new TypeError("VSIX README source must be text");
-  const transformations = packagedReadmeTransformations(validateSourceCommit(sourceRef));
-
-  const mappedRelativeTargets = new Set(transformations.map(({ source }) => source));
-  const relativeTargets = collectPackagedReadmeRelativeTargetLiterals(sourceReadme);
-  for (const target of relativeTargets) {
-    if (!mappedRelativeTargets.has(target)) throw new Error(`Unmapped relative VSIX README target: ${target}`);
-  }
-
+  sourceRef = validateSourceCommit(sourceRef);
+  const transformations = packagedReadmeTransformations(sourceRef);
+  const relativeTargets = new Map(transformations.map(({ source, packaged, expectedOccurrences }) => [
+    source.slice(source.startsWith('src="') ? 5 : 2, -1),
+    { target: packaged.slice(packaged.startsWith('src="') ? 5 : 2, -1), expectedOccurrences, occurrences: 0 },
+  ]));
+  const { tree, targets } = parseReadmeTargets(sourceReadme, sourceRef);
+  verifyReadmeRendererAgreement(sourceReadme);
+  const replacements = [];
+  const expected = new Map();
   let packagedReadme = sourceReadme;
-  for (const { source, packaged, expectedOccurrences } of transformations) {
-    const actualOccurrences = literalOccurrenceCount(packagedReadme, source);
-    if (actualOccurrences !== expectedOccurrences) {
-      throw new Error(`Expected ${expectedOccurrences} VSIX README occurrence(s) of ${source}, found ${actualOccurrences}`);
-    }
-    packagedReadme = packagedReadme.replaceAll(source, packaged);
+  for (const target of targets) {
+    // Markdown URLs already have exactly the parser's decoding. Never decode them again.
+    const decoded = target.url;
+    let bound;
+    let absolute = false;
+    try { new URL(decoded); absolute = true; } catch { /* Only approved relative files may be resolved. */ }
+    if (!absolute && !decoded.startsWith("#")) {
+      const suffixStart = Math.min(...[decoded.indexOf("?"), decoded.indexOf("#"), decoded.length].filter((index) => index >= 0));
+      const relative = relativeTargets.get(decoded.slice(0, suffixStart));
+      if (!relative) throw new Error(`Unmapped relative VSIX README target: ${decoded}`);
+      relative.occurrences++;
+      bound = new URL(relative.target + decoded.slice(suffixStart)).href;
+    } else bound = bindRepositoryContentUrl(decoded, sourceRef);
+    expected.set(target, bound);
+    if (bound === decoded) continue;
+    const replacement = target.quote ? escapeXml(bound).replaceAll("'", "&apos;")
+      : target.kind === "autolink" ? bound
+        : bound.replaceAll("&", "&amp;").replaceAll("\\", "\\\\").replaceAll("(", "\\(").replaceAll(")", "\\)");
+    replacements.push({ ...target, replacement });
   }
-
-  const remainingRelativeTargets = collectPackagedReadmeRelativeTargetLiterals(packagedReadme);
-  if (remainingRelativeTargets.length > 0) throw new Error(`Untransformed relative VSIX README target: ${remainingRelativeTargets[0]}`);
+  for (const [relative, { occurrences, expectedOccurrences }] of relativeTargets) {
+    if (occurrences !== expectedOccurrences) throw new Error(`Expected ${expectedOccurrences} VSIX README occurrence(s) of ${relative}, found ${occurrences}`);
+  }
+  for (const { start, end, replacement } of replacements.toReversed()) {
+    packagedReadme = packagedReadme.slice(0, start) + replacement + packagedReadme.slice(end);
+  }
+  const reparsed = parseReadmeTargets(packagedReadme, sourceRef);
+  verifyReadmeRendererAgreement(packagedReadme);
+  if (reparsed.targets.length !== targets.length || reparsed.targets.some((target, index) => target.url !== expected.get(targets[index]))) {
+    throw new Error("VSIX README semantic targets changed during replacement");
+  }
+  // Verify the complete semantic tree, not only the URL list: a replacement must
+  // not create another node, change a title/reference, or escape its source range.
+  for (const target of targets) {
+    const bound = expected.get(target);
+    if (!target.quote) target.node.url = bound;
+    if (target.kind === "autolink" && bound !== target.url) target.node.children[0].value = bound;
+  }
+  const htmlNodes = new Set(replacements.filter((target) => target.quote).map((target) => target.node));
+  for (const node of htmlNodes) {
+    let value = sourceReadme.slice(node.position.start.offset, node.position.end.offset);
+    for (const target of replacements.filter((target) => target.node === node).toReversed()) {
+      const start = target.start - node.position.start.offset, end = target.end - node.position.start.offset;
+      value = value.slice(0, start) + target.replacement + value.slice(end);
+    }
+    node.value = value;
+  }
+  const semanticTree = (value) => JSON.stringify(value, (key, child) => key === "position" ? undefined : child);
+  if (semanticTree(tree) !== semanticTree(reparsed.tree)) throw new Error("VSIX README structure changed during replacement");
   return packagedReadme;
 }
 
-function collectPackagedReadmeRelativeTargetLiterals(readme) {
-  const literals = [];
-  let cursor = 0;
-  while (cursor < readme.length) {
-    const marker = readme.indexOf("](", cursor);
-    if (marker < 0) break;
-    const end = readme.indexOf(")", marker + 2);
-    if (end < 0) throw new Error("Unterminated Markdown target in VSIX README");
-    const target = readme.slice(marker + 2, end).trim();
-    if (target && !target.startsWith("#") && !target.startsWith("https://")) literals.push(`](${target})`);
-    cursor = end + 1;
+function bindRepositoryContentUrl(target, sourceRef) {
+  if (target.startsWith("#")) return target;
+  let url;
+  try { url = new URL(target); }
+  catch { throw new Error(`Unsupported VSIX README URL: ${target}`); }
+  if (!["https:", "http:", "mailto:"].includes(url.protocol)
+    || url.hostname.includes("&") || target !== target.trim() || target.includes("\uFFFD")
+    || [...target].some((char) => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127)) {
+    throw new Error(`Unsupported VSIX README URL scheme or control character: ${target}`);
   }
-
-  cursor = 0;
-  while (cursor < readme.length) {
-    const imageStart = readme.indexOf("<img", cursor);
-    if (imageStart < 0) break;
-    const imageEnd = readme.indexOf(">", imageStart + 4);
-    if (imageEnd < 0) throw new Error("Unterminated HTML image in VSIX README");
-    const sourceStart = readme.indexOf('src="', imageStart + 4);
-    if (sourceStart >= 0 && sourceStart < imageEnd) {
-      const valueStart = sourceStart + 'src="'.length;
-      const valueEnd = readme.indexOf('"', valueStart);
-      if (valueEnd < 0 || valueEnd > imageEnd) throw new Error("Unterminated HTML image source in VSIX README");
-      const target = readme.slice(valueStart, valueEnd);
-      if (target && !target.startsWith("https://")) literals.push(`src="${target}"`);
-    }
-    cursor = imageEnd + 1;
+  const hostWithoutDot = url.hostname.endsWith(".") ? url.hostname.slice(0, -1) : url.hostname;
+  const host = hostWithoutDot.startsWith("www.") ? hostWithoutDot.slice(4) : hostWithoutDot;
+  const rawHost = host === "raw.githubusercontent.com";
+  if (host !== "github.com" && !rawHost) return target;
+  if (target.includes("\\")) throw new Error(`Ambiguous VSIX README repository URL: ${target}`);
+  const parts = url.pathname.split("/");
+  // Residual entity spelling here is literal (including deliberate double encoding).
+  // Do not decode it recursively or guess a repository identity from it.
+  if (parts.slice(1, 3).some((part) => part.includes("&"))) throw new Error(`Ambiguous VSIX README repository URL: ${target}`);
+  let identity;
+  try { identity = decodeURIComponent(url.pathname).split("/").slice(1, 3).map((part) => part.toLowerCase()); }
+  catch { throw new Error(`Ambiguous VSIX README repository URL: ${target}`); }
+  if (identity[0] !== "ann-diana" || identity[1] !== "codex-project-chat-exporter") return target;
+  const fail = () => { throw new Error(`Ambiguous or unsupported VSIX README repository URL: ${target}`); };
+  if (!target.startsWith("https://") || url.protocol !== "https:" || url.hostname !== host || url.username || url.password || url.port
+    || target !== target.trim() || target.includes("\\") || [...target].some((char) => char.charCodeAt(0) < 32)) fail();
+  // Inspect the original path before URL's dot-segment normalization can hide ambiguity.
+  const authorityEnd = target.indexOf("/", "https://".length);
+  const rawPath = target.slice(authorityEnd).split("?")[0].split("#")[0];
+  for (const segment of rawPath.split("/").slice(1)) {
+    let decoded;
+    try { decoded = decodeURIComponent(segment); } catch { fail(); }
+    if (decoded === "." || decoded === ".." || decoded.includes("/") || decoded.includes("\\")
+      || [...decoded].some((char) => char.charCodeAt(0) < 32)) fail();
   }
-  return literals;
+  if (rawHost) {
+    if (parts.length < 5 || !parts.slice(4).every(Boolean)) fail();
+    if (parts[3] !== "main") { try { validateSourceCommit(parts[3]); } catch { fail(); } }
+    parts[3] = sourceRef;
+  } else if (parts.length === 3 || (parts.length === 4 && parts[3] === "")) {
+    // Repository navigation stays live; a README/section anchor is versioned content.
+    if (!url.hash) return target;
+    url.pathname = `/${parts[1]}/${parts[2]}/tree/${sourceRef}`;
+    return url.href;
+  } else if (["blob", "raw", "tree"].includes(parts[3])) {
+    const contentParts = parts[3] === "tree" && parts.at(-1) === "" ? parts.slice(4, -1) : parts.slice(4);
+    if (contentParts.length < (parts[3] === "tree" ? 1 : 2) || !contentParts.every(Boolean)) fail();
+    // A slash-bearing branch/tag cannot be separated from its file path safely here.
+    // Accept main and complete commit IDs only; require explicit handling of other refs.
+    if (parts[4] !== "main") { try { validateSourceCommit(parts[4]); } catch { fail(); } }
+    parts[4] = sourceRef;
+  } else if (["issues", "pull", "pulls", "actions", "releases", "discussions", "projects", "security", "labels", "milestones", "branches", "tags"].includes(parts[3])) {
+    return target;
+  } else fail();
+  url.pathname = parts.join("/");
+  return url.href;
 }
 
-function literalOccurrenceCount(text, needle) {
-  let count = 0;
-  let cursor = 0;
-  while (cursor <= text.length - needle.length) {
-    const index = text.indexOf(needle, cursor);
-    if (index < 0) break;
-    count += 1;
-    cursor = index + needle.length;
+function parseReadmeTargets(readme, sourceRef) {
+  const destinations = new Map(), autolinks = new Map(), targets = [], definitions = new Map(), references = [];
+  const fail = () => { throw rendererAmbiguity("missing or ambiguous source mapping"); };
+  function destination(token) {
+    const node = this.stack.at(-1);
+    if (destinations.has(node)) fail();
+    let start = token.start.offset, end = token.end.offset;
+    if (readme[start] === "<") { if (readme[end - 1] !== ">") fail(); start++; end--; }
+    destinations.set(node, { node, start, end, kind: "markdown" });
   }
-  return count;
+  function autolinkMarker(token) {
+    const node = this.stack.at(-1);
+    if (readme.slice(token.start.offset, token.end.offset) === "<") autolinks.set(node, token.end.offset);
+    else {
+      if (!autolinks.has(node) || destinations.has(node)) fail();
+      const start = autolinks.get(node), end = token.start.offset;
+      // Renderers disagree on entity/escape decoding in URI autolinks. Reject
+      // these raw spellings rather than guessing or recursively decoding them.
+      const raw = readme.slice(start, end);
+      if (raw.includes("&") || raw.includes("\\")) {
+        throw Object.assign(new Error("Ambiguous VSIX README autolink: '&' and backslashes are not supported; use a normal Markdown link with an unambiguous URL instead."), {
+          code: "VSIX_README_AMBIGUOUS_AUTOLINK",
+        });
+      }
+      destinations.set(node, { node, start, end, kind: "autolink" });
+      autolinks.delete(node);
+    }
+  }
+  // These token exits have no default mdast handler. Observe positions without
+  // replacing the parser's decoding or link construction (including autolinks).
+  const tree = fromMarkdown(readme, { mdastExtensions: [{ exit: {
+    resourceDestination: destination, definitionDestination: destination, autolinkMarker,
+  } }] });
+  const walk = (node, insideLink = false, container = false) => {
+    if (["link", "image", "definition"].includes(node.type)) {
+      const target = destinations.get(node);
+      if (!target || typeof node.url !== "string" || !Number.isSafeInteger(target.start) || !Number.isSafeInteger(target.end)
+        || target.start < node.position.start.offset || target.end > node.position.end.offset || target.end <= target.start) fail();
+      targets.push({ ...target, url: node.url }); destinations.delete(node);
+      if (node.type === "definition") {
+        // Preserve the conservative contract for definitions inside containers.
+        if (container || definitions.has(node.identifier)) fail();
+        definitions.set(node.identifier, node);
+      }
+    } else if (["linkReference", "imageReference"].includes(node.type)) references.push(node);
+    else if (node.type === "html") targets.push(...htmlReadmeTargets(node, readme));
+    else if (node.type === "text" && !insideLink) {
+      // GFM may auto-link bare text that CommonMark leaves as text. This is only
+      // a conservative unsupported-syntax guard; parsed URLs decide ownership.
+      for (const match of node.value.matchAll(/https?:\/\/[^\s<>"']+/gi)) {
+        if (bindRepositoryContentUrl(match[0], sourceRef) !== match[0]) throw new Error("Unsupported VSIX README repository link syntax");
+      }
+    }
+    for (const child of node.children || []) walk(child, insideLink || ["link", "linkReference"].includes(node.type), container || ["blockquote", "listItem"].includes(node.type));
+  };
+  walk(tree);
+  if (destinations.size || autolinks.size || references.some((node) => !definitions.has(node.identifier))) fail();
+  targets.sort((left, right) => left.start - right.start);
+  for (let index = 1; index < targets.length; index++) if (targets[index].start < targets[index - 1].end) fail();
+  return { tree, targets };
+}
+
+function rendererAmbiguity(detail) {
+  return Object.assign(new Error(`Ambiguous VSIX README renderer interpretation: ${detail}`), { code: "VSIX_README_RENDERER_AMBIGUITY" });
+}
+
+export function verifyReadmeRendererAgreement(source) {
+  // Marked normalizes line endings before lexing. Use that same coordinate
+  // space for both graphs; replacements still use the original mdast offsets.
+  const readme = source.replace(/\r\n?/g, "\n");
+  const tree = fromMarkdown(readme), definitions = new Map(), mdast = [];
+  const fail = (detail) => { throw rendererAmbiguity(detail); };
+  const define = (node) => {
+    if (node.type === "definition") {
+      if (definitions.has(node.identifier)) fail("duplicate reference definition");
+      definitions.set(node.identifier, node);
+    }
+    for (const child of node.children || []) define(child);
+  };
+  define(tree);
+  const range = (node) => ({ start: node.position.start.offset, end: node.position.end.offset });
+  const htmlEntries = (node) => htmlReadmeTargets(node, readme).map((target) => ({
+    kind: target.occurrenceKind, url: target.url, start: target.start, end: target.end,
+  }));
+  const visit = (node) => {
+    if (["link", "image", "linkReference", "imageReference"].includes(node.type)) {
+      const target = node.type.endsWith("Reference") ? definitions.get(node.identifier) : node;
+      if (!target) fail("unresolved reference");
+      mdast.push({ kind: node.type.startsWith("image") ? "image" : "link", url: target.url, ...range(node) });
+    } else if (node.type === "html") mdast.push(...htmlEntries(node));
+    for (const child of node.children || []) visit(child);
+  };
+  visit(tree);
+
+  const renderer = new Renderer(), marked = new Marked();
+  marked.setOptions({ renderer, gfm: true, async: false });
+  const tokens = marked.lexer(readme), positions = new WeakMap(), rendered = [];
+  // Locate raw tokens inside their enclosing raw source range, in sibling order.
+  // Never search the whole document for an isolated link. Repeated references
+  // remain distinct; a missing/rewritten/overlapping range is rejected.
+  const locate = (siblings, start, end) => {
+    let cursor = start;
+    for (const token of siblings) {
+      if (typeof token.raw !== "string" || !token.raw || positions.has(token)) fail("missing token source range");
+      const offset = readme.indexOf(token.raw, cursor), limit = offset + token.raw.length;
+      if (offset < cursor || limit > end) fail("unmappable token source range");
+      positions.set(token, { start: offset, end: limit });
+      cursor = limit;
+      if (token.type === "image") continue; // Alt text never emits nested links/images.
+      if (token.tokens) locate(token.tokens, offset, limit);
+      if (token.items) locate(token.items, offset, limit);
+      if (token.type === "table") {
+        const cells = [...token.header, ...token.rows.flat()];
+        locate(cells.flatMap((cell) => cell.tokens), offset, limit);
+      }
+    }
+  };
+  locate(tokens, 0, readme.length);
+  // Read the default renderer's quoted attribute, not token.href: Marked leaves
+  // some entity spellings for HTML to decode. This separate HTML decoding step
+  // doubles backslashes so it cannot apply Markdown escape semantics again.
+  const renderedTarget = (html, kind) => {
+    const prefix = kind === "link" ? '<a href="' : '<img src="';
+    if (!html.startsWith(prefix)) fail("renderer omitted a link target");
+    const end = html.indexOf('"', prefix.length);
+    if (end < 0) fail("missing rendered attribute boundary");
+    const attribute = html.slice(prefix.length, end);
+    const nodes = fromMarkdown(`[target](<${attribute.replaceAll("\\", "\\\\")}>)`).children[0]?.children;
+    if (nodes?.length !== 1 || nodes[0].type !== "link") fail("unreadable rendered attribute");
+    return nodes[0].url;
+  };
+  for (const kind of ["link", "image"]) {
+    const original = renderer[kind];
+    renderer[kind] = function (token) {
+      const position = positions.get(token);
+      if (!position) fail("rendered occurrence without source position");
+      const entry = { kind, ...position };
+      rendered.push(entry); // Parent link precedes any image rendered inside it.
+      const html = original.call(this, token);
+      entry.url = renderedTarget(html, kind);
+      return html;
+    };
+  }
+  const originalHtml = renderer.html;
+  renderer.html = function (token) {
+    const position = positions.get(token);
+    if (!position || token.text !== readme.slice(position.start, position.end)) fail("unmappable raw HTML");
+    rendered.push(...htmlEntries({ position: { start: { offset: position.start }, end: { offset: position.end } } }));
+    return originalHtml.call(this, token);
+  };
+  marked.parser(tokens);
+  // URI serialization (e.g. Unicode/space percent encoding) is not Markdown
+  // decoding. A fixed synthetic base also covers relative files and anchors.
+  const effective = (url) => {
+    try { return new URL(url, "https://readme.invalid/").href; }
+    catch { return fail("invalid semantic URL"); }
+  };
+  if (mdast.length !== rendered.length) fail("different occurrence counts");
+  for (let index = 0; index < mdast.length; index++) {
+    const left = mdast[index], right = rendered[index];
+    if (left.kind !== right.kind || left.start !== right.start || left.end !== right.end || effective(left.url) !== effective(right.url)) {
+      fail(`different target, kind or source position at occurrence ${index + 1}`);
+    }
+  }
+  return { mdast, marked: rendered };
+}
+
+function htmlReadmeTargets(node, readme) {
+  // Raw HTML is a separate syntax. Retain a bounded, quoted-attribute subset;
+  // never apply Markdown backslash semantics to an HTML attribute.
+  const targets = [], limit = node.position.end.offset;
+  let pos = node.position.start.offset;
+  while (pos < limit) {
+    if (readme[pos] !== "<") { pos++; continue; }
+    pos++;
+    const closing = readme[pos] === "/";
+    if (closing) pos++;
+    const tag = /^[A-Za-z]+/.exec(readme.slice(pos, limit));
+    if (!tag || !["a", "img", "p", "br", "div", "span", "em", "strong", "b", "i", "small", "sub", "sup", "details", "summary", "kbd", "code", "hr"].includes(tag[0].toLowerCase())) throw new Error("Unsupported VSIX README HTML tag");
+    pos += tag[0].length;
+    const seen = new Set();
+    while (pos < limit) {
+      while (readme[pos]?.trim() === "") pos++;
+      if (readme[pos] === ">") { pos++; break; }
+      if (readme.slice(pos, pos + 2) === "/>") { pos += 2; break; }
+      const name = /^[A-Za-z_:][A-Za-z0-9_:.-]*/.exec(readme.slice(pos, limit));
+      if (closing || !name) throw new Error("Unsupported VSIX README HTML attribute");
+      pos += name[0].length;
+      while (readme[pos]?.trim() === "") pos++;
+      if (readme[pos++] !== "=") throw new Error("VSIX README HTML attributes must have quoted values");
+      while (readme[pos]?.trim() === "") pos++;
+      const quote = readme[pos++];
+      if (quote !== '"' && quote !== "'") throw new Error("VSIX README HTML attributes must have quoted values");
+      const end = readme.indexOf(quote, pos);
+      if (end < 0 || end >= limit) throw new Error("Unterminated VSIX README HTML attribute");
+      const key = name[0].toLowerCase();
+      if (seen.has(key)) throw new Error("Duplicate VSIX README HTML attribute");
+      seen.add(key);
+      if (["srcset", "imagesrcset", "poster", "background", "xlink:href"].includes(key)) throw rendererAmbiguity("unmapped HTML resource attribute");
+      if (key === "href" || key === "src") {
+        if ((key === "href" && tag[0].toLowerCase() !== "a") || (key === "src" && tag[0].toLowerCase() !== "img")) throw rendererAmbiguity("unsupported link-bearing HTML attribute");
+        const raw = readme.slice(pos, end);
+        // In HTML attributes, an unterminated named reference followed by '='
+        // stays literal. Other unterminated references are deliberately rejected.
+        const attribute = raw.replace(/&(?!(?:[A-Za-z][A-Za-z0-9]*|#[0-9]+|#x[0-9A-Fa-f]+);)/g, (amp, offset) => {
+          if (!/^[A-Za-z][A-Za-z0-9_-]*=/.test(raw.slice(offset + 1))) throw new Error("Ambiguous VSIX README HTML entity");
+          return "&amp;";
+        });
+        const url = xmlJs.xml2js(`<link value=${quote}${attribute}${quote}/>`, { compact: true }).link._attributes.value;
+        // Cross-check the strict XML subset with the Markdown entity decoder;
+        // reject XML-only case folding or numeric behavior rather than guessing.
+        const probe = fromMarkdown(`[target](<${raw.replaceAll("\\", "\\\\")}>)`).children[0]?.children;
+        if (probe?.length !== 1 || probe[0].type !== "link" || probe[0].url !== url) throw new Error("Ambiguous VSIX README HTML entity semantics");
+        targets.push({ node, start: pos, end, quote, kind: "html", occurrenceKind: key === "href" ? "link" : "image", url });
+      }
+      pos = end + 1;
+    }
+    if (readme[pos - 1] !== ">") throw new Error("Unterminated VSIX README HTML tag");
+  }
+  return targets;
 }
 
 async function copyVerifiedFile(source, destination, stageOwned, stage) {
@@ -291,8 +571,10 @@ async function copyVerifiedFile(source, destination, stageOwned, stage) {
 }
 
 async function packageExporterRuntime({ repoRoot, stage, stageOwned }) {
-  const packageJson = parseJsonFile(await fs.readFile(path.join(repoRoot, "package.json"), "utf8"), "root package.json");
-  const packageLock = parseJsonFile(await fs.readFile(path.join(repoRoot, "package-lock.json"), "utf8"), "root package-lock.json");
+  const packageSource = await fs.readFile(path.join(repoRoot, "package.json"), "utf8");
+  const lockSource = await fs.readFile(path.join(repoRoot, "package-lock.json"), "utf8");
+  const packageJson = parseJsonFile(packageSource, "root package.json");
+  const packageLock = parseJsonFile(lockSource, "root package-lock.json");
   validateProductionLock(packageJson, packageLock);
   const runtimeHashes = new Map();
   const copyRuntimeFile = async (source, relativePath) => {
@@ -303,7 +585,21 @@ async function packageExporterRuntime({ repoRoot, stage, stageOwned }) {
     runtimeHashes.set(normalized, hash);
   };
 
-  for (const relativePath of ["package.json", "package-lock.json", "LICENSE", "bin/export-codex-project-chats.mjs"]) {
+  // Build-only dependencies must not leak through either files or runtime metadata.
+  const productionPackage = structuredClone(packageJson), productionLock = structuredClone(packageLock);
+  delete productionPackage.devDependencies;
+  delete productionLock.packages[""].devDependencies;
+  for (const [key, entry] of Object.entries(productionLock.packages)) if (entry.dev === true) delete productionLock.packages[key];
+  for (const [relativePath, value, source] of [
+    ["package.json", productionPackage, packageSource], ["package-lock.json", productionLock, lockSource],
+  ]) {
+    // Omit fields by parsed object identity while retaining every other source
+    // byte, including mixed line endings in the existing production manifests.
+    const bytes = Buffer.from(projectJsonSource(source, value));
+    await writeOwnedStageFile(stageOwned, stage, path.join(stage, RUNTIME_ROOT, relativePath), bytes);
+    runtimeHashes.set(relativePath, createHash("sha256").update(bytes).digest("hex"));
+  }
+  for (const relativePath of ["LICENSE", "bin/export-codex-project-chats.mjs"]) {
     await copyRuntimeFile(path.join(repoRoot, ...relativePath.split("/")), relativePath);
   }
   await copyRuntimeDirectory(path.join(repoRoot, "lib"), "lib", copyRuntimeFile);
@@ -378,6 +674,77 @@ async function packageExporterRuntime({ repoRoot, stage, stageOwned }) {
     `${JSON.stringify({ format: 1, files: integrity }, null, 2)}\n`,
   );
   return path.join(stage, RUNTIME_ROOT, "bin", "export-codex-project-chats.mjs");
+}
+
+function projectJsonSource(source, projected) {
+  const edits = [];
+  let pos = 0;
+  const whitespace = () => { while ([" ", "\t", "\r", "\n"].includes(source[pos])) pos++; };
+  const string = () => {
+    const start = pos++;
+    while (pos < source.length) {
+      if (source[pos++] === '"') return JSON.parse(source.slice(start, pos));
+      if (source[pos - 1] === "\\") pos++;
+    }
+    throw new Error("Unterminated runtime manifest string");
+  };
+  const value = (selection, retain) => {
+    whitespace();
+    if (source[pos] === '"') { string(); return; }
+    if (source[pos] === "[") {
+      pos++; whitespace();
+      let index = 0;
+      while (source[pos] !== "]") {
+        value(selection?.[index++], retain); whitespace();
+        if (source[pos] !== ",") break;
+        pos++;
+      }
+      if (source[pos++] !== "]") throw new Error("Invalid runtime manifest array");
+      return;
+    }
+    if (source[pos] !== "{") {
+      while (pos < source.length && ![",", "}", "]", " ", "\t", "\r", "\n"].includes(source[pos])) pos++;
+      return;
+    }
+    const start = pos++, fields = [], seen = new Set();
+    whitespace();
+    while (source[pos] !== "}") {
+      if (source[pos] !== '"') throw new Error("Invalid runtime manifest object key");
+      const key = string();
+      if (seen.has(key)) throw new Error("Duplicate runtime manifest object key");
+      seen.add(key); whitespace();
+      if (source[pos++] !== ":") throw new Error("Invalid runtime manifest object");
+      const keep = Object.hasOwn(selection || {}, key);
+      value(selection?.[key], retain && keep);
+      const end = pos;
+      whitespace();
+      const comma = source[pos] === "," ? pos++ : null;
+      fields.push({ keep, end, comma });
+      whitespace();
+      if (comma === null) break;
+    }
+    if (source[pos++] !== "}") throw new Error("Invalid runtime manifest object end");
+    if (!retain) return;
+    for (let first = 0; first < fields.length; first++) {
+      if (fields[first].keep) continue;
+      let last = first;
+      while (last + 1 < fields.length && !fields[last + 1].keep) last++;
+      const following = last + 1 < fields.length;
+      edits.push({
+        start: first === 0 ? start + 1 : fields[first - 1].comma + (following ? 1 : 0),
+        end: following ? fields[last].comma + 1 : fields[last].end,
+      });
+      first = last;
+    }
+  };
+  // JSON.parse is the grammar/semantic validator; the scanner only locates fields.
+  JSON.parse(source);
+  value(projected, true); whitespace();
+  if (pos !== source.length) throw new Error("Unmapped runtime manifest source bytes");
+  let result = source;
+  for (const edit of edits.sort((a, b) => b.start - a.start)) result = result.slice(0, edit.start) + result.slice(edit.end);
+  if (JSON.stringify(JSON.parse(result)) !== JSON.stringify(projected)) throw new Error("Runtime manifest projection differs from production metadata");
+  return result;
 }
 
 function validateProductionLock(packageJson, packageLock) {

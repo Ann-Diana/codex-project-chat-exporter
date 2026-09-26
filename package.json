@@ -22,5 +22,9 @@
     "pdfkit": "0.20.1",
     "stream-json": "3.5.0",
     "xml-js": "1.6.11"
+  },
+  "devDependencies": {
+    "marked": "18.0.14",
+    "mdast-util-from-markdown": "2.0.3"
   }
 }
