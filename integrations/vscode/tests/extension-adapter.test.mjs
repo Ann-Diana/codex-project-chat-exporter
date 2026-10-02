@@ -199,7 +199,7 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
   ]);
   assert.equal("codexProjectChatExporter.includeOriginalJsonl" in extensionPackage.contributes.configuration.properties, false);
   assert.equal("codexProjectChatExporter.exportProfile" in extensionPackage.contributes.configuration.properties, false);
-  assert.equal(extensionPackage.version, "0.2.1", "the Marketplace candidate must install as a distinguishable extension version");
+  assert.equal(extensionPackage.version, "0.2.2", "the Marketplace candidate must install as a distinguishable extension version");
   assert.equal(extensionPackage.contributes.configuration.properties["codexProjectChatExporter.diagnosticOutput"].default, false);
   assert.equal(extensionPackage.contributes.configuration.properties["codexProjectChatExporter.outputDirectory"].scope, "machine");
   assert.equal(extensionPackage.contributes.configuration.properties["codexProjectChatExporter.codexHome"].scope, "machine");
@@ -232,14 +232,14 @@ const extensionPackage = JSON.parse(await fsp.readFile(path.resolve(path.dirname
 {
   const buildTemp = await fsp.realpath(await fsp.mkdtemp(path.join(os.tmpdir(), "codex-vsix-build-success-")));
   const distDir = path.join(buildTemp, "dist");
-  const currentCandidate = path.join(distDir, "codex-project-chat-exporter-vscode-0.2.1.vsix");
+  const currentCandidate = path.join(distDir, "codex-project-chat-exporter-vscode-0.2.2.vsix");
   await fsp.mkdir(distDir, { recursive: true });
   await fsp.writeFile(currentCandidate, "previous candidate", "utf8");
   const result = await buildVsix({
     distDir,
     archiveWriter: async ({ archivePath }) => fsp.writeFile(archivePath, "synthetic VSIX", "utf8"),
   });
-  assert.equal(path.basename(result.vsixPath), "codex-project-chat-exporter-vscode-0.2.1.vsix");
+  assert.equal(path.basename(result.vsixPath), "codex-project-chat-exporter-vscode-0.2.2.vsix");
   assert.equal(await fsp.readFile(result.vsixPath, "utf8"), "synthetic VSIX", "the exact canonical candidate may be replaced in a controlled publication step");
   assert.equal((await fsp.stat(result.vsixPath)).isFile(), true);
   assert.equal(await fsp.stat(result.stage).then(() => true, () => false), false, "successful builds must remove their stage directory");
@@ -1211,7 +1211,7 @@ for (const mode of ["recover", "menu", "dismiss-recovery", "dismiss-picker", "di
   const fake = createFakeVscode({ workspaceFolders: [folder(oneWorkspace)], config: { outputDirectory: modeOutput },
     warningSelector: (message) => {
       if (message.startsWith("No sessions were recorded")) return mode === "dismiss-recovery" ? undefined : "Choose project from Codex history";
-      if (mode === "dismiss-confirmation") return "Cancel";
+      if (mode === "dismiss-confirmation") return undefined;
       historicalConfirmed = true;
       return "Export recorded sessions";
     },
@@ -1254,7 +1254,7 @@ for (const mode of ["recover", "menu", "dismiss-recovery", "dismiss-picker", "di
     for (const variant of recordedVariants) assert.ok(picker.items[0].detail.includes(variant));
     const expectedWarning = `Export 2 sessions recorded under ${recorded.cwd}? This differs from the current workspace folder. Codex history may contain sessions from multiple logical projects under the same recorded folder.`;
     const confirmation = fake.messages.find(message => message.message === expectedWarning);
-    assert.deepEqual(confirmation.actions, [{ modal: true }, "Export recorded sessions", "Cancel"]);
+    assert.deepEqual(confirmation.actions, [{ modal: true }, "Export recorded sessions"]);
     assert.ok(fake.quickPicks.indexOf(picker) < fake.quickPicks.findIndex(entry => entry.options.placeHolder === "Choose an export profile"));
     assert.ok(fake.quickPicks.findIndex(entry => entry.options.placeHolder === "Choose an export profile") < fake.quickPicks.findIndex(entry => entry.options.placeHolder === "Choose optional document formats"));
     assert.equal([...context.globalState.values.values()].includes(recorded.cwd), false);
@@ -1263,6 +1263,57 @@ for (const mode of ["recover", "menu", "dismiss-recovery", "dismiss-picker", "di
     const recovery = fake.messages.find(message => message.message.startsWith("No sessions were recorded"));
     assert.equal(recovery.message, "No sessions were recorded for the current workspace folder. The project may have been moved, renamed or opened from another folder.");
     assert.deepEqual(recovery.actions, ["Choose project from Codex history"]);
+  }
+}
+
+// VS Code's native Cancel, Escape and close all resolve a modal warning to undefined.
+// These adapter tests model that API result; they do not simulate native GUI input.
+for (const [sessionCount, sessionLabel] of [[1, "1 session"], [3, "3 sessions"]]) {
+  for (const [dismissal, response] of [
+    ["native-cancel", undefined], ["escape", undefined], ["close", undefined],
+    ["legacy-cancel", "Cancel"], ["unexpected-action", "Export"],
+    ["object-with-title", { title: "Export recorded sessions" }],
+  ]) {
+    const destination = path.join(temp, `historical-modal-${sessionCount}-${dismissal}`);
+    const recorded = { cwd: "C:\\Synthetic\\Recorded", recordedPaths: ["C:\\Synthetic\\Recorded"], sessionCount, sourceBytes: 100 };
+    let confirmation = response;
+    let coreCalls = 0;
+    const fake = createFakeVscode({ workspaceFolders: [folder(oneWorkspace)], config: { outputDirectory: destination },
+      warningSelector: (message, actions) => {
+        assert.equal(message, `Export ${sessionLabel} recorded under ${recorded.cwd}? This differs from the current workspace folder. Codex history may contain sessions from multiple logical projects under the same recorded folder.`);
+        assert.deepEqual(actions, [{ modal: true }, "Export recorded sessions"], "only the positive action is supplied; VS Code supplies native Cancel");
+        return confirmation;
+      },
+      quickPickSelector: (items, options) => options.placeHolder === "Choose what to export" ? items.find(item => item.scope === "recorded-project") : items[0],
+    });
+    const context = createContext(temp);
+    const adapter = createExtensionAdapter(fake.vscode, {
+      discoverRecordedProjectInventory: async () => ({ sessionCount, projects: [recorded] }),
+      loadExporter: async () => ({ ...exporter, async exportArchive(options) {
+        coreCalls++;
+        assert.equal(confirmation, "Export recorded sessions");
+        assert.equal(options.scope, "recorded-project");
+        assert.equal(await options.onSelectRecordedProject({ projects: [recorded], reason: "requested" }), recorded.cwd);
+        return exporter.exportArchive(options);
+      } }),
+    });
+    await adapter.activate(context);
+    const oldSuccess = await savedExportFixture(`historical-previous-${sessionCount}-${dismissal}`);
+    await context.globalState.update(STATE_LAST_SUCCESS, oldSuccess);
+    const stateBefore = structuredClone([...context.globalState.values]);
+    assert.equal(await adapter.exportFromQuickPick(context), undefined, dismissal);
+    assert.equal(coreCalls, 0);
+    assert.deepEqual([...context.globalState.values], stateBefore, "dismissal preserves the last successful export");
+    assert.equal(fs.existsSync(destination), false);
+    assert.equal(fake.openDialogs.length, 0);
+    assert.equal(fake.quickPicks.some(pick => pick.options.placeHolder === "Choose an export profile"), false);
+    assert.equal(fake.messages.some(message => message.type === "error" || message.type === "info"), false);
+    const picker = fake.quickPicks.find(pick => pick.options.title === "Choose a project folder from Codex history");
+    assert.equal(picker.items[0].description.split(" · ")[0], sessionLabel);
+
+    confirmation = "Export recorded sessions";
+    assert.ok(await adapter.exportFromQuickPick(context), "dismissal must release the lock for the next confirmed export");
+    assert.equal(coreCalls, 1, "only the exact explicit positive action may reach the core");
   }
 }
 

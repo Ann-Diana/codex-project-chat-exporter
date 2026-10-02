@@ -399,7 +399,10 @@ test("public documentation keeps scope, format, privacy and version contracts co
 
   const extensionChangelog = await fs.readFile(path.join(repositoryRoot, "integrations", "vscode", "CHANGELOG.md"), "utf8");
   assert.ok(extensionChangelog.includes("## 0.2.0 – First Marketplace release"));
-  assert.ok(extensionChangelog.includes("## 0.2.1 – Unreleased"));
+  assert.ok(extensionChangelog.includes("## 0.2.2 – 2026-10-02"));
+  assert.equal(extensionChangelog.includes("## 0.2.2 – Unreleased"), false);
+  assert.ok(extensionChangelog.includes("## 0.2.1 – 2026-09-28"));
+  assert.equal(extensionChangelog.includes("## 0.2.1 – Unreleased"), false);
   assert.ok(extensionChangelog.includes("Bundled CLI remains 0.4.0"));
   assert.ok(extensionChangelog.includes("archive format 1, coverage schema 1 and asset schema 2 unchanged"));
 
@@ -423,7 +426,7 @@ test("public documentation keeps scope, format, privacy and version contracts co
   assert.equal(lockfile.version, rootPackage.version);
   assert.equal(lockfile.packages[""].version, rootPackage.version);
   const extensionPackage = JSON.parse(await fs.readFile(path.join(repositoryRoot, "integrations", "vscode", "package.json"), "utf8"));
-  assert.equal(extensionPackage.version, "0.2.1");
+  assert.equal(extensionPackage.version, "0.2.2");
   assert.equal(extensionPackage.contributes.configuration.properties["codexProjectChatExporter.outputDirectory"].description, "Absolute local folder where Codex exports are written. If empty, the extension asks for a folder for every export. A selected folder applies only to that export.");
   assert.equal(extensionPackage.publisher, "ann-diana");
   assert.equal(extensionPackage.name, "codex-project-chat-exporter-vscode");
