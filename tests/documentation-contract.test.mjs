@@ -394,7 +394,8 @@ test("public documentation keeps scope, format, privacy and version contracts co
   assert.ok(vscodeReadmeLower.includes("picker selections are never reused automatically"));
   assert.equal(vscodeReadmeLower.includes("remembered default"), false);
   assertSupportIssuesLink(documents["integrations/vscode/README.md"]);
-  assert.ok(documents["README.md"].includes("After Marketplace publication, install `ann-diana.codex-project-chat-exporter-vscode`"));
+  assert.ok(documents["README.md"].includes("Install `ann-diana.codex-project-chat-exporter-vscode` in VS Code Desktop from the [Marketplace]"));
+  assert.equal(/after (?:marketplace )?publication/i.test(documents["README.md"]), false);
 
   const extensionChangelog = await fs.readFile(path.join(repositoryRoot, "integrations", "vscode", "CHANGELOG.md"), "utf8");
   assert.ok(extensionChangelog.includes("## 0.2.0 – First Marketplace release"));

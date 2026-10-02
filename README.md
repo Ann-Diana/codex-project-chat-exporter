@@ -1,6 +1,10 @@
 # Codex Project Chat Exporter
 
-Export local Codex project history into independent, portable archives – including editable Word documents and searchable PDFs.
+Export your local OpenAI Codex conversations to Markdown, HTML, editable Word documents and searchable PDFs.
+
+**[Install from Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=ann-diana.codex-project-chat-exporter-vscode)** · Free and open source · No separate Node.js installation for the extension
+
+Keep a readable record of a project's decisions, review an earlier session or prepare a handoff. Choose the current workspace, a previous project or all local sessions. Exports run locally, with no telemetry or cloud conversion.
 
 [![Latest release](https://img.shields.io/github/v/release/Ann-Diana/codex-project-chat-exporter?style=flat-square&label=release)](https://github.com/Ann-Diana/codex-project-chat-exporter/releases/latest)
 [![CLI platforms](https://img.shields.io/badge/CLI-Windows%20%7C%20macOS%20%7C%20Linux-555?style=flat-square)](#choose-how-to-run)
@@ -26,7 +30,7 @@ Markdown, HTML, DOCX and PDF follow the same selected session content in the sam
 
 All entry points require local Codex session data.
 
-- **VS Code extension:** VS Code Desktop 1.101+ and the packaged VSIX. No separate Node.js installation is required.
+- **VS Code extension:** VS Code Desktop 1.101+ and the Marketplace extension or a packaged VSIX. No separate Node.js installation is required.
 - **Windows launcher:** a prepared project checkout with package dependencies installed. At runtime, the launcher uses Node.js 22+ from `PATH` or the known Codex Desktop runtime.
 - **Direct CLI:** Node.js 22+ and installed package dependencies.
 
@@ -47,7 +51,7 @@ Full-size originals: [HTML index](docs/screenshots/export-html-images.png) · [E
 | Entry point | Best for | Start |
 | --- | --- | --- |
 | Windows launcher | Interactive export outside VS Code | Double-click or run `export-codex-project-chats.cmd` |
-| Visual Studio Code extension | Guided export inside VS Code | Install from the Marketplace after publication or from a VSIX, then run `Codex Export: Export…` |
+| Visual Studio Code extension | Guided export inside VS Code | Install from the [Marketplace](https://marketplace.visualstudio.com/items?itemName=ann-diana.codex-project-chat-exporter-vscode) or from a VSIX, then run `Codex Export: Export…` |
 | Direct Node.js CLI | Cross-platform use and automation | Run `node .\bin\export-codex-project-chats.mjs` with explicit options |
 
 ## Windows launcher
@@ -70,7 +74,7 @@ Its menu exports all detected sessions or one project, lists projects and sessio
 
 ## Visual Studio Code quick start
 
-After Marketplace publication, install `ann-diana.codex-project-chat-exporter-vscode` in VS Code Desktop. A manual VSIX installation remains available as described in the [extension README](integrations/vscode/README.md). Then run **Codex Export: Export…**.
+Install `ann-diana.codex-project-chat-exporter-vscode` in VS Code Desktop from the [Marketplace](https://marketplace.visualstudio.com/items?itemName=ann-diana.codex-project-chat-exporter-vscode). A manual VSIX installation remains available as described in the [extension README](integrations/vscode/README.md). Then run **Codex Export: Export…**.
 
 VS Code must trust the local workspace before the extension can run; the packaged extension does not support untrusted workspaces.
 

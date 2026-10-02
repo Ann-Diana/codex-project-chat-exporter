@@ -129,7 +129,7 @@ export async function buildVsix(options = {}) {
     <DisplayName>${escapeXml(packageJson.displayName)}</DisplayName>
     <Description xml:space="preserve">${escapeXml(packageJson.description)}</Description>
     <Tags>${packageJson.keywords.map(escapeXml).join(",")}</Tags>
-    <Categories>Other</Categories>
+    <Categories>${packageJson.categories.map(escapeXml).join(",")}</Categories>
     <GalleryFlags>Public</GalleryFlags>
     <Properties>
       <Property Id="Microsoft.VisualStudio.Code.Engine" Value="${escapeXml(packageJson.engines.vscode)}"/>

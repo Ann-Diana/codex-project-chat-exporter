@@ -1,6 +1,10 @@
 # Codex Project Chat Exporter for Visual Studio Code
 
-Export local Codex project history from Visual Studio Code into independent, portable archives – including editable Word documents and searchable PDFs.
+Export your local OpenAI Codex conversations to Markdown, HTML, editable Word documents and searchable PDFs.
+
+Choose your current workspace, a previous project or all local sessions. Keep the results for project documentation, review or handoff.
+
+**Free and open source. No telemetry or cloud conversion. No separate Node.js installation required.** Original Codex data remains unchanged.
 
 [![VS Code](https://img.shields.io/badge/VS%20Code-1.101%2B-007ACC?style=flat-square)](#requirements)
 [![Manual test](https://img.shields.io/badge/manual%20test-Windows-0078D4?style=flat-square)](#tested-scope-and-limits)
@@ -11,9 +15,9 @@ Export local Codex project history from Visual Studio Code into independent, por
   <img src="images/codex-project-chat-exporter-hero.png" alt="Illustration of Codex chat windows being exported" width="820">
 </p>
 
-> **Direct DOCX and PDF generation – locally, from the same readable document model, without Word, LibreOffice or cloud conversion.**
+> **Open Codex Exporter → Export… → choose a scope and profile → Add DOCX and PDF → choose an output folder.**
 
-The extension is a guided local interface for the shared exporter core. It can export the current workspace, another project recorded in Codex history or every detected local session. Original Codex data remains unchanged.
+DOCX and PDF are generated directly on your computer, without Word or LibreOffice. Local Codex session files are required; ordinary ChatGPT web conversations and cloud-only tasks are outside the supported scope.
 
 ## Requirements
 

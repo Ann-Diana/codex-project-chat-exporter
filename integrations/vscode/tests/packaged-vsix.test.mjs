@@ -1030,6 +1030,9 @@ test("regular VSIX builds are byte-identical and their packaged runtime exports 
     const lock = JSON.parse(await fs.readFile("package-lock.json", "utf8"));
     const extensionPackage = JSON.parse(await fs.readFile(path.join("integrations", "vscode", "package.json"), "utf8"));
     assert.deepEqual(packagedExtensionManifest, extensionPackage);
+    assert.equal(elementText(collectElements(vsixManifest, "Categories")[0]), extensionPackage.categories.join(","));
+    assert.equal(elementText(collectElements(vsixManifest, "Tags")[0]), extensionPackage.keywords.join(","));
+    assert.ok(extensionPackage.keywords.length <= 30);
     assert.equal(extensionPackage.version, "0.2.1");
     assert.equal(extensionPackage.name, "codex-project-chat-exporter-vscode");
     assert.equal(extensionPackage.publisher, "ann-diana");
