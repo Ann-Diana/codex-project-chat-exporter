@@ -1,7 +1,7 @@
 {
   "name": "codex-project-chat-exporter-vscode",
   "displayName": "Codex Project Chat Exporter",
-  "description": "Export local Codex project sessions to Markdown, HTML, editable DOCX and searchable PDF, with optional verified source snapshots.",
+  "description": "Export OpenAI Codex chat history locally to Markdown, HTML, Word (DOCX) and searchable PDF. Current project, previous projects or all sessions.",
   "version": "0.2.1",
   "publisher": "ann-diana",
   "license": "MIT",
@@ -18,16 +18,31 @@
     "vscode": "^1.101.0"
   },
   "categories": [
+    "AI",
+    "Chat",
     "Other"
   ],
   "keywords": [
     "Codex",
     "Codex export",
+    "OpenAI Codex",
+    "Codex CLI",
+    "Codex Desktop",
     "chat export",
+    "conversation export",
+    "session export",
+    "chat history",
+    "conversation history",
     "local",
+    "offline",
+    "local-first",
     "sessions",
+    "archive",
     "JSONL",
     "Markdown",
+    "HTML",
+    "DOCX",
+    "Word",
     "PDF",
     "project-aware"
   ],
