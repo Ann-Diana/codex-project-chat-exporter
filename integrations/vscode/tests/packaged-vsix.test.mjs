@@ -969,7 +969,9 @@ test("regular VSIX builds are byte-identical and their packaged runtime exports 
     assert.ok(packagedChangelog, "packaged extension CHANGELOG is missing");
     assert.equal(packagedChangelog, await fs.readFile(path.join(extensionRoot, "CHANGELOG.md"), "utf8"));
     assert.ok(packagedChangelog.includes("## 0.2.0 – First Marketplace release"));
-    assert.ok(packagedChangelog.includes("## 0.2.1 – Unreleased"));
+    assert.ok(packagedChangelog.includes("## 0.2.2 – Unreleased"));
+    assert.ok(packagedChangelog.includes("## 0.2.1 – 2026-09-28"));
+    assert.equal(packagedChangelog.includes("## 0.2.1 – Unreleased"), false);
     for (const { source, packaged, expectedOccurrences } of PACKAGED_README_TRANSFORMATIONS) {
       assert.equal(literalOccurrenceCount(packagedReadme, source), 0, source);
       assert.equal(literalOccurrenceCount(packagedReadme, packaged), expectedOccurrences, packaged);
@@ -991,7 +993,7 @@ test("regular VSIX builds are byte-identical and their packaged runtime exports 
     assert.equal(identities.length, 1);
     assert.deepEqual(
       { id: identities[0].attributes.Id, publisher: identities[0].attributes.Publisher, version: identities[0].attributes.Version },
-      { id: "codex-project-chat-exporter-vscode", publisher: "ann-diana", version: "0.2.1" },
+      { id: "codex-project-chat-exporter-vscode", publisher: "ann-diana", version: "0.2.2" },
     );
     const changelogAssets = collectElements(vsixManifest, "Asset")
       .filter((element) => element.attributes?.Type === "Microsoft.VisualStudio.Services.Content.Changelog");
@@ -1033,7 +1035,7 @@ test("regular VSIX builds are byte-identical and their packaged runtime exports 
     assert.equal(elementText(collectElements(vsixManifest, "Categories")[0]), extensionPackage.categories.join(","));
     assert.equal(elementText(collectElements(vsixManifest, "Tags")[0]), extensionPackage.keywords.join(","));
     assert.ok(extensionPackage.keywords.length <= 30);
-    assert.equal(extensionPackage.version, "0.2.1");
+    assert.equal(extensionPackage.version, "0.2.2");
     assert.equal(extensionPackage.name, "codex-project-chat-exporter-vscode");
     assert.equal(extensionPackage.publisher, "ann-diana");
     assert.equal(extensionPackage.pricing, "Free");
