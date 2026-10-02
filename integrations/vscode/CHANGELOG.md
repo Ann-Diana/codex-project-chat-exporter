@@ -1,9 +1,10 @@
 # Changelog
 
-## 0.2.2 – Unreleased
+## 0.2.2 – 2026-10-02
 
 - Clarify the Marketplace description and README introductions for local OpenAI Codex exports.
 - Add AI and Chat categories and focused search keywords; derive packaged VSIX categories from the extension manifest.
+- Use VS Code's native Cancel action when confirming a historical project path, and show the correct singular or plural session count. Only explicit confirmation continues the export.
 - Verify packaged categories and keywords and correct the published 0.2.1 changelog date.
 - Bundled CLI remains 0.4.0; export behavior and archive, coverage and asset schemas are unchanged.
 

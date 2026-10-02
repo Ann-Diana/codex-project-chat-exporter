@@ -969,7 +969,8 @@ test("regular VSIX builds are byte-identical and their packaged runtime exports 
     assert.ok(packagedChangelog, "packaged extension CHANGELOG is missing");
     assert.equal(packagedChangelog, await fs.readFile(path.join(extensionRoot, "CHANGELOG.md"), "utf8"));
     assert.ok(packagedChangelog.includes("## 0.2.0 – First Marketplace release"));
-    assert.ok(packagedChangelog.includes("## 0.2.2 – Unreleased"));
+    assert.ok(packagedChangelog.includes("## 0.2.2 – 2026-10-02"));
+    assert.equal(packagedChangelog.includes("## 0.2.2 – Unreleased"), false);
     assert.ok(packagedChangelog.includes("## 0.2.1 – 2026-09-28"));
     assert.equal(packagedChangelog.includes("## 0.2.1 – Unreleased"), false);
     for (const { source, packaged, expectedOccurrences } of PACKAGED_README_TRANSFORMATIONS) {

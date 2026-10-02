@@ -399,7 +399,8 @@ test("public documentation keeps scope, format, privacy and version contracts co
 
   const extensionChangelog = await fs.readFile(path.join(repositoryRoot, "integrations", "vscode", "CHANGELOG.md"), "utf8");
   assert.ok(extensionChangelog.includes("## 0.2.0 – First Marketplace release"));
-  assert.ok(extensionChangelog.includes("## 0.2.2 – Unreleased"));
+  assert.ok(extensionChangelog.includes("## 0.2.2 – 2026-10-02"));
+  assert.equal(extensionChangelog.includes("## 0.2.2 – Unreleased"), false);
   assert.ok(extensionChangelog.includes("## 0.2.1 – 2026-09-28"));
   assert.equal(extensionChangelog.includes("## 0.2.1 – Unreleased"), false);
   assert.ok(extensionChangelog.includes("Bundled CLI remains 0.4.0"));

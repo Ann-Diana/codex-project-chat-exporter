@@ -176,10 +176,9 @@ function createExtensionAdapter(vscode, injected = {}) {
       && !currentWorkspacePaths.some((current) => sameIdentity(project.cwd, current));
     if (differsFromCurrentWorkspace) {
       const confirmation = await vscode.window.showWarningMessage(
-        `Export ${project.sessionCount} sessions recorded under ${displayRecordedPath(project.cwd)}? This differs from the current workspace folder. Codex history may contain sessions from multiple logical projects under the same recorded folder.`,
+        `Export ${project.sessionCount} ${project.sessionCount === 1 ? "session" : "sessions"} recorded under ${displayRecordedPath(project.cwd)}? This differs from the current workspace folder. Codex history may contain sessions from multiple logical projects under the same recorded folder.`,
         { modal: true },
         "Export recorded sessions",
-        "Cancel",
       );
       if (confirmation !== "Export recorded sessions") return null;
     }
